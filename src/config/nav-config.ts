@@ -14,6 +14,11 @@ export const navItems: NavItem[] = [
         title: 'Daily Summary',
         url: '/dashboard/hr/daily-summary',
         icon: 'dashboard'
+      },
+      {
+        title: 'Quebec Compliance',
+        url: '/dashboard/hr/quebec-compliance',
+        icon: 'mapPin'
       }
     ]
   }

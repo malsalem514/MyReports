@@ -11,10 +11,11 @@ This is an HR productivity dashboard built on Next.js 16 (App Router) that displ
 ## Current State
 
 ### What's Implemented
-- Simplified navigation showing only "HR Reports > Daily Summary"
-- Daily Summary table displaying ActivTrak productivity data from BigQuery
-- BigQuery client for fetching productivity data
-- BambooHR client for employee data
+- Simplified navigation showing only "HR Reports" with two reports
+- **Daily Summary** - ActivTrak productivity data table from BigQuery
+- **Quebec Compliance Report** - Office attendance tracking for Quebec employees (2 days/week rule)
+- BigQuery client for fetching productivity and attendance data
+- BambooHR client for employee data and location filtering
 - Oracle database connection pool (available but not currently used)
 - Clerk authentication has been **bypassed** (user doesn't use Clerk)
 - **Manager-based access control** - Users can only see their own data + their direct/indirect reports
@@ -25,7 +26,6 @@ This is an HR productivity dashboard built on Next.js 16 (App Router) that displ
 - Microsoft Entra ID SSO integration (currently using manual email input for testing)
 - Data sync system (BambooHR -> Oracle, BigQuery -> Oracle)
 - Employee detail pages
-- Charts and trend analysis
 
 ---
 
@@ -282,6 +282,48 @@ The Daily Summary page now includes:
 2. Enter a manager's email - Should see own data + reports
 3. Enter a regular employee's email - Should see only own data
 4. Enter an unknown email - Should see only that email's data (if exists in ActivTrak)
+
+---
+
+## Quebec Office Compliance Report
+
+### Business Rule
+Employees located in Quebec must work from the office at least **2 days per week**.
+
+### How It Works
+1. **Employee Filtering**: Uses BambooHR location field to identify Quebec employees
+   - Matches: Quebec, Québec, QC, Montreal, Montréal, Laval, Gatineau, Sherbrooke, Trois-Rivières, Longueuil
+
+2. **Attendance Data**: Fetches from BigQuery `daily_user_summary` table
+   - Uses `location` field (Office/Remote)
+   - Falls back to IP address analysis if location unavailable
+
+3. **Compliance Calculation**:
+   - Groups data by week (Monday-Sunday)
+   - Counts office days per week per employee
+   - Compliant = 2+ office days
+
+### Key File: `src/features/hr-dashboard/actions/quebec-compliance-actions.ts`
+```typescript
+export async function getQuebecComplianceReport(
+  filterEmail?: string,
+  weeksBack: number = 4
+): Promise<QuebecComplianceReport>
+```
+
+### Report Features
+- **Summary Cards**: Total employees, compliance rate, current week status
+- **Trend Chart**: Compliance rate over time (12 weeks)
+- **Employee Table**: Sortable by compliance status
+  - Current week status: Compliant / At Risk / Non-Compliant
+  - Office days vs Remote days
+  - Overall compliance rate
+- **Expandable Rows**: Weekly breakdown with daily details
+- **Status Filtering**: Filter by compliance status
+- **Manager Access Control**: Same filtering as Daily Summary
+
+### Page URL
+`/dashboard/hr/quebec-compliance`
 
 ---
 

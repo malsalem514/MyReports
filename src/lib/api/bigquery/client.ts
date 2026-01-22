@@ -337,6 +337,84 @@ export async function fetchProductivityTrend(
   }
 }
 
+// ============================================================================
+// Office Attendance Data (for Quebec Compliance)
+// ============================================================================
+
+export interface OfficeAttendanceRecord {
+  date: Date;
+  email: string;
+  location: 'Office' | 'Remote' | 'Unknown';
+  totalHours: number;
+}
+
+/**
+ * Fetch office attendance data with location field
+ */
+export async function fetchOfficeAttendanceData(
+  startDate: Date,
+  endDate: Date,
+  emails?: string[]
+): Promise<OfficeAttendanceRecord[]> {
+  const client = getBigQueryClient();
+
+  let query = `
+    SELECT
+      local_date,
+      user_name,
+      COALESCE(location, 'Unknown') as location,
+      ROUND(COALESCE(total_duration_seconds, 0) / 3600, 2) as total_hours
+    FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.${DAILY_USER_SUMMARY_TABLE}\`
+    WHERE local_date BETWEEN @startDate AND @endDate
+    AND total_duration_seconds > 0
+  `;
+
+  const params: Record<string, unknown> = {
+    startDate: formatDateForBigQuery(startDate),
+    endDate: formatDateForBigQuery(endDate)
+  };
+
+  if (emails && emails.length > 0) {
+    query += ` AND LOWER(user_name) IN UNNEST(@emails)`;
+    params.emails = emails.map((e) => e.toLowerCase());
+  }
+
+  query += ` ORDER BY local_date DESC, user_name`;
+
+  try {
+    const [rows] = await client.query({
+      query,
+      params,
+      location: 'US'
+    });
+
+    return rows.map((row) => ({
+      date: new Date(row.local_date.value || row.local_date),
+      email: row.user_name.toLowerCase(),
+      location: normalizeLocation(row.location),
+      totalHours: Number(row.total_hours) || 0
+    }));
+  } catch (error) {
+    console.error('BigQuery attendance query failed:', error);
+    throw new BigQueryError('Failed to fetch office attendance data', error);
+  }
+}
+
+/**
+ * Normalize location string to standard values
+ */
+function normalizeLocation(location: string | null): 'Office' | 'Remote' | 'Unknown' {
+  if (!location) return 'Unknown';
+  const normalized = location.toLowerCase().trim();
+  if (normalized === 'office' || normalized === 'on-site' || normalized === 'onsite') {
+    return 'Office';
+  }
+  if (normalized === 'remote' || normalized === 'home' || normalized === 'wfh') {
+    return 'Remote';
+  }
+  return 'Unknown';
+}
+
 /**
  * Get distinct emails from ActivTrak data
  */
