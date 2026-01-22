@@ -87,6 +87,7 @@ export function getBigQueryClient(): BigQuery {
 
 /**
  * Fetch productivity data for a date range
+ * Joins with user_identifiers to get email from user_id
  */
 export async function fetchProductivityData(
   startDate: Date,
@@ -95,25 +96,29 @@ export async function fetchProductivityData(
 ): Promise<DailyUserSummary[]> {
   const client = getBigQueryClient();
 
+  // Join with user_identifiers to get email
   let query = `
     SELECT
-      local_date,
-      user_name,
-      user_id,
-      productive_active_duration_seconds,
-      productive_passive_duration_seconds,
-      unproductive_active_duration_seconds,
-      unproductive_passive_duration_seconds,
-      undefined_active_duration_seconds,
-      undefined_passive_duration_seconds,
-      total_duration_seconds,
-      active_duration_seconds,
-      focused_duration_seconds,
-      collaboration_duration_seconds,
-      break_duration_seconds,
-      utilization_level
-    FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.${DAILY_USER_SUMMARY_TABLE}\`
-    WHERE local_date BETWEEN @startDate AND @endDate
+      d.local_date,
+      d.user_name,
+      d.user_id,
+      LOWER(ui.email) as user_email,
+      d.productive_active_duration_seconds,
+      d.productive_passive_duration_seconds,
+      d.unproductive_active_duration_seconds,
+      d.unproductive_passive_duration_seconds,
+      d.undefined_active_duration_seconds,
+      d.undefined_passive_duration_seconds,
+      d.total_duration_seconds,
+      d.active_duration_seconds,
+      d.focused_duration_seconds,
+      d.collaboration_duration_seconds,
+      d.break_duration_seconds,
+      d.utilization_level
+    FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.${DAILY_USER_SUMMARY_TABLE}\` d
+    LEFT JOIN \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.user_identifiers\` ui
+      ON d.user_id = ui.userid
+    WHERE d.local_date BETWEEN @startDate AND @endDate
   `;
 
   const params: Record<string, unknown> = {
@@ -122,11 +127,11 @@ export async function fetchProductivityData(
   };
 
   if (emails && emails.length > 0) {
-    query += ` AND LOWER(user_name) IN UNNEST(@emails)`;
+    query += ` AND LOWER(ui.email) IN UNNEST(@emails)`;
     params.emails = emails.map((e) => e.toLowerCase());
   }
 
-  query += ` ORDER BY local_date DESC, user_name`;
+  query += ` ORDER BY d.local_date DESC, ui.email`;
 
   try {
     const [rows] = await client.query({
@@ -139,7 +144,12 @@ export async function fetchProductivityData(
     const validatedRows: DailyUserSummary[] = [];
     for (const row of rows) {
       try {
-        const validated = DailyUserSummarySchema.parse(row);
+        // Add email to row before parsing
+        const rowWithEmail = {
+          ...row,
+          user_name: row.user_email || row.user_name // Use email if available
+        };
+        const validated = DailyUserSummarySchema.parse(rowWithEmail);
         validatedRows.push(validated);
       } catch (error) {
         console.warn('Invalid row from BigQuery:', row, error);
@@ -350,6 +360,7 @@ export interface OfficeAttendanceRecord {
 
 /**
  * Fetch office attendance data with location field
+ * Joins with user_identifiers to get email from user_id
  */
 export async function fetchOfficeAttendanceData(
   startDate: Date,
@@ -358,15 +369,20 @@ export async function fetchOfficeAttendanceData(
 ): Promise<OfficeAttendanceRecord[]> {
   const client = getBigQueryClient();
 
+  // Join daily_user_summary with user_identifiers to get email
   let query = `
     SELECT
-      local_date,
-      user_name,
-      COALESCE(location, 'Unknown') as location,
-      ROUND(COALESCE(total_duration_seconds, 0) / 3600, 2) as total_hours
-    FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.${DAILY_USER_SUMMARY_TABLE}\`
-    WHERE local_date BETWEEN @startDate AND @endDate
-    AND total_duration_seconds > 0
+      d.local_date,
+      d.user_name,
+      d.user_id,
+      LOWER(ui.email) as email,
+      COALESCE(d.location, 'Unknown') as location,
+      ROUND(COALESCE(d.total_duration_seconds, 0) / 3600, 2) as total_hours
+    FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.${DAILY_USER_SUMMARY_TABLE}\` d
+    LEFT JOIN \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.user_identifiers\` ui
+      ON d.user_id = ui.userid
+    WHERE d.local_date BETWEEN @startDate AND @endDate
+    AND d.total_duration_seconds > 0
   `;
 
   const params: Record<string, unknown> = {
@@ -375,11 +391,11 @@ export async function fetchOfficeAttendanceData(
   };
 
   if (emails && emails.length > 0) {
-    query += ` AND LOWER(user_name) IN UNNEST(@emails)`;
+    query += ` AND LOWER(ui.email) IN UNNEST(@emails)`;
     params.emails = emails.map((e) => e.toLowerCase());
   }
 
-  query += ` ORDER BY local_date DESC, user_name`;
+  query += ` ORDER BY d.local_date DESC, ui.email`;
 
   try {
     const [rows] = await client.query({
@@ -390,7 +406,7 @@ export async function fetchOfficeAttendanceData(
 
     return rows.map((row) => ({
       date: new Date(row.local_date.value || row.local_date),
-      email: row.user_name.toLowerCase(),
+      email: (row.email || row.user_name || '').toLowerCase(),
       location: normalizeLocation(row.location),
       totalHours: Number(row.total_hours) || 0
     }));
