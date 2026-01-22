@@ -1,6 +1,10 @@
 'use server';
 
 import { fetchProductivityData } from '@/lib/api/bigquery/client';
+import {
+  getAccessContextByEmail,
+  EmailBasedAccessContext
+} from '@/lib/auth/manager-access';
 
 export interface DailySummaryRow {
   date: string;
@@ -12,17 +16,37 @@ export interface DailySummaryRow {
   productivityPercent: number;
 }
 
+export interface DailySummaryResult {
+  data: DailySummaryRow[];
+  accessContext: EmailBasedAccessContext | null;
+  totalRecords: number;
+  filteredRecords: number;
+}
+
 /**
  * Fetch daily summary data from ActivTrak (BigQuery)
+ * Optionally filtered by user email and their allowed access
  */
-export async function getDailySummaryData(): Promise<DailySummaryRow[]> {
+export async function getDailySummaryData(
+  filterEmail?: string
+): Promise<DailySummaryResult> {
   try {
     // Get last 30 days of data
     const endDate = new Date();
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - 30);
 
-    const rawData = await fetchProductivityData(startDate, endDate);
+    // Get access context if email provided
+    let accessContext: EmailBasedAccessContext | null = null;
+    let allowedEmails: string[] | undefined = undefined;
+
+    if (filterEmail && filterEmail.trim()) {
+      accessContext = await getAccessContextByEmail(filterEmail);
+      allowedEmails = accessContext.allowedEmails;
+    }
+
+    // Fetch data from BigQuery, filtered by allowed emails if provided
+    const rawData = await fetchProductivityData(startDate, endDate, allowedEmails);
 
     // Transform to simpler format
     const result: DailySummaryRow[] = rawData.map((row) => {
@@ -51,9 +75,23 @@ export async function getDailySummaryData(): Promise<DailySummaryRow[]> {
       return a.userName.localeCompare(b.userName);
     });
 
-    return result;
+    return {
+      data: result,
+      accessContext,
+      totalRecords: result.length,
+      filteredRecords: result.length
+    };
   } catch (error) {
     console.error('Error fetching daily summary:', error);
     throw new Error('Failed to fetch daily summary data from ActivTrak');
   }
+}
+
+/**
+ * Get access context for an email (for UI display)
+ */
+export async function getAccessContext(
+  email: string
+): Promise<EmailBasedAccessContext> {
+  return getAccessContextByEmail(email);
 }

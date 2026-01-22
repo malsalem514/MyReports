@@ -1,4 +1,16 @@
 import type { Employee } from '@/lib/db/queries';
+import {
+  fetchEmployeeDirectory,
+  fetchReportingStructure,
+  BambooHREmployee
+} from '@/lib/api/bamboohr/client';
+
+// HR Admin emails - these users can see all employees
+const HR_ADMIN_EMAILS = [
+  'admin@company.com',
+  'hr@jestais.com',
+  // Add more HR admin emails here
+];
 
 // Check if Clerk is configured
 const hasClerkKeys = !!(
@@ -352,4 +364,144 @@ export async function hasHRDashboardAccess(): Promise<boolean> {
   // 2. A manager with reports
   // 3. An employee (can see own data)
   return context.isHRAdmin || context.isManager || context.employeeId !== null;
+}
+
+// ============================================================================
+// BambooHR-based Access Control (for email-based testing)
+// ============================================================================
+
+export interface EmailBasedAccessContext {
+  userEmail: string;
+  employeeId: string | null;
+  employeeName: string | null;
+  isHRAdmin: boolean;
+  isManager: boolean;
+  allowedEmails: string[];
+  directReportCount: number;
+  totalReportCount: number;
+}
+
+/**
+ * Get access context for a given email using BambooHR data
+ * This is used for testing with manual email input
+ */
+export async function getAccessContextByEmail(
+  userEmail: string
+): Promise<EmailBasedAccessContext> {
+  const normalizedEmail = userEmail.toLowerCase().trim();
+
+  // Check if HR admin - can see everyone
+  const isHRAdmin = HR_ADMIN_EMAILS.some(
+    (admin) => admin.toLowerCase() === normalizedEmail
+  );
+
+  try {
+    const allEmployees = await fetchEmployeeDirectory();
+
+    if (isHRAdmin) {
+      // HR admins see all employees
+      const allEmails = allEmployees
+        .filter((emp) => emp.workEmail)
+        .map((emp) => emp.workEmail!.toLowerCase());
+
+      return {
+        userEmail: normalizedEmail,
+        employeeId: null,
+        employeeName: 'HR Admin',
+        isHRAdmin: true,
+        isManager: true,
+        allowedEmails: allEmails,
+        directReportCount: allEmails.length,
+        totalReportCount: allEmails.length
+      };
+    }
+
+    // Find the user in BambooHR
+    const currentUser = allEmployees.find(
+      (emp) => emp.workEmail?.toLowerCase() === normalizedEmail
+    );
+
+    if (!currentUser) {
+      // User not found in BambooHR - can only see their own data
+      return {
+        userEmail: normalizedEmail,
+        employeeId: null,
+        employeeName: null,
+        isHRAdmin: false,
+        isManager: false,
+        allowedEmails: [normalizedEmail],
+        directReportCount: 0,
+        totalReportCount: 0
+      };
+    }
+
+    // Get all employees reporting to this user (direct + indirect)
+    const reports = await fetchReportingStructure(currentUser.id);
+
+    // Build list of allowed emails (self + all reports)
+    const allowedEmails = new Set<string>();
+    allowedEmails.add(normalizedEmail);
+
+    // Count direct reports
+    let directReportCount = 0;
+    for (const emp of allEmployees) {
+      if (
+        emp.supervisorId === currentUser.id ||
+        emp.supervisorEId === currentUser.id
+      ) {
+        directReportCount++;
+      }
+    }
+
+    // Add all reports' emails
+    for (const report of reports) {
+      if (report.workEmail) {
+        allowedEmails.add(report.workEmail.toLowerCase());
+      }
+    }
+
+    const userName = currentUser.displayName ||
+      `${currentUser.firstName || ''} ${currentUser.lastName || ''}`.trim() ||
+      normalizedEmail;
+
+    return {
+      userEmail: normalizedEmail,
+      employeeId: currentUser.id,
+      employeeName: userName,
+      isHRAdmin: false,
+      isManager: reports.length > 0,
+      allowedEmails: Array.from(allowedEmails),
+      directReportCount,
+      totalReportCount: reports.length
+    };
+  } catch (error) {
+    console.error('Error fetching access context from BambooHR:', error);
+    // On error, return minimal access (self only)
+    return {
+      userEmail: normalizedEmail,
+      employeeId: null,
+      employeeName: null,
+      isHRAdmin: false,
+      isManager: false,
+      allowedEmails: [normalizedEmail],
+      directReportCount: 0,
+      totalReportCount: 0
+    };
+  }
+}
+
+/**
+ * Get list of HR admin emails
+ */
+export function getHRAdminEmails(): string[] {
+  return [...HR_ADMIN_EMAILS];
+}
+
+/**
+ * Check if an email is an HR admin
+ */
+export function isHRAdminEmail(email: string): boolean {
+  return HR_ADMIN_EMAILS.some(
+    (admin) => admin.toLowerCase() === email.toLowerCase().trim()
+  );
 }

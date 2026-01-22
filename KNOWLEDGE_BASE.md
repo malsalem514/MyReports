@@ -14,14 +14,16 @@ This is an HR productivity dashboard built on Next.js 16 (App Router) that displ
 - Simplified navigation showing only "HR Reports > Daily Summary"
 - Daily Summary table displaying ActivTrak productivity data from BigQuery
 - BigQuery client for fetching productivity data
-- BambooHR client for employee data (available but not currently used)
+- BambooHR client for employee data
 - Oracle database connection pool (available but not currently used)
 - Clerk authentication has been **bypassed** (user doesn't use Clerk)
+- **Manager-based access control** - Users can only see their own data + their direct/indirect reports
+- **Email input for testing** - Manual email entry to test different user access levels
+- **HR Admin support** - Designated HR admins can see all employees
 
 ### What's NOT Implemented (from original plan)
-- Microsoft Entra ID SSO integration
+- Microsoft Entra ID SSO integration (currently using manual email input for testing)
 - Data sync system (BambooHR -> Oracle, BigQuery -> Oracle)
-- Manager access control / hierarchy
 - Employee detail pages
 - Charts and trend analysis
 
@@ -119,6 +121,8 @@ C:\musa\HR_Dashboard\
 │   │   │   │   └── client.ts                 # BigQuery client (ActivTrak)
 │   │   │   └── bamboohr/
 │   │   │       └── client.ts                 # BambooHR client
+│   │   ├── auth/
+│   │   │   └── manager-access.ts             # Manager access control (BambooHR-based)
 │   │   └── db/
 │   │       └── oracle.ts                     # Oracle connection pool
 │   ├── components/
@@ -169,12 +173,14 @@ Client component that:
 
 ### 4. Server Action (`src/features/hr-dashboard/actions/daily-summary-actions.ts`)
 ```typescript
-export async function getDailySummaryData(): Promise<DailySummaryRow[]>
+export async function getDailySummaryData(filterEmail?: string): Promise<DailySummaryResult>
 ```
+- Accepts optional email parameter for access filtering
 - Fetches last 30 days of data from BigQuery
+- Filters by allowed emails based on BambooHR hierarchy
 - Transforms seconds to hours
 - Calculates productivity percentage
-- Sorts by date descending, then by user name
+- Returns data + access context info
 
 ### 5. BigQuery Client (`src/lib/api/bigquery/client.ts`)
 Key functions:
@@ -222,6 +228,60 @@ Key functions:
 - `execute(sql, binds)` - Execute INSERT/UPDATE/DELETE
 - `executeTransaction(callback)` - Transaction wrapper
 - `healthCheck()` - Verify connection
+
+---
+
+## Manager Access Control
+
+### How It Works
+The system uses BambooHR's supervisor relationships to determine data access:
+
+1. **HR Admins** - See all employees' data
+2. **Managers** - See own data + direct reports + indirect reports (recursive)
+3. **Employees** - See only their own data
+4. **Unknown Users** - If email not in BambooHR, see only their own data
+
+### Key File: `src/lib/auth/manager-access.ts`
+```typescript
+export async function getAccessContextByEmail(userEmail: string): Promise<EmailBasedAccessContext>
+```
+
+Returns:
+```typescript
+interface EmailBasedAccessContext {
+  userEmail: string;
+  employeeId: string | null;
+  employeeName: string | null;
+  isHRAdmin: boolean;
+  isManager: boolean;
+  allowedEmails: string[];      // List of emails user can view
+  directReportCount: number;
+  totalReportCount: number;
+}
+```
+
+### HR Admin Configuration
+HR admin emails are defined in `src/lib/auth/manager-access.ts`:
+```typescript
+const HR_ADMIN_EMAILS = [
+  'admin@company.com',
+  'hr@jestais.com',
+  // Add more HR admin emails here
+];
+```
+
+### UI Features
+The Daily Summary page now includes:
+- **Email input field** - Enter any email to test access
+- **Access context display** - Shows user role (HR Admin/Manager/Employee)
+- **Report counts** - Shows direct and indirect report counts
+- **Automatic filtering** - Data table only shows allowed records
+
+### Testing Access Control
+1. Enter an HR admin email (e.g., `hr@jestais.com`) - Should see all employees
+2. Enter a manager's email - Should see own data + reports
+3. Enter a regular employee's email - Should see only own data
+4. Enter an unknown email - Should see only that email's data (if exists in ActivTrak)
 
 ---
 
