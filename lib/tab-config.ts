@@ -45,6 +45,13 @@ interface TabOverrideRow {
   VISIBLE: number;
 }
 
+// Hardcoded fallbacks when tables don't exist yet (before first sync/schema init)
+const FALLBACK_ROLES: Record<string, TabKey[]> = {
+  'hr-admin': [...TAB_KEYS],
+  'manager': ['overview', 'calendar', 'pulse', 'compliance', 'attendance', 'office-attendance', 'report', 'search'],
+  'employee': ['overview', 'calendar', 'attendance', 'search'],
+};
+
 /** Resolve visible tab keys for a user: role defaults + email overrides */
 export async function getVisibleTabs(
   email: string,
@@ -53,16 +60,31 @@ export async function getVisibleTabs(
   const role = resolveRole(access);
   const normalizedEmail = email.toLowerCase().trim();
 
-  const [roleDefaults, overrides] = await Promise.all([
-    query<TabRoleRow>(
-      `SELECT TAB_KEY, VISIBLE FROM TL_TAB_ROLES WHERE ROLE_NAME = :role`,
-      { role },
-    ),
-    query<TabOverrideRow>(
-      `SELECT TAB_KEY, VISIBLE FROM TL_TAB_OVERRIDES WHERE EMAIL = :email`,
-      { email: normalizedEmail },
-    ),
-  ]);
+  let roleDefaults: TabRoleRow[];
+  let overrides: TabOverrideRow[];
+  try {
+    [roleDefaults, overrides] = await Promise.all([
+      query<TabRoleRow>(
+        `SELECT TAB_KEY, VISIBLE FROM TL_TAB_ROLES WHERE ROLE_NAME = :role`,
+        { role },
+      ),
+      query<TabOverrideRow>(
+        `SELECT TAB_KEY, VISIBLE FROM TL_TAB_OVERRIDES WHERE EMAIL = :email`,
+        { email: normalizedEmail },
+      ),
+    ]);
+  } catch (err: unknown) {
+    // ORA-00942: table or view does not exist — fall back to hardcoded defaults
+    if (err && typeof err === 'object' && 'errorNum' in err && (err as { errorNum: number }).errorNum === 942) {
+      return FALLBACK_ROLES[role] || [...TAB_KEYS];
+    }
+    throw err;
+  }
+
+  // If no role rows exist yet (tables exist but empty), use fallback
+  if (roleDefaults.length === 0 && overrides.length === 0) {
+    return FALLBACK_ROLES[role] || [...TAB_KEYS];
+  }
 
   // Build visibility map: start with role defaults
   const visibility = new Map<string, boolean>();
