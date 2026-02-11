@@ -6,8 +6,13 @@ import {
   setOverride,
   removeOverride,
   getOverridesForEmail,
+  resolveRole,
+  getRoleDefaults,
+  TAB_KEYS,
 } from '@/lib/tab-config';
 import { initializeSchema } from '@/lib/oracle';
+import { getAccessContextByEmail } from '@/lib/access';
+import { getEmployees } from '@/lib/dashboard-data';
 
 interface TabsRequestBody {
   action: 'set-role' | 'set-override' | 'remove-override';
@@ -23,18 +28,66 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
+  // Employee search for autocomplete
+  const search = request.nextUrl.searchParams.get('search');
+  if (search) {
+    const employees = await getEmployees({ activeOnly: true });
+    const q = search.toLowerCase();
+    const matches = employees
+      .filter((e) =>
+        (e.email?.toLowerCase().includes(q)) ||
+        (e.displayName?.toLowerCase().includes(q)) ||
+        (e.firstName?.toLowerCase().includes(q)) ||
+        (e.lastName?.toLowerCase().includes(q))
+      )
+      .slice(0, 10)
+      .map((e) => ({
+        email: e.email?.toLowerCase() || '',
+        name: e.displayName || `${e.firstName || ''} ${e.lastName || ''}`.trim(),
+        department: e.department || '',
+        jobTitle: e.jobTitle || '',
+      }));
+    return NextResponse.json({ employees: matches });
+  }
+
+  // Load overrides + resolved role for a specific email
   const email = request.nextUrl.searchParams.get('email');
   if (!email) {
-    return NextResponse.json({ error: 'Missing email param' }, { status: 400 });
+    return NextResponse.json({ error: 'Missing email or search param' }, { status: 400 });
   }
 
   await initializeSchema();
-  const rows = await getOverridesForEmail(email);
+
+  const [overrideRows, accessCtx, roleDefaultRows] = await Promise.all([
+    getOverridesForEmail(email),
+    getAccessContextByEmail(email),
+    getRoleDefaults(),
+  ]);
+
+  const role = resolveRole(accessCtx);
   const overrides: Record<string, boolean> = {};
-  for (const row of rows) {
+  for (const row of overrideRows) {
     overrides[row.TAB_KEY] = row.VISIBLE === 1;
   }
-  return NextResponse.json({ overrides });
+
+  // Build role defaults for this user's role
+  const roleDefaults: Record<string, boolean> = {};
+  for (const tab of TAB_KEYS) {
+    roleDefaults[tab] = false;
+  }
+  for (const row of roleDefaultRows) {
+    if (row.ROLE_NAME === role) {
+      roleDefaults[row.TAB_KEY] = row.VISIBLE === 1;
+    }
+  }
+
+  return NextResponse.json({
+    role,
+    name: accessCtx.employeeName || email,
+    isManager: accessCtx.isManager,
+    overrides,
+    roleDefaults,
+  });
 }
 
 export async function POST(request: NextRequest) {
