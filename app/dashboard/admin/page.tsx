@@ -1,5 +1,6 @@
 import { getAccessContext } from '@/lib/access';
-import { getRoleDefaults, getOverridesForEmail, TAB_KEYS } from '@/lib/tab-config';
+import { getRoleDefaults, TAB_KEYS } from '@/lib/tab-config';
+import { initializeSchema } from '@/lib/oracle';
 import { redirect } from 'next/navigation';
 import { AdminClient } from './admin-client';
 
@@ -8,6 +9,9 @@ export default async function AdminPage() {
   if (!access.isHRAdmin) {
     redirect('/dashboard');
   }
+
+  // Ensure tab tables exist (idempotent — safe to call on every load)
+  await initializeSchema();
 
   const roleDefaults = await getRoleDefaults();
 

@@ -7,6 +7,7 @@ import {
   removeOverride,
   getOverridesForEmail,
 } from '@/lib/tab-config';
+import { initializeSchema } from '@/lib/oracle';
 
 interface TabsRequestBody {
   action: 'set-role' | 'set-override' | 'remove-override';
@@ -27,6 +28,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Missing email param' }, { status: 400 });
   }
 
+  await initializeSchema();
   const rows = await getOverridesForEmail(email);
   const overrides: Record<string, boolean> = {};
   for (const row of rows) {
@@ -48,6 +50,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Missing action or tabKey' }, { status: 400 });
   }
 
+  await initializeSchema();
   try {
     switch (action) {
       case 'set-role':
