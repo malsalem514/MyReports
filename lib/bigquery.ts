@@ -1,0 +1,315 @@
+import { BigQuery } from '@google-cloud/bigquery';
+import { z } from 'zod';
+import { cachified } from './cache';
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+const bigQueryConfig = {
+  projectId: process.env.BIGQUERY_PROJECT_ID || 'us-activtrak-ac-prod',
+  keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS,
+};
+
+const ACTIVTRAK_DATASET = process.env.BIGQUERY_DATASET || '672561';
+const DAILY_USER_SUMMARY_TABLE = 'daily_user_summary';
+
+// ============================================================================
+// Schemas
+// ============================================================================
+
+const RawDailyUserSummarySchema = z.object({
+  local_date: z.object({ value: z.string() }).transform((d) => new Date(d.value)),
+  user_name: z.string(),
+  user_id: z.number().optional(),
+  productive_active_duration_seconds: z.number().nullable().default(0),
+  productive_passive_duration_seconds: z.number().nullable().default(0),
+  unproductive_active_duration_seconds: z.number().nullable().default(0),
+  unproductive_passive_duration_seconds: z.number().nullable().default(0),
+  undefined_active_duration_seconds: z.number().nullable().default(0),
+  undefined_passive_duration_seconds: z.number().nullable().default(0),
+  total_duration_seconds: z.number().nullable().default(0),
+  active_duration_seconds: z.number().nullable().default(0),
+  focused_duration_seconds: z.number().nullable().default(0),
+  collaboration_duration_seconds: z.number().nullable().default(0),
+  break_duration_seconds: z.number().nullable().default(0),
+  utilization_level: z.string().nullable().optional(),
+});
+
+export const DailyUserSummarySchema = RawDailyUserSummarySchema.transform((raw) => {
+  const productive_time = (raw.productive_active_duration_seconds || 0) + (raw.productive_passive_duration_seconds || 0);
+  const unproductive_time = (raw.unproductive_active_duration_seconds || 0) + (raw.unproductive_passive_duration_seconds || 0);
+  const neutral_time = (raw.undefined_active_duration_seconds || 0) + (raw.undefined_passive_duration_seconds || 0);
+  const total_time = raw.total_duration_seconds || 0;
+
+  return {
+    date: raw.local_date,
+    username: raw.user_name,
+    email: raw.user_name,
+    productive_time,
+    unproductive_time,
+    neutral_time,
+    total_time,
+    productivity_score: total_time > 0 ? Math.round((productive_time / total_time) * 100) : null,
+    active_time: raw.active_duration_seconds || 0,
+    idle_time: raw.break_duration_seconds || 0,
+    offline_time: 0,
+    focus_time: raw.focused_duration_seconds || 0,
+    collaboration_time: raw.collaboration_duration_seconds || 0,
+  };
+});
+
+export type DailyUserSummary = z.infer<typeof DailyUserSummarySchema>;
+
+// ============================================================================
+// Client
+// ============================================================================
+
+let bigQueryClient: BigQuery | null = null;
+
+export function getBigQueryClient(): BigQuery {
+  if (!bigQueryClient) {
+    bigQueryClient = new BigQuery(bigQueryConfig);
+  }
+  return bigQueryClient;
+}
+
+// ============================================================================
+// Productivity Data
+// ============================================================================
+
+async function _fetchProductivityDataUncached(
+  startDateStr: string,
+  endDateStr: string,
+  emails?: string[],
+): Promise<DailyUserSummary[]> {
+  const client = getBigQueryClient();
+
+  let sql = `
+    WITH user_emails AS (
+      SELECT userid, LOWER(email) as email,
+        ROW_NUMBER() OVER (PARTITION BY userid ORDER BY email) as rn
+      FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.user_identifiers\`
+      WHERE email IS NOT NULL
+    )
+    SELECT DISTINCT d.local_date, d.user_name, d.user_id, ue.email as user_email,
+      d.productive_active_duration_seconds, d.productive_passive_duration_seconds,
+      d.unproductive_active_duration_seconds, d.unproductive_passive_duration_seconds,
+      d.undefined_active_duration_seconds, d.undefined_passive_duration_seconds,
+      d.total_duration_seconds, d.active_duration_seconds,
+      d.focused_duration_seconds, d.collaboration_duration_seconds,
+      d.break_duration_seconds, d.utilization_level
+    FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.${DAILY_USER_SUMMARY_TABLE}\` d
+    LEFT JOIN user_emails ue ON d.user_id = ue.userid AND ue.rn = 1
+    WHERE d.local_date BETWEEN @startDate AND @endDate
+  `;
+
+  const params: Record<string, unknown> = { startDate: startDateStr, endDate: endDateStr };
+
+  if (emails && emails.length > 0) {
+    sql += ` AND ue.email IN UNNEST(@emails)`;
+    params.emails = emails.map((e) => e.toLowerCase());
+  }
+
+  sql += ` ORDER BY d.local_date DESC, ue.email`;
+
+  const [rows] = await client.query({ query: sql, params, location: 'US' });
+
+  const validated: DailyUserSummary[] = [];
+  for (const row of rows) {
+    try {
+      validated.push(DailyUserSummarySchema.parse({ ...row, user_name: row.user_email || row.user_name }));
+    } catch (error) {
+      console.warn('Invalid row from BigQuery:', row, error);
+    }
+  }
+  return validated;
+}
+
+export async function fetchProductivityData(
+  startDate: Date,
+  endDate: Date,
+  emails?: string[],
+): Promise<DailyUserSummary[]> {
+  const startDateStr = formatDate(startDate);
+  const endDateStr = formatDate(endDate);
+  const emailsKey = emails ? emails.slice().sort().join(',') : 'all';
+
+  try {
+    return await cachified({
+      key: `bigquery:productivity:${startDateStr}:${endDateStr}:${emailsKey}`,
+      ttl: 1000 * 60 * 5,
+      staleWhileRevalidate: 1000 * 60 * 15,
+      getFreshValue: () => _fetchProductivityDataUncached(startDateStr, endDateStr, emails),
+    });
+  } catch (error) {
+    console.error('BigQuery query failed:', error);
+    throw new BigQueryError('Failed to fetch productivity data', error);
+  }
+}
+
+export async function fetchProductivityStats(
+  startDate: Date,
+  endDate: Date,
+  emails?: string[],
+): Promise<{
+  totalEmployees: number;
+  avgProductivityScore: number;
+  totalProductiveHours: number;
+  totalTrackedHours: number;
+}> {
+  const client = getBigQueryClient();
+
+  let sql = `
+    SELECT
+      COUNT(DISTINCT user_name) as total_employees,
+      ROUND(SAFE_DIVIDE(
+        SUM(COALESCE(productive_active_duration_seconds, 0) + COALESCE(productive_passive_duration_seconds, 0)),
+        SUM(COALESCE(total_duration_seconds, 0))
+      ) * 100, 2) as avg_productivity_score,
+      ROUND(SUM(COALESCE(productive_active_duration_seconds, 0) + COALESCE(productive_passive_duration_seconds, 0)) / 3600, 2) as total_productive_hours,
+      ROUND(SUM(COALESCE(total_duration_seconds, 0)) / 3600, 2) as total_tracked_hours
+    FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.${DAILY_USER_SUMMARY_TABLE}\`
+    WHERE local_date BETWEEN @startDate AND @endDate
+  `;
+
+  const params: Record<string, unknown> = { startDate: formatDate(startDate), endDate: formatDate(endDate) };
+
+  if (emails && emails.length > 0) {
+    sql += ` AND LOWER(user_name) IN UNNEST(@emails)`;
+    params.emails = emails.map((e) => e.toLowerCase());
+  }
+
+  const [rows] = await client.query({ query: sql, params, location: 'US' });
+  const row = rows[0] || {};
+  return {
+    totalEmployees: Number(row.total_employees) || 0,
+    avgProductivityScore: Number(row.avg_productivity_score) || 0,
+    totalProductiveHours: Number(row.total_productive_hours) || 0,
+    totalTrackedHours: Number(row.total_tracked_hours) || 0,
+  };
+}
+
+// ============================================================================
+// Office Attendance
+// ============================================================================
+
+export interface OfficeAttendanceRecord {
+  date: Date;
+  email: string;
+  displayName: string;
+  location: 'Office' | 'Remote' | 'Unknown';
+  totalHours: number;
+  isPTO: boolean;
+  ptoType: string | null;
+  ptoHours: number;
+}
+
+async function _fetchOfficeAttendanceDataUncached(
+  startDateStr: string,
+  endDateStr: string,
+  emails?: string[],
+): Promise<OfficeAttendanceRecord[]> {
+  const client = getBigQueryClient();
+
+  let sql = `
+    WITH user_emails AS (
+      SELECT userid, LOWER(email) as email,
+        ROW_NUMBER() OVER (PARTITION BY userid ORDER BY email) as rn
+      FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.user_identifiers\`
+      WHERE email IS NOT NULL
+    )
+    SELECT DISTINCT d.local_date, d.user_name, d.user_id, ue.email,
+      COALESCE(d.location, 'Unknown') as location,
+      ROUND(COALESCE(d.total_duration_seconds, 0) / 3600, 2) as total_hours,
+      COALESCE(d.time_off_duration_seconds, 0) as time_off_seconds,
+      d.time_off_type, d.time_off_day_count
+    FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.${DAILY_USER_SUMMARY_TABLE}\` d
+    LEFT JOIN user_emails ue ON d.user_id = ue.userid AND ue.rn = 1
+    WHERE d.local_date BETWEEN @startDate AND @endDate
+  `;
+
+  const params: Record<string, unknown> = { startDate: startDateStr, endDate: endDateStr };
+
+  if (emails && emails.length > 0) {
+    sql += ` AND ue.email IN UNNEST(@emails)`;
+    params.emails = emails.map((e) => e.toLowerCase());
+  }
+
+  sql += ` ORDER BY d.local_date DESC, ue.email`;
+
+  const [rows] = await client.query({ query: sql, params, location: 'US' });
+
+  return rows.map((row: Record<string, unknown>) => {
+    const ptoHours = Number(row.time_off_seconds || 0) / 3600;
+    const isPTO = ptoHours > 0 || ((row.time_off_day_count as number) > 0);
+    return {
+      date: new Date((row.local_date as { value: string })?.value || (row.local_date as string)),
+      email: ((row.email as string) || '').toLowerCase(),
+      displayName: (row.user_name as string) || '',
+      location: normalizeLocation(row.location as string),
+      totalHours: Number(row.total_hours) || 0,
+      isPTO,
+      ptoType: (row.time_off_type as string) || null,
+      ptoHours,
+    };
+  });
+}
+
+export async function fetchOfficeAttendanceData(
+  startDate: Date,
+  endDate: Date,
+  emails?: string[],
+): Promise<OfficeAttendanceRecord[]> {
+  const startDateStr = formatDate(startDate);
+  const endDateStr = formatDate(endDate);
+  const emailsKey = emails ? emails.slice().sort().join(',') : 'all';
+
+  try {
+    return await cachified({
+      key: `bigquery:attendance:${startDateStr}:${endDateStr}:${emailsKey}`,
+      ttl: 1000 * 60 * 5,
+      staleWhileRevalidate: 1000 * 60 * 15,
+      getFreshValue: () => _fetchOfficeAttendanceDataUncached(startDateStr, endDateStr, emails),
+    });
+  } catch (error) {
+    console.error('BigQuery attendance query failed:', error);
+    throw new BigQueryError('Failed to fetch office attendance data', error);
+  }
+}
+
+// ============================================================================
+// Utilities
+// ============================================================================
+
+function formatDate(date: Date): string {
+  return date.toISOString().split('T')[0] ?? '';
+}
+
+function normalizeLocation(location: string | null): 'Office' | 'Remote' | 'Unknown' {
+  if (!location) return 'Unknown';
+  const n = location.toLowerCase().trim();
+  // Office wins: any presence in the office makes it an office day
+  if (n.includes('office') || n === 'on-site' || n === 'onsite') return 'Office';
+  if (n.includes('remote') || n === 'home' || n === 'wfh') return 'Remote';
+  return 'Unknown';
+}
+
+export class BigQueryError extends Error {
+  public readonly cause: unknown;
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = 'BigQueryError';
+    this.cause = cause;
+  }
+}
+
+export async function healthCheck(): Promise<boolean> {
+  try {
+    const client = getBigQueryClient();
+    const [rows] = await client.query({ query: 'SELECT 1 as result', location: 'US' });
+    return rows[0]?.result === 1;
+  } catch {
+    return false;
+  }
+}
