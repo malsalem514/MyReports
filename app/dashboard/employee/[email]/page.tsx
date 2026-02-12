@@ -136,9 +136,9 @@ export default async function EmployeePage({
         </div>
         <div className="overflow-x-auto">
           <table className="w-full">
-            <thead>
+            <thead className="sticky top-0 z-20 bg-white">
               <tr className="border-b border-gray-100">
-                <th className="px-6 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Date</th>
+                <th className="bg-white px-6 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Date</th>
                 <th className="px-6 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Location</th>
                 <th className="px-6 py-3 text-right text-[11px] font-medium uppercase tracking-wider text-gray-500">Hours</th>
                 <th className="px-6 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">PTO</th>

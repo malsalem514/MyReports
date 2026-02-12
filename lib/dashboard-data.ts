@@ -706,6 +706,210 @@ export async function getTbsComparisonReport(
   };
 }
 
+// ============================================================================
+// Payroll Audit Report — queries V_DAILY_EMPLOYEE_HOURS view
+// Hierarchy: Week → Employee → Day (matching PBI grouped layout)
+// ============================================================================
+
+/** One day detail row */
+export interface PayrollDayRow {
+  date: string;
+  dayLabel: string;
+  tbsReported: number;
+  tbsAbsence: number;
+  totalTbs: number;
+  bambooHours: number | null;
+  discrepancy: number | null;
+}
+
+/** Per-employee subtotal within a week */
+export interface PayrollEmployeeTotal {
+  name: string;
+  email: string;
+  tbsReported: number;
+  tbsAbsence: number;
+  totalTbs: number;
+  bambooHours: number | null;
+  discrepancy: number | null;
+  reportingTo: string;
+  jobTitle: string;
+  department: string;
+  days: PayrollDayRow[];
+}
+
+/** One week group containing employees */
+export interface PayrollWeekGroup {
+  week: string; // YYYY-MM-DD (Monday)
+  employees: PayrollEmployeeTotal[];
+  subtotal: PayrollGrandTotal;
+}
+
+export interface PayrollGrandTotal {
+  tbsReported: number;
+  tbsAbsence: number;
+  totalTbs: number;
+  bambooHours: number;
+  discrepancy: number;
+}
+
+export interface PayrollAuditResult {
+  weeks: PayrollWeekGroup[];
+  grandTotal: PayrollGrandTotal;
+  lookbackWeeks: number;
+  managers: string[];
+  departments: string[];
+}
+
+export const PAYROLL_LOOKBACK_OPTIONS = [2, 4, 6, 8, 12, 16];
+
+export async function getPayrollAuditReport(
+  lookbackWeeks: number,
+  emails?: string[],
+): Promise<PayrollAuditResult> {
+  const params: Record<string, unknown> = { lookbackDays: lookbackWeeks * 7 };
+  let emailFilter = '';
+  if (emails && emails.length > 0) {
+    const placeholders = emails.map((_, i) => `:em${i}`).join(',');
+    emailFilter = ` AND LOWER(v.EMAIL) IN (${placeholders})`;
+    emails.forEach((email, i) => { params[`em${i}`] = email.toLowerCase(); });
+  }
+
+  const rows = await query<{
+    EMAIL: string; EMPLOYEE_NAME: string; TBS_ENTRY_DATE: Date;
+    ACTIVITY_WEEK: Date; EMPLOYEE_NO: number;
+    REPORTED_HOURS: number; ABSENCE_HOURS: number; TOTAL_TBS: number;
+    BAMBOO_HOURS_PER_DAY: number; TBS_BAMBOO_DISCREPANCY: number;
+    ACTIVE_DURATION: number; TOTAL_DURATION: number;
+    PRODUCTIVE_ACTIVE_DURATION: number;
+    DEPARTMENT_BHR: string; JOB_TITLE_BHR: string; LOCATION_BHR: string;
+    REPORTING_TO: string; WORK_LOCATION: string;
+  }>(
+    `SELECT v.*
+     FROM V_DAILY_EMPLOYEE_HOURS v
+     WHERE v.ACTIVITY_WEEK >= TRUNC(SYSDATE - :lookbackDays, 'IW')
+       AND v.ACTIVITY_WEEK <= TRUNC(SYSDATE, 'IW')
+     ${emailFilter}
+     ORDER BY v.ACTIVITY_WEEK DESC, v.EMPLOYEE_NAME, v.TBS_ENTRY_DATE`,
+    params,
+  );
+
+  const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  // Group: week → email → days
+  const weekMap = new Map<string, Map<string, PayrollEmployeeTotal>>();
+
+  for (const row of rows) {
+    const weekStr = toDateStr(row.ACTIVITY_WEEK);
+    const email = row.EMAIL;
+
+    if (!weekMap.has(weekStr)) weekMap.set(weekStr, new Map());
+    const empMap = weekMap.get(weekStr)!;
+
+    let emp = empMap.get(email);
+    if (!emp) {
+      emp = {
+        name: row.EMPLOYEE_NAME || email,
+        email,
+        tbsReported: 0, tbsAbsence: 0, totalTbs: 0,
+        bambooHours: null, discrepancy: null,
+        reportingTo: row.REPORTING_TO || '',
+        jobTitle: row.JOB_TITLE_BHR || '',
+        department: row.DEPARTMENT_BHR || '',
+        days: [],
+      };
+      empMap.set(email, emp);
+    }
+
+    const dayReported = row.REPORTED_HOURS || 0;
+    const dayAbsence = row.ABSENCE_HOURS || 0;
+    const dayTotal = row.TOTAL_TBS || 0;
+    const bamboo = row.BAMBOO_HOURS_PER_DAY;
+    const disc = row.TBS_BAMBOO_DISCREPANCY;
+
+    emp.tbsReported += dayReported;
+    emp.tbsAbsence += dayAbsence;
+    emp.totalTbs += dayTotal;
+    if (bamboo != null) emp.bambooHours = (emp.bambooHours ?? 0) + bamboo;
+    if (disc != null) emp.discrepancy = (emp.discrepancy ?? 0) + disc;
+
+    const d = row.TBS_ENTRY_DATE instanceof Date ? row.TBS_ENTRY_DATE : new Date(row.TBS_ENTRY_DATE);
+    emp.days.push({
+      date: toDateStr(d),
+      dayLabel: DAY_LABELS[d.getDay()] || '',
+      tbsReported: dayReported,
+      tbsAbsence: dayAbsence,
+      totalTbs: dayTotal,
+      bambooHours: bamboo,
+      discrepancy: disc,
+    });
+  }
+
+  // Build week groups (sorted DESC — most recent first)
+  const weeks: PayrollWeekGroup[] = [];
+  const grandTotal: PayrollGrandTotal = { tbsReported: 0, tbsAbsence: 0, totalTbs: 0, bambooHours: 0, discrepancy: 0 };
+  const allDepartments = new Set<string>();
+  const allManagers = new Set<string>();
+
+  const sortedWeekKeys = [...weekMap.keys()].sort((a, b) => b.localeCompare(a));
+
+  for (const weekStr of sortedWeekKeys) {
+    const empMap = weekMap.get(weekStr)!;
+    const employees = Array.from(empMap.values());
+    employees.sort((a, b) => a.name.localeCompare(b.name));
+
+    const subtotal: PayrollGrandTotal = { tbsReported: 0, tbsAbsence: 0, totalTbs: 0, bambooHours: 0, discrepancy: 0 };
+
+    for (const emp of employees) {
+      emp.tbsReported = round2(emp.tbsReported);
+      emp.tbsAbsence = round2(emp.tbsAbsence);
+      emp.totalTbs = round2(emp.totalTbs);
+      if (emp.bambooHours != null) emp.bambooHours = round2(emp.bambooHours);
+      if (emp.discrepancy != null) emp.discrepancy = round2(emp.discrepancy);
+
+      subtotal.tbsReported += emp.tbsReported;
+      subtotal.tbsAbsence += emp.tbsAbsence;
+      subtotal.totalTbs += emp.totalTbs;
+      subtotal.bambooHours += emp.bambooHours ?? 0;
+      subtotal.discrepancy += emp.discrepancy ?? 0;
+
+      if (emp.department) allDepartments.add(emp.department);
+      if (emp.reportingTo) allManagers.add(emp.reportingTo);
+    }
+
+    subtotal.tbsReported = round2(subtotal.tbsReported);
+    subtotal.tbsAbsence = round2(subtotal.tbsAbsence);
+    subtotal.totalTbs = round2(subtotal.totalTbs);
+    subtotal.bambooHours = round2(subtotal.bambooHours);
+    subtotal.discrepancy = round2(subtotal.discrepancy);
+
+    grandTotal.tbsReported += subtotal.tbsReported;
+    grandTotal.tbsAbsence += subtotal.tbsAbsence;
+    grandTotal.totalTbs += subtotal.totalTbs;
+    grandTotal.bambooHours += subtotal.bambooHours;
+    grandTotal.discrepancy += subtotal.discrepancy;
+
+    weeks.push({ week: weekStr, employees, subtotal });
+  }
+
+  grandTotal.tbsReported = round2(grandTotal.tbsReported);
+  grandTotal.tbsAbsence = round2(grandTotal.tbsAbsence);
+  grandTotal.totalTbs = round2(grandTotal.totalTbs);
+  grandTotal.bambooHours = round2(grandTotal.bambooHours);
+  grandTotal.discrepancy = round2(grandTotal.discrepancy);
+
+  return {
+    weeks,
+    grandTotal,
+    lookbackWeeks,
+    managers: [...allManagers].sort(),
+    departments: [...allDepartments].sort(),
+  };
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
 function toDateStr(d: Date | string): string {
   if (typeof d === 'string') return d.slice(0, 10);
   const y = d.getFullYear();

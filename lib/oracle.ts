@@ -219,8 +219,8 @@ export async function initializeSchema(): Promise<void> {
     `);
 
     // Seed role defaults (MERGE = idempotent)
-    const allTabs = ['office-attendance','timesheet-compare'];
-    const managerTabs = ['office-attendance','timesheet-compare'];
+    const allTabs = ['office-attendance','timesheet-compare','payroll-audit'];
+    const managerTabs = ['office-attendance','timesheet-compare','payroll-audit'];
     const employeeTabs = ['office-attendance'];
 
     for (const tab of allTabs) {

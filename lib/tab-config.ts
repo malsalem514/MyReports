@@ -8,6 +8,7 @@ import type { AccessContext } from './access';
 export const TAB_KEYS = [
   'office-attendance',
   'timesheet-compare',
+  'payroll-audit',
 ] as const;
 
 export type TabKey = (typeof TAB_KEYS)[number];
@@ -41,7 +42,7 @@ interface TabOverrideRow {
 // Hardcoded fallbacks when tables don't exist yet (before first sync/schema init)
 const FALLBACK_ROLES: Record<string, TabKey[]> = {
   'hr-admin': [...TAB_KEYS],
-  'manager': ['office-attendance', 'timesheet-compare'],
+  'manager': ['office-attendance', 'timesheet-compare', 'payroll-audit'],
   'employee': ['office-attendance'],
 };
 

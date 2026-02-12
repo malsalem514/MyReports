@@ -9,11 +9,13 @@ import type { ReactNode } from 'react';
 const TAB_ROUTES: Record<TabKey, string> = {
   'office-attendance': '/dashboard/office-attendance',
   'timesheet-compare': '/dashboard/timesheet-compare',
+  'payroll-audit': '/dashboard/payroll-audit',
 };
 
 const TAB_LABELS: Record<TabKey, string> = {
   'office-attendance': 'Office Attendance',
   'timesheet-compare': 'TBS Compare',
+  'payroll-audit': 'Payroll Audit',
 };
 
 export default async function DashboardLayout({ children }: { children: ReactNode }) {

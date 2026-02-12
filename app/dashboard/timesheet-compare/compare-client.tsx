@@ -151,7 +151,7 @@ export function CompareClient({ rows, weeks, departments, summary, unmappedEmail
 
   const SortHeader = ({ label, colKey, align = 'left' }: { label: string; colKey: SortKey; align?: string }) => (
     <th
-      className={`cursor-pointer select-none whitespace-nowrap px-3 py-3 text-${align} text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900`}
+      className={`cursor-pointer select-none whitespace-nowrap bg-white px-3 py-3 text-${align} text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900`}
       onClick={() => handleSort(colKey)}
     >
       {label} {sortKey === colKey ? (sortDir === 'asc' ? '↑' : '↓') : ''}
@@ -310,12 +310,12 @@ export function CompareClient({ rows, weeks, departments, summary, unmappedEmail
 
       {/* Table */}
       <div className="rounded-xl border border-gray-200 bg-white">
-        <div className="overflow-x-auto">
+        <div className="overflow-auto max-h-[70vh]">
           <table className="w-full border-collapse">
-            <thead>
+            <thead className="sticky top-0 z-20">
               <tr className="border-b border-gray-100">
                 <th
-                  className="sticky left-0 z-10 cursor-pointer select-none whitespace-nowrap bg-white px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900"
+                  className="sticky left-0 z-30 cursor-pointer select-none whitespace-nowrap bg-white px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900"
                   onClick={() => handleSort('name')}
                 >
                   Employee {sortKey === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : ''}
@@ -324,7 +324,7 @@ export function CompareClient({ rows, weeks, departments, summary, unmappedEmail
                 {weeks.map((w) => (
                   <th
                     key={w}
-                    className="cursor-pointer select-none whitespace-nowrap px-2 py-3 text-center text-[10px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900"
+                    className="cursor-pointer select-none whitespace-nowrap bg-white px-2 py-3 text-center text-[10px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900"
                     onClick={() => handleSort(w)}
                   >
                     {parseLocalDate(w).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
