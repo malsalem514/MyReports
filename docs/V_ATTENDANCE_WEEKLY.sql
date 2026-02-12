@@ -32,6 +32,7 @@ FROM (
           ORDER BY DECODE(LOCATION, 'Office', 1, 'Remote', 2, 3)
         ) AS rn
       FROM TL_ATTENDANCE
+      WHERE TO_CHAR(RECORD_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')
     )
     WHERE rn = 1
   ) d ON LOWER(d.EMAIL) = LOWER(e.EMAIL)

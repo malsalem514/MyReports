@@ -6,8 +6,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     MicrosoftEntraId({
       clientId: process.env.AZURE_AD_CLIENT_ID!,
       clientSecret: process.env.AZURE_AD_CLIENT_SECRET!,
-      // @ts-expect-error tenantId works at runtime but is missing from @auth/core types
-      tenantId: process.env.AZURE_AD_TENANT_ID!,
+      issuer: `https://login.microsoftonline.com/${process.env.AZURE_AD_TENANT_ID}/v2.0`,
       authorization: {
         params: {
           scope: 'openid profile email User.Read',
