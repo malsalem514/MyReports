@@ -35,7 +35,7 @@ export function AdminClient({ roles, tabs, roleMap: initialRoleMap }: AdminClien
   const [selectedEmployee, setSelectedEmployee] = useState<EmployeeTabState | null>(null);
   const [loadingEmployee, setLoadingEmployee] = useState(false);
   const searchRef = useRef<HTMLDivElement>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // Close suggestions on outside click
   useEffect(() => {

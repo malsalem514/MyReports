@@ -36,7 +36,10 @@ async function createPool(): Promise<oracledb.Pool> {
 
 export async function getPool(): Promise<oracledb.Pool> {
   if (!poolPromise) {
-    poolPromise = createPool();
+    poolPromise = createPool().catch((err) => {
+      poolPromise = null; // Reset so next call retries
+      throw err;
+    });
   }
   return poolPromise;
 }
@@ -216,9 +219,9 @@ export async function initializeSchema(): Promise<void> {
     `);
 
     // Seed role defaults (MERGE = idempotent)
-    const allTabs = ['overview','calendar','pulse','compliance','attendance','office-attendance','report','search','executive'];
-    const managerTabs = ['overview','calendar','pulse','compliance','attendance','office-attendance','report','search'];
-    const employeeTabs = ['overview','calendar','attendance','search'];
+    const allTabs = ['office-attendance','timesheet-compare'];
+    const managerTabs = ['office-attendance','timesheet-compare'];
+    const employeeTabs = ['office-attendance'];
 
     for (const tab of allTabs) {
       await safeExecuteDDL(conn, `

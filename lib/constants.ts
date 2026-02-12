@@ -8,16 +8,14 @@ export type LookbackWeeks = (typeof LOOKBACK_OPTIONS)[number];
 export const DEFAULT_LOOKBACK_WEEKS = 6;
 
 export const CELL_COLORS = {
-  excellent: 'bg-green-100 text-green-700',   // 4+ office days
-  compliant: 'bg-yellow-100 text-yellow-700', // >= required
-  partial: 'bg-orange-100 text-orange-700',   // >= 1 day
-  absent: 'bg-red-100 text-red-700',          // 0 days, no PTO
+  compliant: 'bg-green-100 text-green-700',   // 2+ office days
+  partial: 'bg-orange-100 text-orange-700',   // 1 day
+  absent: 'bg-red-100 text-red-700',          // 0 days
   pto: 'bg-blue-100 text-blue-700',           // has PTO that week
 } as const;
 
 export const CELL_HEX = {
-  excellent: 'C6EFCE',
-  compliant: 'FEF3C7',
+  compliant: 'C6EFCE',
   partial: 'FFEDD5',
   absent: 'FEE2E2',
   pto: 'DBEAFE',

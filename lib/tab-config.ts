@@ -6,15 +6,8 @@ import type { AccessContext } from './access';
 // ============================================================================
 
 export const TAB_KEYS = [
-  'overview',
-  'calendar',
-  'pulse',
-  'compliance',
-  'attendance',
   'office-attendance',
-  'report',
-  'search',
-  'executive',
+  'timesheet-compare',
 ] as const;
 
 export type TabKey = (typeof TAB_KEYS)[number];
@@ -48,8 +41,8 @@ interface TabOverrideRow {
 // Hardcoded fallbacks when tables don't exist yet (before first sync/schema init)
 const FALLBACK_ROLES: Record<string, TabKey[]> = {
   'hr-admin': [...TAB_KEYS],
-  'manager': ['overview', 'calendar', 'pulse', 'compliance', 'attendance', 'office-attendance', 'report', 'search'],
-  'employee': ['overview', 'calendar', 'attendance', 'search'],
+  'manager': ['office-attendance', 'timesheet-compare'],
+  'employee': ['office-attendance'],
 };
 
 /** Resolve visible tab keys for a user: role defaults + email overrides */

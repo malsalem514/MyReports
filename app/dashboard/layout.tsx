@@ -7,27 +7,13 @@ import type { ReactNode } from 'react';
 
 // Tab key → route path mapping
 const TAB_ROUTES: Record<TabKey, string> = {
-  overview: '/dashboard',
-  calendar: '/dashboard/calendar',
-  pulse: '/dashboard/pulse',
-  compliance: '/dashboard/compliance',
-  attendance: '/dashboard/attendance',
   'office-attendance': '/dashboard/office-attendance',
-  report: '/dashboard/report',
-  search: '/dashboard/search',
-  executive: '/dashboard/executive',
+  'timesheet-compare': '/dashboard/timesheet-compare',
 };
 
 const TAB_LABELS: Record<TabKey, string> = {
-  overview: 'Overview',
-  calendar: 'Calendar',
-  pulse: 'Pulse',
-  compliance: 'Compliance',
-  attendance: 'Attendance',
-  'office-attendance': 'Office',
-  report: 'Report',
-  search: 'Search',
-  executive: 'Executive',
+  'office-attendance': 'Office Attendance',
+  'timesheet-compare': 'TBS Compare',
 };
 
 export default async function DashboardLayout({ children }: { children: ReactNode }) {

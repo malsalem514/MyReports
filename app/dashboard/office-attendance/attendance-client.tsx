@@ -3,15 +3,22 @@
 import { useState, useMemo, useRef, useEffect, useTransition } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { OFFICE_DAYS_REQUIRED, LOOKBACK_OPTIONS, CELL_COLORS } from '@/lib/constants';
+import { OFFICE_DAYS_REQUIRED, LOOKBACK_OPTIONS, CELL_COLORS, CELL_HEX } from '@/lib/constants';
 import { validateAttendanceData, type ValidationResult } from './actions';
 
 // --- Types (exported for server component) ---
+
+export interface DayDetail {
+  date: string;       // YYYY-MM-DD
+  dayLabel: string;   // "Mon", "Tue", etc.
+  location: 'Office' | 'Remote' | 'PTO' | 'Unknown';
+}
 
 export interface WeekCell {
   officeDays: number;
   remoteDays: number;
   ptoDays: number;
+  days: DayDetail[];
 }
 
 export interface AttendanceRow {
@@ -47,20 +54,24 @@ type SortDir = 'asc' | 'desc';
 
 const PAGE_SIZE = 50;
 
+/** Parse YYYY-MM-DD as local date (avoids UTC timezone shift) */
+function parseLocalDate(s: string): Date {
+  const [y, m, d] = s.split('-').map(Number);
+  return new Date(y!, m! - 1, d!);
+}
+
 function getCellColor(officeDays: number, ptoDays: number): string {
   if (ptoDays > 0 && officeDays < OFFICE_DAYS_REQUIRED) return CELL_COLORS.pto;
-  if (officeDays >= 4) return CELL_COLORS.excellent;
   if (officeDays >= OFFICE_DAYS_REQUIRED) return CELL_COLORS.compliant;
   if (officeDays >= 1) return CELL_COLORS.partial;
   return CELL_COLORS.absent;
 }
 
 function getCellHex(officeDays: number, ptoDays: number): string {
-  if (ptoDays > 0 && officeDays < OFFICE_DAYS_REQUIRED) return 'DBEAFE';
-  if (officeDays >= 4) return 'C6EFCE';
-  if (officeDays >= OFFICE_DAYS_REQUIRED) return 'FEF3C7';
-  if (officeDays >= 1) return 'FFEDD5';
-  return 'FEE2E2';
+  if (ptoDays > 0 && officeDays < OFFICE_DAYS_REQUIRED) return CELL_HEX.pto;
+  if (officeDays >= OFFICE_DAYS_REQUIRED) return CELL_HEX.compliant;
+  if (officeDays >= 1) return CELL_HEX.partial;
+  return CELL_HEX.absent;
 }
 
 export function AttendanceClient({ rows, weeks, departments, locations, summary, lookbackWeeks }: Props) {
@@ -118,8 +129,14 @@ export function AttendanceClient({ rows, weeks, departments, locations, summary,
   // Filter
   const filtered = useMemo(() => {
     let list = rows;
-    if (selectedDepts.length > 0) list = list.filter((r) => selectedDepts.includes(r.department));
-    if (selectedLocs.length > 0) list = list.filter((r) => selectedLocs.includes(r.officeLocation));
+    if (selectedDepts.length > 0) {
+      const deptSet = new Set(selectedDepts);
+      list = list.filter((r) => deptSet.has(r.department));
+    }
+    if (selectedLocs.length > 0) {
+      const locSet = new Set(selectedLocs);
+      list = list.filter((r) => locSet.has(r.officeLocation));
+    }
     if (search) {
       const q = search.toLowerCase();
       list = list.filter((r) =>
@@ -240,7 +257,7 @@ export function AttendanceClient({ rows, weeks, departments, locations, summary,
 
   const SortHeader = ({ label, colKey, align = 'left' }: { label: string; colKey: SortKey; align?: string }) => (
     <th
-      className={`cursor-pointer select-none px-3 py-3 text-${align} text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900`}
+      className={`cursor-pointer select-none whitespace-nowrap px-3 py-3 text-${align} text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900`}
       onClick={() => handleSort(colKey)}
     >
       {label} {sortKey === colKey ? (sortDir === 'asc' ? '↑' : '↓') : ''}
@@ -391,12 +408,11 @@ export function AttendanceClient({ rows, weeks, departments, locations, summary,
         >
           {isPending ? 'Validating...' : validation ? (validationOpen ? 'Hide Validation' : 'Show Validation') : 'Validate vs ActivTrak'}
         </button>
-        {validation && !validationOpen && validation.discrepancies.length === 0 && (
-          <span className="text-[12px] font-medium text-green-600">All 3 sources match</span>
-        )}
-        {validation && !validationOpen && validation.discrepancies.length > 0 && (
-          <span className="text-[12px] font-medium text-amber-600">{validation.discrepancies.length} discrepancies found</span>
-        )}
+        {validation && !validationOpen ? (
+          validation.discrepancies.length === 0
+            ? <span className="text-[12px] font-medium text-green-600">All 3 sources match</span>
+            : <span className="text-[12px] font-medium text-amber-600">{validation.discrepancies.length} discrepancies found</span>
+        ) : null}
       </div>
 
       {validationOpen && validation && (
@@ -573,38 +589,43 @@ export function AttendanceClient({ rows, weeks, departments, locations, summary,
       {/* Table */}
       <div className="rounded-xl border border-gray-200 bg-white">
         <div className="overflow-x-auto">
-          <table className="w-full">
+          <table className="w-full border-collapse">
             <thead>
               <tr className="border-b border-gray-100">
-                <SortHeader label="Employee" colKey="name" />
+                <th
+                  className="sticky left-0 z-10 cursor-pointer select-none whitespace-nowrap bg-white px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900"
+                  onClick={() => handleSort('name')}
+                >
+                  Employee {sortKey === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : ''}
+                </th>
                 <SortHeader label="Dept" colKey="department" />
                 <SortHeader label="Location" colKey="officeLocation" />
                 {weeks.map((w) => (
                   <th
                     key={w}
-                    className="cursor-pointer select-none px-3 py-3 text-center text-[10px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900"
+                    className="cursor-pointer select-none whitespace-nowrap px-2 py-3 text-center text-[10px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900"
                     onClick={() => handleSort(w)}
                   >
-                    {new Date(w).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                    {parseLocalDate(w).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                     {sortKey === w ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ''}
                   </th>
                 ))}
                 <SortHeader label="Total" colKey="total" align="center" />
                 <SortHeader label="Avg" colKey="avgPerWeek" align="center" />
-                <th className="px-3 py-3 text-center text-[11px] font-medium uppercase tracking-wider text-gray-500">Status</th>
+                <th className="whitespace-nowrap px-3 py-3 text-center text-[11px] font-medium uppercase tracking-wider text-gray-500">Status</th>
                 <SortHeader label="Trend" colKey="trend" align="center" />
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {pageRows.map((row) => (
                 <tr key={row.email} className="hover:bg-gray-50">
-                  <td className="px-3 py-2.5">
-                    <Link href={`/dashboard/employee/${encodeURIComponent(row.email)}`} className="text-[13px] font-medium text-gray-900 hover:underline">
+                  <td className="sticky left-0 z-10 bg-white px-4 py-2 group-hover:bg-gray-50">
+                    <Link href={`/dashboard/employee/${encodeURIComponent(row.email)}`} className="whitespace-nowrap text-[13px] font-medium text-gray-900 hover:underline">
                       {row.name}
                     </Link>
                   </td>
-                  <td className="px-3 py-2.5 text-[12px] text-gray-500">{row.department}</td>
-                  <td className="px-3 py-2.5 text-[12px] text-gray-500">{row.officeLocation}</td>
+                  <td className="whitespace-nowrap px-3 py-2 text-[12px] text-gray-500">{row.department}</td>
+                  <td className="whitespace-nowrap px-3 py-2 text-[12px] text-gray-500">{row.officeLocation}</td>
                   {weeks.map((w) => {
                     const cell = row.weeks[w];
                     const office = cell?.officeDays ?? 0;
@@ -612,16 +633,35 @@ export function AttendanceClient({ rows, weeks, departments, locations, summary,
                     const pto = cell?.ptoDays ?? 0;
                     const color = getCellColor(office, pto);
                     return (
-                      <td key={w} className="px-3 py-2.5 text-center">
+                      <td key={w} className="px-2 py-1.5 text-center">
                         <div className="group relative inline-flex">
-                          <span className={`inline-flex h-7 w-7 cursor-default items-center justify-center rounded-md text-[12px] font-medium ${color}`}>
+                          <span className={`inline-flex h-6 w-6 cursor-default items-center justify-center rounded text-[11px] font-medium ${color}`}>
                             {office}
                           </span>
-                          <div className="pointer-events-none absolute bottom-full left-1/2 z-30 mb-2 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-3 py-2 opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
+                          <div className="pointer-events-none absolute bottom-full left-1/2 z-30 mb-2 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-3 py-2.5 opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
                             <div className="whitespace-nowrap text-left text-[11px]">
-                              <div className="flex items-center gap-2"><span className="inline-block h-2 w-2 rounded-full bg-green-500" /><span className="text-gray-500">Office</span><span className="ml-auto font-semibold text-gray-900">{office}</span></div>
-                              <div className="flex items-center gap-2"><span className="inline-block h-2 w-2 rounded-full bg-gray-400" /><span className="text-gray-500">Remote</span><span className="ml-auto font-semibold text-gray-900">{remote}</span></div>
-                              <div className="flex items-center gap-2"><span className="inline-block h-2 w-2 rounded-full bg-blue-500" /><span className="text-gray-500">PTO</span><span className="ml-auto font-semibold text-gray-900">{pto}</span></div>
+                              {cell && cell.days.length > 0 ? (
+                                <div className="space-y-0.5">
+                                  {cell.days.map((d) => (
+                                    <div key={d.date} className="flex items-center gap-2">
+                                      <span className={`inline-block h-2 w-2 rounded-full ${
+                                        d.location === 'Office' ? 'bg-green-500' :
+                                        d.location === 'Remote' ? 'bg-gray-400' :
+                                        d.location === 'PTO' ? 'bg-blue-500' : 'bg-amber-400'
+                                      }`} />
+                                      <span className="w-7 font-medium text-gray-500">{d.dayLabel}</span>
+                                      <span className="text-gray-400">{d.date.slice(5)}</span>
+                                      <span className={`ml-auto font-semibold ${
+                                        d.location === 'Office' ? 'text-green-700' :
+                                        d.location === 'Remote' ? 'text-gray-500' :
+                                        d.location === 'PTO' ? 'text-blue-600' : 'text-amber-600'
+                                      }`}>{d.location}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="text-gray-400">No activity</div>
+                              )}
                             </div>
                             <div className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-white" />
                           </div>
@@ -629,14 +669,14 @@ export function AttendanceClient({ rows, weeks, departments, locations, summary,
                       </td>
                     );
                   })}
-                  <td className="px-3 py-2.5 text-center text-[13px] font-semibold text-gray-900">{row.total}</td>
-                  <td className="px-3 py-2.5 text-center text-[12px] text-gray-600">{row.avgPerWeek}</td>
-                  <td className="px-3 py-2.5 text-center">
+                  <td className="whitespace-nowrap px-3 py-1.5 text-center text-[13px] font-semibold text-gray-900">{row.total}</td>
+                  <td className="whitespace-nowrap px-3 py-1.5 text-center text-[12px] text-gray-600">{row.avgPerWeek}</td>
+                  <td className="whitespace-nowrap px-3 py-1.5 text-center">
                     <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${row.compliant ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`}>
                       {row.compliant ? 'Compliant' : 'Non-Compliant'}
                     </span>
                   </td>
-                  <td className="px-3 py-2.5 text-center text-[14px]">
+                  <td className="whitespace-nowrap px-3 py-1.5 text-center text-[14px]">
                     {row.trend === 'up' ? <span className="text-green-600">↑</span> :
                      row.trend === 'down' ? <span className="text-red-600">↓</span> :
                      <span className="text-gray-400">–</span>}
@@ -685,9 +725,8 @@ export function AttendanceClient({ rows, weeks, departments, locations, summary,
 
       {/* Legend */}
       <div className="flex flex-wrap gap-4 text-[11px] text-gray-500">
-        <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.excellent}`} /> 4+ days</span>
         <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.compliant}`} /> {OFFICE_DAYS_REQUIRED}+ days</span>
-        <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.partial}`} /> 1+ day</span>
+        <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.partial}`} /> 1 day</span>
         <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.absent}`} /> 0 days</span>
         <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.pto}`} /> PTO week</span>
       </div>

@@ -32,20 +32,6 @@ export interface AttendanceRecord {
   ptoHours: number;
 }
 
-export interface ProductivityRecord {
-  date: Date;
-  email: string;
-  productiveTime: number;
-  unproductiveTime: number;
-  neutralTime: number;
-  totalTime: number;
-  productivityScore: number | null;
-  activeTime: number;
-  idleTime: number;
-  focusTime: number;
-  collaborationTime: number;
-}
-
 export interface TimeOffRecord {
   employeeId: string;
   employeeEmail: string;
@@ -180,123 +166,6 @@ export async function getAttendance(
   }));
 }
 
-export async function getAttendanceStats(
-  startDate: Date,
-  endDate: Date,
-  emails?: string[],
-): Promise<{
-  totalDays: number; officeDays: number; remoteDays: number;
-  ptoDays: number; avgHoursPerDay: number;
-}> {
-  let sql = `
-    SELECT COUNT(DISTINCT RECORD_DATE) as TOTAL_DAYS,
-      SUM(CASE WHEN LOCATION = 'Office' THEN 1 ELSE 0 END) as OFFICE_DAYS,
-      SUM(CASE WHEN LOCATION = 'Remote' THEN 1 ELSE 0 END) as REMOTE_DAYS,
-      SUM(CASE WHEN IS_PTO = 1 THEN 1 ELSE 0 END) as PTO_DAYS,
-      ROUND(AVG(TOTAL_HOURS), 2) as AVG_HOURS
-    FROM TL_ATTENDANCE WHERE RECORD_DATE BETWEEN :startDate AND :endDate
-  `;
-  const params: Record<string, unknown> = { startDate, endDate };
-
-  if (emails && emails.length > 0) {
-    const placeholders = emails.map((_, i) => `:email${i}`).join(',');
-    sql += ` AND LOWER(EMAIL) IN (${placeholders})`;
-    emails.forEach((email, i) => { params[`email${i}`] = email.toLowerCase(); });
-  }
-
-  const rows = await query<{
-    TOTAL_DAYS: number; OFFICE_DAYS: number; REMOTE_DAYS: number;
-    PTO_DAYS: number; AVG_HOURS: number;
-  }>(sql, params);
-
-  const r = rows[0];
-  return {
-    totalDays: r?.TOTAL_DAYS || 0, officeDays: r?.OFFICE_DAYS || 0,
-    remoteDays: r?.REMOTE_DAYS || 0, ptoDays: r?.PTO_DAYS || 0,
-    avgHoursPerDay: r?.AVG_HOURS || 0,
-  };
-}
-
-// ============================================================================
-// Productivity Queries
-// ============================================================================
-
-export async function getProductivity(
-  startDate: Date,
-  endDate: Date,
-  emails?: string[],
-): Promise<ProductivityRecord[]> {
-  let sql = `
-    SELECT RECORD_DATE, EMAIL, PRODUCTIVE_TIME, UNPRODUCTIVE_TIME, NEUTRAL_TIME,
-      TOTAL_TIME, PRODUCTIVITY_SCORE, ACTIVE_TIME, IDLE_TIME, FOCUS_TIME, COLLABORATION_TIME
-    FROM TL_PRODUCTIVITY WHERE RECORD_DATE BETWEEN :startDate AND :endDate
-  `;
-  const params: Record<string, unknown> = { startDate, endDate };
-
-  if (emails && emails.length > 0) {
-    const placeholders = emails.map((_, i) => `:email${i}`).join(',');
-    sql += ` AND LOWER(EMAIL) IN (${placeholders})`;
-    emails.forEach((email, i) => { params[`email${i}`] = email.toLowerCase(); });
-  }
-
-  sql += ` ORDER BY RECORD_DATE DESC, EMAIL`;
-
-  const rows = await query<{
-    RECORD_DATE: Date; EMAIL: string; PRODUCTIVE_TIME: number;
-    UNPRODUCTIVE_TIME: number; NEUTRAL_TIME: number; TOTAL_TIME: number;
-    PRODUCTIVITY_SCORE: number; ACTIVE_TIME: number; IDLE_TIME: number;
-    FOCUS_TIME: number; COLLABORATION_TIME: number;
-  }>(sql, params);
-
-  return rows.map((r) => ({
-    date: r.RECORD_DATE, email: r.EMAIL,
-    productiveTime: r.PRODUCTIVE_TIME || 0, unproductiveTime: r.UNPRODUCTIVE_TIME || 0,
-    neutralTime: r.NEUTRAL_TIME || 0, totalTime: r.TOTAL_TIME || 0,
-    productivityScore: r.PRODUCTIVITY_SCORE, activeTime: r.ACTIVE_TIME || 0,
-    idleTime: r.IDLE_TIME || 0, focusTime: r.FOCUS_TIME || 0,
-    collaborationTime: r.COLLABORATION_TIME || 0,
-  }));
-}
-
-export async function getProductivityStats(
-  startDate: Date,
-  endDate: Date,
-  emails?: string[],
-): Promise<{
-  avgProductivityScore: number; totalProductiveHours: number;
-  totalFocusHours: number; totalCollaborationHours: number; totalTrackedHours: number;
-}> {
-  let sql = `
-    SELECT ROUND(AVG(PRODUCTIVITY_SCORE), 2) as AVG_SCORE,
-      ROUND(SUM(PRODUCTIVE_TIME) / 3600, 2) as PRODUCTIVE_HOURS,
-      ROUND(SUM(FOCUS_TIME) / 3600, 2) as FOCUS_HOURS,
-      ROUND(SUM(COLLABORATION_TIME) / 3600, 2) as COLLAB_HOURS,
-      ROUND(SUM(TOTAL_TIME) / 3600, 2) as TOTAL_HOURS
-    FROM TL_PRODUCTIVITY WHERE RECORD_DATE BETWEEN :startDate AND :endDate
-  `;
-  const params: Record<string, unknown> = { startDate, endDate };
-
-  if (emails && emails.length > 0) {
-    const placeholders = emails.map((_, i) => `:email${i}`).join(',');
-    sql += ` AND LOWER(EMAIL) IN (${placeholders})`;
-    emails.forEach((email, i) => { params[`email${i}`] = email.toLowerCase(); });
-  }
-
-  const rows = await query<{
-    AVG_SCORE: number; PRODUCTIVE_HOURS: number; FOCUS_HOURS: number;
-    COLLAB_HOURS: number; TOTAL_HOURS: number;
-  }>(sql, params);
-
-  const r = rows[0];
-  return {
-    avgProductivityScore: r?.AVG_SCORE || 0,
-    totalProductiveHours: r?.PRODUCTIVE_HOURS || 0,
-    totalFocusHours: r?.FOCUS_HOURS || 0,
-    totalCollaborationHours: r?.COLLAB_HOURS || 0,
-    totalTrackedHours: r?.TOTAL_HOURS || 0,
-  };
-}
-
 // ============================================================================
 // Time Off Queries
 // ============================================================================
@@ -336,109 +205,6 @@ export async function getTimeOff(
   }));
 }
 
-export async function getUpcomingTimeOff(
-  days: number = 14,
-  emails?: string[],
-): Promise<TimeOffRecord[]> {
-  const today = new Date();
-  const futureDate = new Date();
-  futureDate.setDate(today.getDate() + days);
-  return getTimeOff(today, futureDate, emails);
-}
-
-// ============================================================================
-// Combined Dashboard Queries
-// ============================================================================
-
-export async function getDailyAttendanceSummary(
-  startDate: Date,
-  endDate: Date,
-  emails?: string[],
-): Promise<Array<{
-  date: string; officeCount: number; remoteCount: number;
-  ptoCount: number; totalEmployees: number;
-}>> {
-  let sql = `
-    SELECT TO_CHAR(RECORD_DATE, 'YYYY-MM-DD') as DATE_STR,
-      SUM(CASE WHEN LOCATION = 'Office' THEN 1 ELSE 0 END) as OFFICE_COUNT,
-      SUM(CASE WHEN LOCATION = 'Remote' THEN 1 ELSE 0 END) as REMOTE_COUNT,
-      SUM(CASE WHEN IS_PTO = 1 THEN 1 ELSE 0 END) as PTO_COUNT,
-      COUNT(DISTINCT EMAIL) as TOTAL_EMPLOYEES
-    FROM TL_ATTENDANCE WHERE RECORD_DATE BETWEEN :startDate AND :endDate
-  `;
-  const params: Record<string, unknown> = { startDate, endDate };
-
-  if (emails && emails.length > 0) {
-    const placeholders = emails.map((_, i) => `:email${i}`).join(',');
-    sql += ` AND LOWER(EMAIL) IN (${placeholders})`;
-    emails.forEach((email, i) => { params[`email${i}`] = email.toLowerCase(); });
-  }
-
-  sql += ` GROUP BY RECORD_DATE ORDER BY RECORD_DATE`;
-
-  const rows = await query<{
-    DATE_STR: string; OFFICE_COUNT: number; REMOTE_COUNT: number;
-    PTO_COUNT: number; TOTAL_EMPLOYEES: number;
-  }>(sql, params);
-
-  return rows.map((r) => ({
-    date: r.DATE_STR, officeCount: r.OFFICE_COUNT || 0,
-    remoteCount: r.REMOTE_COUNT || 0, ptoCount: r.PTO_COUNT || 0,
-    totalEmployees: r.TOTAL_EMPLOYEES || 0,
-  }));
-}
-
-export async function getComplianceSummary(
-  startDate: Date,
-  endDate: Date,
-  requiredOfficeDays: number = 3,
-  emails?: string[],
-): Promise<Array<{
-  email: string; displayName: string; department: string;
-  totalDays: number; officeDays: number; remoteDays: number;
-  ptoDays: number; complianceRate: number; isCompliant: boolean;
-}>> {
-  let sql = `
-    SELECT a.EMAIL, e.DISPLAY_NAME, e.DEPARTMENT,
-      COUNT(DISTINCT a.RECORD_DATE) as TOTAL_DAYS,
-      SUM(CASE WHEN a.LOCATION = 'Office' THEN 1 ELSE 0 END) as OFFICE_DAYS,
-      SUM(CASE WHEN a.LOCATION = 'Remote' THEN 1 ELSE 0 END) as REMOTE_DAYS,
-      SUM(CASE WHEN a.IS_PTO = 1 THEN 1 ELSE 0 END) as PTO_DAYS
-    FROM TL_ATTENDANCE a
-    LEFT JOIN TL_EMPLOYEES e ON LOWER(a.EMAIL) = LOWER(e.EMAIL)
-    WHERE a.RECORD_DATE BETWEEN :startDate AND :endDate
-  `;
-  const params: Record<string, unknown> = { startDate, endDate };
-
-  if (emails && emails.length > 0) {
-    const placeholders = emails.map((_, i) => `:email${i}`).join(',');
-    sql += ` AND LOWER(a.EMAIL) IN (${placeholders})`;
-    emails.forEach((email, i) => { params[`email${i}`] = email.toLowerCase(); });
-  }
-
-  sql += ` GROUP BY a.EMAIL, e.DISPLAY_NAME, e.DEPARTMENT ORDER BY e.DISPLAY_NAME`;
-
-  const rows = await query<{
-    EMAIL: string; DISPLAY_NAME: string; DEPARTMENT: string;
-    TOTAL_DAYS: number; OFFICE_DAYS: number; REMOTE_DAYS: number; PTO_DAYS: number;
-  }>(sql, params);
-
-  return rows.map((r) => {
-    const workDays = (r.TOTAL_DAYS || 0) - (r.PTO_DAYS || 0);
-    const requiredDays = Math.ceil((workDays / 5) * requiredOfficeDays);
-    const officeDays = r.OFFICE_DAYS || 0;
-    const complianceRate = requiredDays > 0 ? Math.min(100, Math.round((officeDays / requiredDays) * 100)) : 100;
-
-    return {
-      email: r.EMAIL, displayName: r.DISPLAY_NAME || r.EMAIL,
-      department: r.DEPARTMENT || 'Unknown',
-      totalDays: r.TOTAL_DAYS || 0, officeDays,
-      remoteDays: r.REMOTE_DAYS || 0, ptoDays: r.PTO_DAYS || 0,
-      complianceRate, isCompliant: complianceRate >= 100,
-    };
-  });
-}
-
 // ============================================================================
 // Office Attendance Report — queries V_ATTENDANCE_WEEKLY + V_PTO_WEEKLY views
 // ============================================================================
@@ -475,7 +241,7 @@ export async function getAttendanceReport(
     emails.forEach((email, i) => { empParams[`em${i}`] = email.toLowerCase(); });
   }
 
-  const [attRows, ptoRows, empRows] = await Promise.all([
+  const [attRows, ptoRows, empRows, dailyRows] = await Promise.all([
     query<{
       EMAIL: string; DISPLAY_NAME: string; DEPARTMENT: string;
       OFFICE_LOCATION: string; WEEK_START: Date;
@@ -494,6 +260,18 @@ export async function getAttendanceReport(
       `SELECT LOWER(EMAIL) AS EMAIL, NVL(DISPLAY_NAME, EMAIL) AS DISPLAY_NAME, NVL(DEPARTMENT, 'Unknown') AS DEPARTMENT, NVL(LOCATION, 'Unknown') AS LOCATION FROM TL_EMPLOYEES WHERE EMAIL IS NOT NULL AND (STATUS IS NULL OR UPPER(STATUS) != 'INACTIVE')${empEmailFilter}`,
       empParams,
     ),
+    // Daily detail (deduped, Office wins, weekdays only) — includes PTO flag from ActivTrak
+    query<{ EMAIL: string; RECORD_DATE: Date; LOCATION: string; IS_PTO: number; PTO_TYPE: string | null }>(
+      `SELECT EMAIL, RECORD_DATE, LOCATION, IS_PTO, PTO_TYPE FROM (
+        SELECT LOWER(t.EMAIL) AS EMAIL, t.RECORD_DATE, t.LOCATION, NVL(t.IS_PTO, 0) AS IS_PTO, t.PTO_TYPE,
+          ROW_NUMBER() OVER (PARTITION BY LOWER(t.EMAIL), TRUNC(t.RECORD_DATE)
+            ORDER BY DECODE(t.LOCATION, 'Office', 1, 'Remote', 2, 3)) AS rn
+        FROM TL_ATTENDANCE t
+        WHERE t.RECORD_DATE BETWEEN :sd AND :ed
+          AND TO_CHAR(t.RECORD_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')${emailFilter}
+      ) WHERE rn = 1`,
+      params,
+    ),
   ]);
 
   // --- Index PTO by email|week ---
@@ -501,6 +279,36 @@ export async function getAttendanceReport(
   for (const r of ptoRows) {
     const wk = toDateStr(r.WEEK_START);
     ptoMap.set(`${r.EMAIL?.toLowerCase()}|${wk}`, r.PTO_DAYS || 0);
+  }
+
+  // --- Index daily detail by email|week → DayDetail[] ---
+  const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const dailyMap = new Map<string, Array<{ date: string; dayLabel: string; location: string }>>();
+  for (const r of dailyRows) {
+    const email = r.EMAIL?.toLowerCase();
+    if (!email) continue;
+    const d = r.RECORD_DATE instanceof Date ? r.RECORD_DATE : new Date(r.RECORD_DATE);
+    const dateStr = toDateStr(d);
+    // Compute ISO week start (Monday) using local time (Oracle dates are local)
+    const dayOfWeek = d.getDay(); // 0=Sun, local timezone
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monday = new Date(d);
+    monday.setDate(monday.getDate() + mondayOffset);
+    const wk = toDateStr(monday);
+    const key = `${email}|${wk}`;
+    if (!dailyMap.has(key)) dailyMap.set(key, []);
+    // If IS_PTO=1, show as PTO regardless of location
+    const location = r.IS_PTO === 1 ? 'PTO' : (r.LOCATION || 'Unknown');
+    dailyMap.get(key)!.push({
+      date: dateStr,
+      dayLabel: DAY_LABELS[d.getDay()] || '',
+      location,
+    });
+  }
+
+  // Sort each week's days by date
+  for (const days of dailyMap.values()) {
+    days.sort((a, b) => a.date.localeCompare(b.date));
   }
 
   // --- Index attendance by employee ---
@@ -524,10 +332,16 @@ export async function getAttendanceReport(
         weeks: {},
       });
     }
+    const dailyDetails = dailyMap.get(`${email}|${wk}`) || [];
     empWeeks.get(email)!.weeks[wk] = {
       officeDays: r.OFFICE_DAYS || 0,
       remoteDays: r.REMOTE_DAYS || 0,
       ptoDays: ptoMap.get(`${email}|${wk}`) || 0,
+      days: dailyDetails.map((dd) => ({
+        date: dd.date,
+        dayLabel: dd.dayLabel,
+        location: dd.location as 'Office' | 'Remote' | 'Unknown',
+      })),
     };
   }
 
@@ -590,16 +404,19 @@ export async function getAttendanceReport(
     });
   }
 
-  // --- Summary ---
+  // --- Summary (single pass) ---
   const totalEmployees = rows.length;
-  const totalOfficeDays = rows.reduce((s, r) => s + r.total, 0);
   const numWeeks = weeks.length;
+  let totalOfficeDays = 0, compliantCount = 0, zeroAttendanceCount = 0;
+  for (const r of rows) {
+    totalOfficeDays += r.total;
+    if (r.compliant) compliantCount++;
+    if (r.total === 0) zeroAttendanceCount++;
+  }
   const avgOfficeDays = totalEmployees > 0 && numWeeks > 0
     ? Math.round((totalOfficeDays / totalEmployees / numWeeks) * 10) / 10
     : 0;
-  const compliantCount = rows.filter((r) => r.compliant).length;
   const complianceRate = totalEmployees > 0 ? Math.round((compliantCount / totalEmployees) * 100) : 0;
-  const zeroAttendanceCount = rows.filter((r) => r.total === 0).length;
 
   return {
     rows,
@@ -610,7 +427,289 @@ export async function getAttendanceReport(
   };
 }
 
+// ============================================================================
+// TBS vs BambooHR Comparison Report
+// ============================================================================
+
+export interface TbsComparisonRow {
+  email: string;
+  name: string;
+  department: string;
+  tbsEmployeeNo: number;
+  weeks: Record<string, TbsWeekCell>;
+  totalBambooPto: number;
+  totalTbsPto: number;
+  totalTbsWork: number;
+  discrepancyCount: number;
+}
+
+export interface TbsWeekCell {
+  bambooPtoDays: number;
+  tbsPtoDays: number;
+  tbsWorkDays: number;
+  tbsWorkHours: number;
+  hasDiscrepancy: boolean;
+  details: TbsDayDetail[];
+}
+
+export interface TbsDayDetail {
+  date: string;
+  dayLabel: string;
+  bambooHasPto: boolean;
+  bambooType: string | null;
+  tbsHasPto: boolean;
+  tbsWorkCode: string | null;
+  tbsHours: number;
+}
+
+export interface TbsComparisonSummary {
+  totalEmployees: number;
+  mappedEmployees: number;
+  unmappedEmployees: number;
+  totalDiscrepancies: number;
+  bambooPtoNotInTbs: number;
+  tbsPtoNotInBamboo: number;
+}
+
+export interface TbsComparisonResult {
+  rows: TbsComparisonRow[];
+  weeks: string[];
+  departments: string[];
+  summary: TbsComparisonSummary;
+  unmappedEmails: string[];
+}
+
+export async function getTbsComparisonReport(
+  startDate: Date,
+  endDate: Date,
+  emails?: string[],
+): Promise<TbsComparisonResult> {
+  let emailFilter = '';
+  const mapParams: Record<string, unknown> = {};
+  if (emails && emails.length > 0) {
+    const placeholders = emails.map((_, i) => `:em${i}`).join(',');
+    emailFilter = ` AND LOWER(m.EMAIL) IN (${placeholders})`;
+    emails.forEach((email, i) => { mapParams[`em${i}`] = email.toLowerCase(); });
+  }
+
+  // 1. Get mapped employees
+  const mapRows = await query<{
+    EMAIL: string; TBS_EMPLOYEE_NO: number;
+    DISPLAY_NAME: string; DEPARTMENT: string;
+  }>(
+    `SELECT LOWER(m.EMAIL) AS EMAIL, m.TBS_EMPLOYEE_NO,
+       NVL(e.DISPLAY_NAME, m.EMAIL) AS DISPLAY_NAME,
+       NVL(e.DEPARTMENT, 'Unknown') AS DEPARTMENT
+     FROM TL_TBS_EMPLOYEE_MAP m
+     LEFT JOIN TL_EMPLOYEES e ON LOWER(e.EMAIL) = LOWER(m.EMAIL)
+     WHERE 1=1${emailFilter}
+     ORDER BY DISPLAY_NAME`,
+    mapParams,
+  );
+
+  if (mapRows.length === 0) {
+    return { rows: [], weeks: [], departments: [], summary: {
+      totalEmployees: 0, mappedEmployees: 0, unmappedEmployees: 0,
+      totalDiscrepancies: 0, bambooPtoNotInTbs: 0, tbsPtoNotInBamboo: 0,
+    }, unmappedEmails: [] };
+  }
+
+  const empNos = mapRows.map((r) => r.TBS_EMPLOYEE_NO);
+  const empEmails = mapRows.map((r) => r.EMAIL);
+
+  // Build email filter for BambooHR query
+  const emailPlaceholders = empEmails.map((_, i) => `:be${i}`).join(',');
+  const bambooParams: Record<string, unknown> = { sd: startDate, ed: endDate };
+  empEmails.forEach((email, i) => { bambooParams[`be${i}`] = email; });
+
+  // Build employee_no filter for TBS query
+  const tbsNos = empNos.map((_, i) => `:tn${i}`).join(',');
+  const tbsParams: Record<string, unknown> = { sd: startDate, ed: endDate };
+  empNos.forEach((no, i) => { tbsParams[`tn${i}`] = no; });
+
+  // 2. Parallel fetch: BambooHR PTO + TBS entries + unmapped employees
+  const [bambooDays, tbsEntries, unmappedRows] = await Promise.all([
+    // Expand BambooHR PTO ranges into individual weekdays
+    query<{ EMAIL: string; PTO_DATE: Date; TYPE: string }>(
+      `SELECT LOWER(t.EMAIL) AS EMAIL, PTO_DATE, t.TYPE FROM (
+        SELECT EMAIL, START_DATE + LEVEL - 1 AS PTO_DATE, TYPE
+        FROM TL_TIME_OFF
+        WHERE LOWER(EMAIL) IN (${emailPlaceholders})
+          AND START_DATE <= :ed AND END_DATE >= :sd
+          AND STATUS != 'denied'
+        CONNECT BY LEVEL <= (TRUNC(END_DATE) - TRUNC(START_DATE) + 1)
+          AND PRIOR ROWID = ROWID
+          AND PRIOR SYS_GUID() IS NOT NULL
+      ) t
+      WHERE PTO_DATE BETWEEN :sd AND :ed
+        AND TO_CHAR(PTO_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')`,
+      bambooParams,
+    ),
+    // TBS time entries (PTO-like: VACATION, ILLNESS, MISC. ABS./APPTS, Alternate Day, compressed)
+    query<{
+      EMPLOYEE_NO: number; ENTRY_DATE: Date; WORK_CODE: string;
+      WORK_DESCRIPTION: string; TIME_HOURS: number; ENTRY_TYPE: string;
+    }>(
+      `SELECT EMPLOYEE_NO, ENTRY_DATE, WORK_CODE, WORK_DESCRIPTION, TIME_HOURS, ENTRY_TYPE
+       FROM TBS_ALL_TIME_ENTRIES_V@TBS_LINK
+       WHERE EMPLOYEE_NO IN (${tbsNos})
+         AND ENTRY_DATE BETWEEN :sd AND :ed
+         AND TO_CHAR(ENTRY_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')
+       ORDER BY EMPLOYEE_NO, ENTRY_DATE`,
+      tbsParams,
+    ),
+    // Unmapped employees (no dependency on above results)
+    query<{ EMAIL: string }>(
+      `SELECT LOWER(EMAIL) AS EMAIL FROM TL_EMPLOYEES
+       WHERE EMAIL IS NOT NULL AND (STATUS IS NULL OR UPPER(STATUS) != 'INACTIVE')
+         AND LOWER(EMAIL) NOT IN (SELECT LOWER(EMAIL) FROM TL_TBS_EMPLOYEE_MAP)`,
+    ),
+  ]);
+
+  // 3. Index BambooHR PTO by email|date
+  const bambooByDay = new Map<string, string>(); // email|date → type
+  for (const r of bambooDays) {
+    const d = toDateStr(r.PTO_DATE);
+    bambooByDay.set(`${r.EMAIL}|${d}`, r.TYPE || 'PTO');
+  }
+
+  // 4. Build email→tbsNo and tbsNo→email maps
+  const emailToTbs = new Map<string, number>();
+  const tbsToEmail = new Map<number, string>();
+  for (const r of mapRows) {
+    emailToTbs.set(r.EMAIL, r.TBS_EMPLOYEE_NO);
+    tbsToEmail.set(r.TBS_EMPLOYEE_NO, r.EMAIL);
+  }
+
+  // 5. Index TBS entries by email|date
+  const TBS_PTO_CODES = new Set([
+    'VACATION', 'ILLNESS', 'MISC. ABS./APPTS', 'ALTERNATE DAY',
+    'SICK', 'PERSONAL', 'BEREAVEMENT', 'JURY DUTY',
+  ]);
+  const tbsByDay = new Map<string, { isPto: boolean; workCode: string; hours: number }>();
+  for (const r of tbsEntries) {
+    const email = tbsToEmail.get(r.EMPLOYEE_NO);
+    if (!email) continue;
+    const d = toDateStr(r.ENTRY_DATE);
+    const key = `${email}|${d}`;
+    const desc = (r.WORK_DESCRIPTION || '').toUpperCase().trim();
+    const isPto = TBS_PTO_CODES.has(desc) || r.ENTRY_TYPE === 'C';
+    const existing = tbsByDay.get(key);
+    if (existing) {
+      existing.hours += r.TIME_HOURS || 0;
+      if (isPto) existing.isPto = true;
+    } else {
+      tbsByDay.set(key, { isPto, workCode: r.WORK_DESCRIPTION || r.WORK_CODE || '', hours: r.TIME_HOURS || 0 });
+    }
+  }
+
+  // 6. Build week-by-week comparison per employee
+  const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const weeksSet = new Set<string>();
+  const deptSet = new Set<string>();
+
+  // Generate all weekdays in range
+  const allDays: Date[] = [];
+  const cur = new Date(startDate);
+  while (cur <= endDate) {
+    const dow = cur.getDay();
+    if (dow !== 0 && dow !== 6) allDays.push(new Date(cur));
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  const rows: TbsComparisonRow[] = [];
+  let totalBambooPtoNotInTbs = 0;
+  let totalTbsPtoNotInBamboo = 0;
+
+  for (const emp of mapRows) {
+    const email = emp.EMAIL;
+    const weekCells: Record<string, TbsWeekCell> = {};
+    let totalBPto = 0, totalTPto = 0, totalTWork = 0, discrepancies = 0;
+
+    for (const day of allDays) {
+      const dateStr = toDateStr(day);
+      const dow = day.getDay();
+      const mondayOffset = dow === 0 ? -6 : 1 - dow;
+      const monday = new Date(day);
+      monday.setDate(monday.getDate() + mondayOffset);
+      const wk = toDateStr(monday);
+      weeksSet.add(wk);
+
+      if (!weekCells[wk]) {
+        weekCells[wk] = { bambooPtoDays: 0, tbsPtoDays: 0, tbsWorkDays: 0, tbsWorkHours: 0, hasDiscrepancy: false, details: [] };
+      }
+      const cell = weekCells[wk]!;
+
+      const key = `${email}|${dateStr}`;
+      const bambooType = bambooByDay.get(key) || null;
+      const tbs = tbsByDay.get(key);
+      const hasBambooPto = !!bambooType;
+      const hasTbsPto = tbs?.isPto ?? false;
+      const tbsHours = tbs?.hours ?? 0;
+
+      if (hasBambooPto) { totalBPto++; cell.bambooPtoDays++; }
+      if (hasTbsPto) { totalTPto++; cell.tbsPtoDays++; }
+      if (tbsHours > 0 && !hasTbsPto) { totalTWork++; cell.tbsWorkDays++; }
+      cell.tbsWorkHours += tbsHours;
+
+      // Discrepancy: PTO in one but not the other
+      const isDisc = (hasBambooPto && !hasTbsPto && tbsHours === 0) || (!hasBambooPto && hasTbsPto);
+      if (isDisc) {
+        cell.hasDiscrepancy = true;
+        discrepancies++;
+        if (hasBambooPto && !hasTbsPto) totalBambooPtoNotInTbs++;
+        if (!hasBambooPto && hasTbsPto) totalTbsPtoNotInBamboo++;
+      }
+
+      // Only add detail for days with PTO in either system or a discrepancy
+      if (hasBambooPto || hasTbsPto || isDisc) {
+        cell.details.push({
+          date: dateStr,
+          dayLabel: DAY_LABELS[dow] || '',
+          bambooHasPto: hasBambooPto,
+          bambooType,
+          tbsHasPto: hasTbsPto,
+          tbsWorkCode: tbs?.workCode || null,
+          tbsHours,
+        });
+      }
+    }
+
+    if (emp.DEPARTMENT !== 'Unknown') deptSet.add(emp.DEPARTMENT);
+
+    rows.push({
+      email,
+      name: emp.DISPLAY_NAME,
+      department: emp.DEPARTMENT,
+      tbsEmployeeNo: emp.TBS_EMPLOYEE_NO,
+      weeks: weekCells,
+      totalBambooPto: totalBPto,
+      totalTbsPto: totalTPto,
+      totalTbsWork: totalTWork,
+      discrepancyCount: discrepancies,
+    });
+  }
+
+  return {
+    rows,
+    weeks: [...weeksSet].sort(),
+    departments: [...deptSet].sort(),
+    summary: {
+      totalEmployees: rows.length + unmappedRows.length,
+      mappedEmployees: rows.length,
+      unmappedEmployees: unmappedRows.length,
+      totalDiscrepancies: rows.reduce((s, r) => s + r.discrepancyCount, 0),
+      bambooPtoNotInTbs: totalBambooPtoNotInTbs,
+      tbsPtoNotInBamboo: totalTbsPtoNotInBamboo,
+    },
+    unmappedEmails: unmappedRows.map((r) => r.EMAIL),
+  };
+}
+
 function toDateStr(d: Date | string): string {
-  const dt = d instanceof Date ? d : new Date(d);
-  return dt.toISOString().split('T')[0]!;
+  if (typeof d === 'string') return d.slice(0, 10);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }

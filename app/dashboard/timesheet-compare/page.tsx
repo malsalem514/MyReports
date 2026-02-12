@@ -1,45 +1,44 @@
 import { Suspense } from 'react';
 import { sub } from 'date-fns';
 import { getAccessContext } from '@/lib/access';
-import { getAttendanceReport } from '@/lib/dashboard-data';
-import { OFFICE_DAYS_REQUIRED, DEFAULT_LOOKBACK_WEEKS, LOOKBACK_OPTIONS } from '@/lib/constants';
-import { AttendanceClient } from './attendance-client';
+import { getTbsComparisonReport } from '@/lib/dashboard-data';
+import { DEFAULT_LOOKBACK_WEEKS, LOOKBACK_OPTIONS } from '@/lib/constants';
+import { CompareClient } from './compare-client';
 
-async function AttendanceData({ lookbackWeeks }: { lookbackWeeks: number }) {
+async function CompareData({ lookbackWeeks }: { lookbackWeeks: number }) {
   const endDate = new Date();
   const startDate = sub(endDate, { weeks: lookbackWeeks });
 
   const access = await getAccessContext();
   const allowedEmails = access.isHRAdmin ? undefined : access.allowedEmails;
 
-  const { rows, weeks, departments, locations, summary } = await getAttendanceReport(
+  const { rows, weeks, departments, summary, unmappedEmails } = await getTbsComparisonReport(
     startDate,
     endDate,
-    OFFICE_DAYS_REQUIRED,
     allowedEmails,
   );
 
   return (
-    <AttendanceClient
+    <CompareClient
       rows={rows}
       weeks={weeks}
       departments={departments}
-      locations={locations}
       summary={summary}
+      unmappedEmails={unmappedEmails}
       lookbackWeeks={lookbackWeeks}
     />
   );
 }
 
-function AttendanceSkeleton() {
+function CompareSkeleton() {
   return (
     <div className="space-y-6 animate-pulse">
       <div className="flex justify-between">
-        <div><div className="h-5 w-40 rounded bg-gray-200" /><div className="mt-1 h-3 w-56 rounded bg-gray-100" /></div>
+        <div><div className="h-5 w-52 rounded bg-gray-200" /><div className="mt-1 h-3 w-72 rounded bg-gray-100" /></div>
         <div className="flex gap-2"><div className="h-8 w-20 rounded bg-gray-100" /><div className="h-8 w-14 rounded bg-gray-100" /></div>
       </div>
-      <div className="grid gap-4 sm:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, i) => (
+      <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-6">
+        {Array.from({ length: 6 }).map((_, i) => (
           <div key={i} className="rounded-xl border border-gray-200 bg-white p-4">
             <div className="h-3 w-16 rounded bg-gray-100" />
             <div className="mt-2 h-7 w-12 rounded bg-gray-200" />
@@ -51,7 +50,7 @@ function AttendanceSkeleton() {
   );
 }
 
-export default async function OfficeAttendancePage({
+export default async function TimesheetComparePage({
   searchParams,
 }: {
   searchParams: Promise<{ lookbackWeeks?: string }>;
@@ -62,8 +61,8 @@ export default async function OfficeAttendancePage({
     : DEFAULT_LOOKBACK_WEEKS;
 
   return (
-    <Suspense fallback={<AttendanceSkeleton />}>
-      <AttendanceData lookbackWeeks={lookbackWeeks} />
+    <Suspense fallback={<CompareSkeleton />}>
+      <CompareData lookbackWeeks={lookbackWeeks} />
     </Suspense>
   );
 }
