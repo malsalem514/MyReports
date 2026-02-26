@@ -1,5 +1,6 @@
 import { cache } from 'react';
 import { auth } from '@/auth';
+import { getDevBypassEmail } from './dev-bypass';
 import {
   fetchEmployeeDirectory,
   fetchReportingStructure,
@@ -39,8 +40,9 @@ export type AccessLevel = 'none' | 'self' | 'team' | 'all';
 
 export const getAccessContext = cache(async (): Promise<AccessContext> => {
   // Dev-only auth bypass — use DEV_BYPASS_EMAIL as the logged-in user
-  if (process.env.DEV_BYPASS_AUTH === 'true' && process.env.DEV_BYPASS_EMAIL) {
-    return getAccessContextByEmail(process.env.DEV_BYPASS_EMAIL);
+  const bypassEmail = getDevBypassEmail('access-context');
+  if (bypassEmail) {
+    return getAccessContextByEmail(bypassEmail);
   }
 
   const session = await auth();

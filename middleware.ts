@@ -1,8 +1,9 @@
 import { auth } from '@/auth';
+import { isDevBypassEnabled } from '@/lib/dev-bypass';
 import { NextResponse } from 'next/server';
 
 export default auth((req) => {
-  if (process.env.DEV_BYPASS_AUTH === 'true') {
+  if (isDevBypassEnabled('middleware')) {
     return NextResponse.next();
   }
 

@@ -555,6 +555,17 @@ export async function getTbsComparisonReport(
   empNos.forEach((no, i) => { tbsParams[`tn${i}`] = no; });
 
   // 2. Parallel fetch: BambooHR PTO + TBS entries + unmapped employees
+  // Unmapped employee list is HR-only. If this report is scope-filtered by emails,
+  // do not query or return unmapped global employees.
+  const unmappedRowsPromise =
+    emails && emails.length > 0
+      ? Promise.resolve([] as Array<{ EMAIL: string }>)
+      : query<{ EMAIL: string }>(
+          `SELECT LOWER(EMAIL) AS EMAIL FROM TL_EMPLOYEES
+           WHERE EMAIL IS NOT NULL AND (STATUS IS NULL OR UPPER(STATUS) != 'INACTIVE')
+             AND LOWER(EMAIL) NOT IN (SELECT LOWER(EMAIL) FROM TL_TBS_EMPLOYEE_MAP)`,
+        );
+
   const [bambooDays, tbsEntries, unmappedRows] = await Promise.all([
     // Expand BambooHR PTO ranges into individual weekdays
     query<{ EMAIL: string; PTO_DATE: Date; TYPE: string }>(
@@ -585,12 +596,8 @@ export async function getTbsComparisonReport(
        ORDER BY EMPLOYEE_NO, ENTRY_DATE`,
       tbsParams,
     ),
-    // Unmapped employees (no dependency on above results)
-    query<{ EMAIL: string }>(
-      `SELECT LOWER(EMAIL) AS EMAIL FROM TL_EMPLOYEES
-       WHERE EMAIL IS NOT NULL AND (STATUS IS NULL OR UPPER(STATUS) != 'INACTIVE')
-         AND LOWER(EMAIL) NOT IN (SELECT LOWER(EMAIL) FROM TL_TBS_EMPLOYEE_MAP)`,
-    ),
+    // Unmapped employees (HR-only)
+    unmappedRowsPromise,
   ]);
 
   // 3. Index BambooHR PTO by email|date

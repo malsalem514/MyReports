@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import { auth, signIn } from '@/auth';
+import { isDevBypassEnabled } from '@/lib/dev-bypass';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,7 +12,7 @@ function isConfigured(value: string | undefined): boolean {
 
 export default async function LoginPage() {
   // Local smoke/dev mode: skip identity provider entirely.
-  if (process.env.DEV_BYPASS_AUTH === 'true') {
+  if (isDevBypassEnabled('login-page')) {
     redirect('/dashboard');
   }
 
