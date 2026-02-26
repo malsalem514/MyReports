@@ -11,6 +11,7 @@ pnpm-debug.log*
 .env.local
 .env.*.local
 .DS_Store
+google-sa.json
 coverage
 *.tsbuildinfo
 *.tar
