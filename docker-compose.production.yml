@@ -6,7 +6,7 @@
 #   3. Export shell variables:
 #        export ORACLE_DB_HOST=srv-db-100
 #        export ORACLE_DB_IP=<oracle server ip>
-#        export GOOGLE_SA_JSON_PATH=/secure/path/to/google-sa.json
+#        export GOOGLE_SA_JSON_PATH=/secure/path/to/google-sa.json  # REQUIRED — no default
 #
 # Run: docker compose -f docker-compose.production.yml up -d
 
@@ -17,6 +17,7 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+    # Note: place this behind a reverse proxy or firewall — port 3000 is otherwise open on the host
     env_file:
       - myreports.env
     extra_hosts:
@@ -24,6 +25,7 @@ services:
     volumes:
       - "${GOOGLE_SA_JSON_PATH}:/run/secrets/google-sa.json:ro"
     healthcheck:
+      # Uses node fetch (not curl) — base image is node:20-slim which has no curl/wget
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 10s
