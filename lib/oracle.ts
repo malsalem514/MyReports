@@ -248,7 +248,7 @@ export async function initializeSchema(): Promise<void> {
         ) d ON LOWER(d.EMAIL) = LOWER(e.EMAIL)
         WHERE e.EMAIL IS NOT NULL
           AND (e.STATUS IS NULL OR UPPER(e.STATUS) != 'INACTIVE')
-          AND NVL(e.DEPARTMENT, 'Unknown') NOT IN ('Executive', 'Administration')
+          AND e.DEPARTMENT NOT IN ('Executive', 'Administration')
       )
       GROUP BY EMAIL, DISPLAY_NAME, DEPARTMENT, OFFICE_LOCATION, WEEK_START
     `);
