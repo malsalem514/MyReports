@@ -258,7 +258,7 @@ export async function getAttendanceReport(
     query<{
       EMAIL: string; DISPLAY_NAME: string; DEPARTMENT: string; LOCATION: string;
     }>(
-      `SELECT LOWER(EMAIL) AS EMAIL, NVL(DISPLAY_NAME, EMAIL) AS DISPLAY_NAME, NVL(DEPARTMENT, 'Unknown') AS DEPARTMENT, NVL(LOCATION, 'Unknown') AS LOCATION FROM TL_EMPLOYEES WHERE EMAIL IS NOT NULL AND (STATUS IS NULL OR UPPER(STATUS) != 'INACTIVE')${empEmailFilter}`,
+      `SELECT LOWER(EMAIL) AS EMAIL, NVL(DISPLAY_NAME, EMAIL) AS DISPLAY_NAME, NVL(DEPARTMENT, 'Unknown') AS DEPARTMENT, NVL(LOCATION, 'Unknown') AS LOCATION FROM TL_EMPLOYEES WHERE EMAIL IS NOT NULL AND (STATUS IS NULL OR UPPER(STATUS) != 'INACTIVE') AND NVL(DEPARTMENT, 'Unknown') NOT IN ('Executive', 'Administration')${empEmailFilter}`,
       empParams,
     ),
     // Daily detail (deduped, Office wins, weekdays only) — includes PTO flag from ActivTrak
