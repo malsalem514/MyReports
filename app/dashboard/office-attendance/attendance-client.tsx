@@ -692,7 +692,7 @@ export function AttendanceClient({
             </thead>
             <tbody className="divide-y divide-gray-100">
               {pageRows.map((row) => (
-                <tr key={row.email} className="hover:bg-gray-50">
+                <tr key={row.email || row.name} className="hover:bg-gray-50">
                   <td className="sticky left-0 z-10 bg-white px-4 py-2 group-hover:bg-gray-50">
                     <Link href={`/dashboard/employee/${encodeURIComponent(row.email)}`} className="whitespace-nowrap text-[13px] font-medium text-gray-900 hover:underline">
                       {row.name}

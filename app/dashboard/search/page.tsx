@@ -106,7 +106,7 @@ export default async function EmployeeSearchPage({
               const empName = emp.displayName || `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || emp.email;
               const href = `/dashboard/employee/${encodeURIComponent(emp.email)}?startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`;
               return (
-                <tr key={emp.email} className="hover:bg-gray-50">
+                <tr key={emp.email ?? emp.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3 text-[13px] font-medium text-gray-900">{empName}</td>
                   <td className="px-4 py-3 text-[12px] text-gray-600">{emp.email}</td>
                   <td className="px-4 py-3 text-[12px] text-gray-600">{emp.department || 'Unknown'}</td>

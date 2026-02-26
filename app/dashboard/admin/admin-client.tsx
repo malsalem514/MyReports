@@ -226,7 +226,7 @@ export function AdminClient({ roles, tabs, roleMap: initialRoleMap }: AdminClien
             <div className="absolute z-10 mt-1 w-full rounded-lg border border-gray-200 bg-white shadow-lg">
               {suggestions.map((emp) => (
                 <button
-                  key={emp.email}
+                  key={emp.email || emp.name}
                   onClick={() => selectEmployee(emp)}
                   className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm hover:bg-gray-50 first:rounded-t-lg last:rounded-b-lg"
                 >
