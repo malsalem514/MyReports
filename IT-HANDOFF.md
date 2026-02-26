@@ -285,3 +285,104 @@ docker compose -f docker-compose.production.yml up -d myreports
 - [ ] `docker logs myreports | grep scheduler` shows scheduler initialized
 - [ ] `ENABLE_SCHEDULER=true` confirmed in `myreports.env`
 - [ ] `docker logs watchtower` shows no credential errors (GHCR pull working)
+
+---
+
+## Combined Deployment (MyReports + Frappe/ERPNext)
+
+Use this when hosting both apps on the same server under one Docker Compose stack.
+
+### What You Get
+
+| URL | App |
+|-----|-----|
+| `myreports.jestais.com` | MyReports attendance dashboard |
+| `projects.jestais.com` | Frappe/ERPNext |
+
+Both are routed by a single Traefik container on port 80. The stack runs 13 containers total.
+
+### Prerequisites
+
+1. **Azure AD app registration** — ask your Entra ID admin to register an app and give you:
+   - `AZURE_AD_CLIENT_ID`
+   - `AZURE_AD_CLIENT_SECRET`
+   - `AZURE_AD_TENANT_ID`
+   - Set redirect URI to: `https://myreports.jestais.com/api/auth/callback/azure-ad`
+
+2. **DNS records** — point both domains to the server IP before starting.
+
+3. **GHCR login** (one-time — lets Watchtower auto-update MyReports):
+   ```bash
+   docker login ghcr.io -u malsalem514 -p <github_token_with_read:packages>
+   ```
+
+### Setup
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/malsalem514/MyReports
+cd MyReports
+
+# 2. Create and fill .env
+cp .env.combined.example .env
+nano .env   # fill in all values
+
+# 3. Generate NEXTAUTH_SECRET
+openssl rand -base64 32
+# paste the output into .env as NEXTAUTH_SECRET
+
+# 4. Start everything (13 containers)
+docker compose -f docker-compose.combined.yml up -d
+
+# 5. Verify all containers are running
+docker compose -f docker-compose.combined.yml ps
+```
+
+### Frappe First-Time Site Setup
+
+Run these once after the stack is up:
+
+```bash
+# Create the ERPNext site
+docker compose -f docker-compose.combined.yml exec backend \
+  bench new-site projects.jestais.com \
+  --mariadb-root-password <DB_PASSWORD from .env> \
+  --admin-password <choose an ERPNext admin password> \
+  --install-app erpnext
+
+# Set the hostname
+docker compose -f docker-compose.combined.yml exec backend \
+  bench --site projects.jestais.com set-config host_name https://projects.jestais.com
+
+# Set site as default
+docker compose -f docker-compose.combined.yml exec backend \
+  bench use projects.jestais.com
+```
+
+### Continuous Deployment (MyReports only)
+
+```
+git push to main
+      ↓
+GitHub Actions builds image → pushes to ghcr.io/malsalem514/myreports:latest
+      ↓
+Watchtower detects new digest (polls every 2 min)
+      ↓
+Pulls new image → restarts myreports container automatically
+```
+
+No server access needed after initial setup.
+
+### Common Operations
+
+| Task | Command |
+|------|---------|
+| View all logs | `docker compose -f docker-compose.combined.yml logs -f` |
+| MyReports logs only | `docker logs -f myreports` |
+| Frappe backend logs | `docker logs -f frappe-backend` |
+| Watchtower logs | `docker logs -f watchtower` |
+| Restart MyReports | `docker compose -f docker-compose.combined.yml restart myreports` |
+| Restart Frappe services | `docker compose -f docker-compose.combined.yml restart backend frontend websocket` |
+| Stop everything | `docker compose -f docker-compose.combined.yml down` |
+| Force pull latest MyReports | `docker compose -f docker-compose.combined.yml pull myreports && docker compose -f docker-compose.combined.yml up -d myreports` |
+| Update ERPNext version | Edit `ERPNEXT_VERSION` in `.env`, then `docker compose -f docker-compose.combined.yml up -d` |
