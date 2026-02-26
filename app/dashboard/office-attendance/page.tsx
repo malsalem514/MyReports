@@ -15,7 +15,7 @@ async function AttendanceData({ lookbackWeeks }: { lookbackWeeks: number }) {
   const allowedEmails = access.isHRAdmin ? undefined : access.allowedEmails;
 
   try {
-    const { rows, weeks, currentWeek, departments, locations, summary } = await getAttendanceReport(
+    const { rows, weeks, dataWeeks, currentWeek, departments, locations, summary } = await getAttendanceReport(
       startDate,
       endDate,
       OFFICE_DAYS_REQUIRED,
@@ -26,6 +26,7 @@ async function AttendanceData({ lookbackWeeks }: { lookbackWeeks: number }) {
       <AttendanceClient
         rows={rows}
         weeks={weeks}
+        dataWeeks={dataWeeks}
         currentWeek={currentWeek}
         departments={departments}
         locations={locations}
@@ -45,6 +46,7 @@ async function AttendanceData({ lookbackWeeks }: { lookbackWeeks: number }) {
         <AttendanceClient
           rows={[]}
           weeks={[]}
+          dataWeeks={[]}
           departments={[]}
           locations={[]}
           summary={{ totalEmployees: 0, avgOfficeDays: 0, complianceRate: 0, zeroOfficeDaysCount: 0 }}

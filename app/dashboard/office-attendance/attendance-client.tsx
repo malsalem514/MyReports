@@ -43,6 +43,8 @@ export interface AttendanceSummary {
 interface Props {
   rows: AttendanceRow[];
   weeks: string[];
+  /** Completed weeks with actual data — used for avg/compliance (subset of weeks) */
+  dataWeeks?: string[];
   currentWeek?: string | null;
   departments: string[];
   locations: string[];
@@ -79,6 +81,7 @@ function getCellHex(officeDays: number, ptoDays: number): string {
 export function AttendanceClient({
   rows,
   weeks,
+  dataWeeks,
   currentWeek = null,
   departments,
   locations,
@@ -185,7 +188,8 @@ export function AttendanceClient({
   // Recompute summary from filtered rows so filters affect summary cards
   const filteredSummary = useMemo(() => {
     const totalEmployees = filtered.length;
-    const cWeeks = currentWeek ? weeks.filter(w => w !== currentWeek) : weeks;
+    // Use dataWeeks (actual data weeks) to avoid dilution by empty display weeks
+    const cWeeks = dataWeeks ?? (currentWeek ? weeks.filter(w => w !== currentWeek) : weeks);
     const numCompletedWeeks = cWeeks.length;
     let compliantCount = 0, zeroCount = 0, sumOfficeDays = 0;
     for (const r of filtered) {
@@ -200,7 +204,7 @@ export function AttendanceClient({
       : 0;
     const complianceRate = totalEmployees > 0 ? Math.round((compliantCount / totalEmployees) * 100) : 0;
     return { totalEmployees, avgOfficeDays, complianceRate, zeroOfficeDaysCount: zeroCount };
-  }, [filtered, weeks, currentWeek]);
+  }, [filtered, weeks, dataWeeks, currentWeek]);
 
   const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
   const pageRows = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);

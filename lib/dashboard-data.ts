@@ -212,6 +212,8 @@ export async function getTimeOff(
 export interface AttendanceReportResult {
   rows: AttendanceRow[];
   weeks: string[];
+  /** Completed weeks that have actual attendance data — used for avg/compliance in client */
+  dataWeeks: string[];
   currentWeek: string | null;
   departments: string[];
   locations: string[];
@@ -358,18 +360,34 @@ export async function getAttendanceReport(
     });
   }
 
-  const weeks = [...weeksSet].sort();
-
   // --- Current-week detection (partial week — exclude from compliance/avg) ---
   const now = new Date();
   const currentDow = now.getDay(); // 0=Sun
   const currentMondayOffset = currentDow === 0 ? -6 : 1 - currentDow;
   const currentMonday = new Date(now);
   currentMonday.setDate(currentMonday.getDate() + currentMondayOffset);
+  currentMonday.setHours(0, 0, 0, 0);
   const currentWeekStr = toDateStr(currentMonday);
-  const isCurrentWeekInRange = weeks.includes(currentWeekStr);
-  const completedWeeks = isCurrentWeekInRange ? weeks.filter(w => w !== currentWeekStr) : weeks;
-  const numCompletedWeeks = completedWeeks.length;
+
+  // --- Generate ALL ISO weeks in the requested range for column display ---
+  // This ensures 16-week view always shows 16 columns regardless of data availability.
+  const allIsoWeeks: string[] = [];
+  {
+    const cur = new Date(startDate);
+    const dow = cur.getDay();
+    cur.setDate(cur.getDate() + (dow === 0 ? -6 : 1 - dow)); // rewind to ISO Monday
+    cur.setHours(0, 0, 0, 0);
+    while (toDateStr(cur) <= currentWeekStr) {
+      allIsoWeeks.push(toDateStr(cur));
+      cur.setDate(cur.getDate() + 7);
+    }
+  }
+  const weeks = allIsoWeeks;
+  const isCurrentWeekInRange = weeks.includes(currentWeekStr); // always true for valid ranges
+
+  // --- Data weeks: only weeks that have actual attendance records (for compliance/avg) ---
+  const completedDataWeeks = [...weeksSet].sort().filter(w => w !== currentWeekStr);
+  const numCompletedWeeks = completedDataWeeks.length;
 
   // --- Build flat rows ---
   const rows: AttendanceRow[] = [];
@@ -378,18 +396,19 @@ export async function getAttendanceReport(
 
   for (const [email, data] of empWeeks) {
     let total = 0;          // all weeks including current (for Total column)
-    let completedTotal = 0; // completed weeks only (for Avg)
+    let completedTotal = 0; // completed data weeks only (for Avg)
     let compliantWeekCount = 0;
     let excusedWeekCount = 0;
 
+    // Total: sum over all display weeks (empty weeks contribute 0)
     for (const wk of weeks) {
+      total += (data.weeks[wk]?.officeDays ?? 0);
+    }
+
+    // Compliance + avg: only over completed data weeks (weeks with any actual records)
+    for (const wk of completedDataWeeks) {
       const cell = data.weeks[wk];
       const officeDays = cell?.officeDays ?? 0;
-      total += officeDays;
-
-      // Skip current partial week for compliance evaluation
-      if (wk === currentWeekStr && isCurrentWeekInRange) continue;
-
       completedTotal += officeDays;
       const ptoDays = cell?.ptoDays ?? 0;
       const availableDays = 5 - ptoDays;
@@ -404,11 +423,11 @@ export async function getAttendanceReport(
 
     const compliant = numCompletedWeeks > 0 && (compliantWeekCount + excusedWeekCount) === numCompletedWeeks;
 
-    // Trend: compare last two completed weeks
+    // Trend: compare last two completed data weeks
     let trend: 'up' | 'down' | 'flat' = 'flat';
-    if (completedWeeks.length >= 2) {
-      const a = data.weeks[completedWeeks[completedWeeks.length - 2]!]?.officeDays || 0;
-      const b = data.weeks[completedWeeks[completedWeeks.length - 1]!]?.officeDays || 0;
+    if (completedDataWeeks.length >= 2) {
+      const a = data.weeks[completedDataWeeks[completedDataWeeks.length - 2]!]?.officeDays || 0;
+      const b = data.weeks[completedDataWeeks[completedDataWeeks.length - 1]!]?.officeDays || 0;
       if (b > a) trend = 'up';
       else if (b < a) trend = 'down';
     }
@@ -435,7 +454,7 @@ export async function getAttendanceReport(
   for (const r of rows) {
     if (r.compliant) compliantCount++;
     if (r.total === 0) zeroOfficeDaysCount++;
-    for (const wk of completedWeeks) {
+    for (const wk of completedDataWeeks) {
       sumCompletedOfficeDays += r.weeks[wk]?.officeDays ?? 0;
     }
   }
@@ -447,6 +466,7 @@ export async function getAttendanceReport(
   return {
     rows,
     weeks,
+    dataWeeks: completedDataWeeks,
     currentWeek: isCurrentWeekInRange ? currentWeekStr : null,
     departments: [...deptSet].sort(),
     locations: [...locSet].sort(),
