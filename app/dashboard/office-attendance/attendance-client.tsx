@@ -37,12 +37,13 @@ export interface AttendanceSummary {
   totalEmployees: number;
   avgOfficeDays: number;
   complianceRate: number;
-  zeroAttendanceCount: number;
+  zeroOfficeDaysCount: number;
 }
 
 interface Props {
   rows: AttendanceRow[];
   weeks: string[];
+  currentWeek?: string | null;
   departments: string[];
   locations: string[];
   summary: AttendanceSummary;
@@ -78,6 +79,7 @@ function getCellHex(officeDays: number, ptoDays: number): string {
 export function AttendanceClient({
   rows,
   weeks,
+  currentWeek = null,
   departments,
   locations,
   summary,
@@ -180,6 +182,26 @@ export function AttendanceClient({
     return arr;
   }, [filtered, sortKey, sortDir]);
 
+  // Recompute summary from filtered rows so filters affect summary cards
+  const filteredSummary = useMemo(() => {
+    const totalEmployees = filtered.length;
+    const cWeeks = currentWeek ? weeks.filter(w => w !== currentWeek) : weeks;
+    const numCompletedWeeks = cWeeks.length;
+    let compliantCount = 0, zeroCount = 0, sumOfficeDays = 0;
+    for (const r of filtered) {
+      if (r.compliant) compliantCount++;
+      if (r.total === 0) zeroCount++;
+      for (const wk of cWeeks) {
+        sumOfficeDays += r.weeks[wk]?.officeDays ?? 0;
+      }
+    }
+    const avgOfficeDays = totalEmployees > 0 && numCompletedWeeks > 0
+      ? Math.round((sumOfficeDays / totalEmployees / numCompletedWeeks) * 10) / 10
+      : 0;
+    const complianceRate = totalEmployees > 0 ? Math.round((compliantCount / totalEmployees) * 100) : 0;
+    return { totalEmployees, avgOfficeDays, complianceRate, zeroOfficeDaysCount: zeroCount };
+  }, [filtered, weeks, currentWeek]);
+
   const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
   const pageRows = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
@@ -226,14 +248,14 @@ export function AttendanceClient({
 
     // Summary row (must match header column count: Employee, Email, Department, Location, ...weeks, Total, Avg, Compliant, Trend)
     const summaryRow = ws.addRow([
-      `${summary.totalEmployees} employees`,
+      `${filteredSummary.totalEmployees} employees`,
       '',
-      `${summary.complianceRate}% compliant`,
+      `${filteredSummary.complianceRate}% compliant`,
       '', // Location column
       ...weeks.map(() => ''),
       '',
-      String(summary.avgOfficeDays),
-      `${summary.zeroAttendanceCount} zero-attendance`,
+      String(filteredSummary.avgOfficeDays),
+      `${filteredSummary.zeroOfficeDaysCount} zero office days`,
       '',
     ]);
     summaryRow.font = { italic: true, size: 10, color: { argb: '6B7280' } };
@@ -394,22 +416,22 @@ export function AttendanceClient({
       <div className="grid gap-4 sm:grid-cols-4">
         <div className="rounded-xl border border-gray-200 bg-white p-4">
           <p className="text-[11px] font-medium text-gray-500">Employees</p>
-          <p className="mt-1 text-[22px] font-semibold text-gray-900">{summary.totalEmployees}</p>
+          <p className="mt-1 text-[22px] font-semibold text-gray-900">{filteredSummary.totalEmployees}</p>
         </div>
         <div className="rounded-xl border border-gray-200 bg-white p-4">
-          <p className="text-[11px] font-medium text-gray-500">Avg Days/Week</p>
-          <p className="mt-1 text-[22px] font-semibold text-gray-900">{summary.avgOfficeDays}</p>
+          <p className="text-[11px] font-medium text-gray-500">Avg Office Days/Week</p>
+          <p className="mt-1 text-[22px] font-semibold text-gray-900">{filteredSummary.avgOfficeDays}</p>
         </div>
         <div className="rounded-xl border border-gray-200 bg-white p-4">
           <p className="text-[11px] font-medium text-gray-500">Compliance</p>
-          <p className={`mt-1 text-[22px] font-semibold ${summary.complianceRate >= 80 ? 'text-green-600' : summary.complianceRate >= 50 ? 'text-amber-600' : 'text-red-600'}`}>
-            {summary.complianceRate}%
+          <p className={`mt-1 text-[22px] font-semibold ${filteredSummary.complianceRate >= 80 ? 'text-green-600' : filteredSummary.complianceRate >= 50 ? 'text-amber-600' : 'text-red-600'}`}>
+            {filteredSummary.complianceRate}%
           </p>
         </div>
         <div className="rounded-xl border border-gray-200 bg-white p-4">
-          <p className="text-[11px] font-medium text-gray-500">Zero Attendance</p>
-          <p className={`mt-1 text-[22px] font-semibold ${summary.zeroAttendanceCount > 0 ? 'text-red-600' : 'text-gray-900'}`}>
-            {summary.zeroAttendanceCount}
+          <p className="text-[11px] font-medium text-gray-500">Zero Office Days</p>
+          <p className={`mt-1 text-[22px] font-semibold ${filteredSummary.zeroOfficeDaysCount > 0 ? 'text-red-600' : 'text-gray-900'}`}>
+            {filteredSummary.zeroOfficeDaysCount}
           </p>
         </div>
       </div>
@@ -648,16 +670,20 @@ export function AttendanceClient({
                 </th>
                 <SortHeader label="Dept" colKey="department" />
                 <SortHeader label="Location" colKey="officeLocation" />
-                {weeks.map((w) => (
-                  <th
-                    key={w}
-                    className="cursor-pointer select-none whitespace-nowrap px-2 py-3 text-center text-[10px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900"
-                    onClick={() => handleSort(w)}
-                  >
-                    {parseLocalDate(w).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                    {sortKey === w ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ''}
-                  </th>
-                ))}
+                {weeks.map((w) => {
+                  const isCurrent = w === currentWeek;
+                  return (
+                    <th
+                      key={w}
+                      className={`cursor-pointer select-none whitespace-nowrap px-2 py-3 text-center text-[10px] font-medium uppercase tracking-wider hover:text-gray-900 ${isCurrent ? 'bg-gray-50 text-gray-400' : 'text-gray-500'}`}
+                      onClick={() => handleSort(w)}
+                    >
+                      {parseLocalDate(w).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                      {isCurrent && <span className="ml-0.5 normal-case tracking-normal">*</span>}
+                      {sortKey === w ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ''}
+                    </th>
+                  );
+                })}
                 <SortHeader label="Total" colKey="total" align="center" />
                 <SortHeader label="Avg" colKey="avgPerWeek" align="center" />
                 <th className="whitespace-nowrap px-3 py-3 text-center text-[11px] font-medium uppercase tracking-wider text-gray-500">Status</th>
@@ -776,7 +802,8 @@ export function AttendanceClient({
         <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.compliant}`} /> {OFFICE_DAYS_REQUIRED}+ days</span>
         <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.partial}`} /> 1 day</span>
         <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.absent}`} /> 0 days</span>
-        <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.pto}`} /> PTO week</span>
+        <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.pto}`} /> PTO week (excused if insufficient working days)</span>
+        {currentWeek && <span className="flex items-center gap-1.5"><span className="text-gray-400">*</span> Current week (in progress, excluded from compliance)</span>}
       </div>
     </div>
   );

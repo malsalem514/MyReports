@@ -212,6 +212,7 @@ export async function getTimeOff(
 export interface AttendanceReportResult {
   rows: AttendanceRow[];
   weeks: string[];
+  currentWeek: string | null;
   departments: string[];
   locations: string[];
   summary: AttendanceSummary;
@@ -359,31 +360,55 @@ export async function getAttendanceReport(
 
   const weeks = [...weeksSet].sort();
 
-  // --- Build flat rows (no business logic — just shape for the client) ---
+  // --- Current-week detection (partial week — exclude from compliance/avg) ---
+  const now = new Date();
+  const currentDow = now.getDay(); // 0=Sun
+  const currentMondayOffset = currentDow === 0 ? -6 : 1 - currentDow;
+  const currentMonday = new Date(now);
+  currentMonday.setDate(currentMonday.getDate() + currentMondayOffset);
+  const currentWeekStr = toDateStr(currentMonday);
+  const isCurrentWeekInRange = weeks.includes(currentWeekStr);
+  const completedWeeks = isCurrentWeekInRange ? weeks.filter(w => w !== currentWeekStr) : weeks;
+  const numCompletedWeeks = completedWeeks.length;
+
+  // --- Build flat rows ---
   const rows: AttendanceRow[] = [];
   const deptSet = new Set<string>();
   const locSet = new Set<string>();
 
   for (const [email, data] of empWeeks) {
-    let total = 0;
-    let compliantWeeks = 0;
+    let total = 0;          // all weeks including current (for Total column)
+    let completedTotal = 0; // completed weeks only (for Avg)
+    let compliantWeekCount = 0;
+    let excusedWeekCount = 0;
 
     for (const wk of weeks) {
       const cell = data.weeks[wk];
-      if (cell) {
-        total += cell.officeDays;
-        if (cell.officeDays >= officeDaysRequired) compliantWeeks++;
+      const officeDays = cell?.officeDays ?? 0;
+      total += officeDays;
+
+      // Skip current partial week for compliance evaluation
+      if (wk === currentWeekStr && isCurrentWeekInRange) continue;
+
+      completedTotal += officeDays;
+      const ptoDays = cell?.ptoDays ?? 0;
+      const availableDays = 5 - ptoDays;
+
+      if (availableDays < officeDaysRequired) {
+        // Week excused: PTO left fewer working days than required
+        excusedWeekCount++;
+      } else if (officeDays >= officeDaysRequired) {
+        compliantWeekCount++;
       }
     }
 
-    const numWeeks = weeks.length;
-    const compliant = numWeeks > 0 && compliantWeeks === numWeeks;
+    const compliant = numCompletedWeeks > 0 && (compliantWeekCount + excusedWeekCount) === numCompletedWeeks;
 
-    // Trend: last 2 weeks
+    // Trend: compare last two completed weeks
     let trend: 'up' | 'down' | 'flat' = 'flat';
-    if (weeks.length >= 2) {
-      const a = data.weeks[weeks[weeks.length - 2]!]?.officeDays || 0;
-      const b = data.weeks[weeks[weeks.length - 1]!]?.officeDays || 0;
+    if (completedWeeks.length >= 2) {
+      const a = data.weeks[completedWeeks[completedWeeks.length - 2]!]?.officeDays || 0;
+      const b = data.weeks[completedWeeks[completedWeeks.length - 1]!]?.officeDays || 0;
       if (b > a) trend = 'up';
       else if (b < a) trend = 'down';
     }
@@ -398,32 +423,34 @@ export async function getAttendanceReport(
       officeLocation: data.officeLocation,
       weeks: data.weeks,
       total,
-      avgPerWeek: numWeeks > 0 ? Math.round((total / numWeeks) * 10) / 10 : 0,
+      avgPerWeek: numCompletedWeeks > 0 ? Math.round((completedTotal / numCompletedWeeks) * 10) / 10 : 0,
       compliant,
       trend,
     });
   }
 
-  // --- Summary (single pass) ---
+  // --- Summary ---
   const totalEmployees = rows.length;
-  const numWeeks = weeks.length;
-  let totalOfficeDays = 0, compliantCount = 0, zeroAttendanceCount = 0;
+  let compliantCount = 0, zeroOfficeDaysCount = 0, sumCompletedOfficeDays = 0;
   for (const r of rows) {
-    totalOfficeDays += r.total;
     if (r.compliant) compliantCount++;
-    if (r.total === 0) zeroAttendanceCount++;
+    if (r.total === 0) zeroOfficeDaysCount++;
+    for (const wk of completedWeeks) {
+      sumCompletedOfficeDays += r.weeks[wk]?.officeDays ?? 0;
+    }
   }
-  const avgOfficeDays = totalEmployees > 0 && numWeeks > 0
-    ? Math.round((totalOfficeDays / totalEmployees / numWeeks) * 10) / 10
+  const avgOfficeDays = totalEmployees > 0 && numCompletedWeeks > 0
+    ? Math.round((sumCompletedOfficeDays / totalEmployees / numCompletedWeeks) * 10) / 10
     : 0;
   const complianceRate = totalEmployees > 0 ? Math.round((compliantCount / totalEmployees) * 100) : 0;
 
   return {
     rows,
     weeks,
+    currentWeek: isCurrentWeekInRange ? currentWeekStr : null,
     departments: [...deptSet].sort(),
     locations: [...locSet].sort(),
-    summary: { totalEmployees, avgOfficeDays, complianceRate, zeroAttendanceCount },
+    summary: { totalEmployees, avgOfficeDays, complianceRate, zeroOfficeDaysCount },
   };
 }
 
