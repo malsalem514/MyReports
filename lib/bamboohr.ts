@@ -2,6 +2,17 @@ import { z } from 'zod';
 import { cachified } from './cache';
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+function formatLocalDate(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+// ============================================================================
 // Configuration
 // ============================================================================
 
@@ -274,8 +285,8 @@ export async function fetchTimeOffRequests(
   startDate: Date,
   endDate: Date,
 ): Promise<PTORecord[]> {
-  const startStr = startDate.toISOString().split('T')[0] ?? '';
-  const endStr = endDate.toISOString().split('T')[0] ?? '';
+  const startStr = formatLocalDate(startDate);
+  const endStr = formatLocalDate(endDate);
   try {
     return await cachified({
       key: `bamboohr:time-off:${startStr}:${endStr}`,

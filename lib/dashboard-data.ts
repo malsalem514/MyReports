@@ -198,8 +198,8 @@ export async function getTimeOff(
   return rows.map((r) => ({
     employeeId: r.EMPLOYEE_ID, employeeEmail: r.EMAIL || '',
     employeeName: r.EMPLOYEE_NAME || '', department: r.DEPARTMENT || '',
-    startDate: r.START_DATE.toISOString().split('T')[0] ?? '',
-    endDate: r.END_DATE.toISOString().split('T')[0] ?? '',
+    startDate: toDateStr(r.START_DATE),
+    endDate: toDateStr(r.END_DATE),
     type: r.TYPE || '', status: r.STATUS || '',
     amount: r.AMOUNT || 0, unit: r.UNIT || '',
   }));
