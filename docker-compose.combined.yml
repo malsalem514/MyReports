@@ -15,6 +15,8 @@
 #   Watchtower detects new digest → restarts myreports (~2 min)
 
 # ── Shared config for all Frappe services ────────────────────────────────────
+# x-frappe-image: image+platform only — used by configurator (needs custom restart/volumes/depends_on)
+# x-frappe-common: full worker baseline — used by all long-running Frappe services
 x-frappe-image: &frappe-image
   image: ${CUSTOM_IMAGE:-frappe/erpnext}:${CUSTOM_TAG:-${ERPNEXT_VERSION:?Set ERPNEXT_VERSION in .env}}
   platform: linux/amd64
@@ -29,10 +31,26 @@ x-frappe-common: &frappe-common
       condition: service_completed_successfully
   networks:
     - internal
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "20m"
+      max-file: "5"
 
 services:
 
   # ── Traefik (reverse proxy) ───────────────────────────────────────────────
+  # HTTP-only is intentional for corporate internal deployments where TLS is
+  # terminated upstream (load balancer / corporate firewall). Traefik never
+  # sees HTTPS traffic directly.
+  #
+  # To enable Let's Encrypt instead, replace the command block with:
+  #   - --entrypoints.http.address=:80
+  #   - --entrypoints.https.address=:443
+  #   - --certificatesresolvers.le.acme.tlschallenge=true
+  #   - --certificatesresolvers.le.acme.email=<your-email>
+  #   - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+  # and mount a letsencrypt volume, then add HTTPS router labels to services.
   traefik:
     image: traefik:v3.6
     container_name: traefik
@@ -62,7 +80,9 @@ services:
     container_name: frappe-db
     restart: unless-stopped
     healthcheck:
-      test: mysqladmin ping -h localhost --password=${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      # CMD-SHELL with double-dollar ($$) so the shell inside the container
+      # resolves $MYSQL_ROOT_PASSWORD — Compose never sees the plaintext value.
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD"]
       interval: 1s
       retries: 20
     environment:
@@ -73,21 +93,46 @@ services:
       - db-data:/var/lib/mysql
     networks:
       - internal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   # ── Redis (Frappe only) ───────────────────────────────────────────────────
   redis-cache:
     image: redis:6.2-alpine
     container_name: frappe-redis-cache
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     networks:
       - internal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   redis-queue:
     image: redis:6.2-alpine
     container_name: frappe-redis-queue
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     networks:
       - internal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   # ── Frappe Configurator (runs once on first start) ────────────────────────
   configurator:
@@ -179,6 +224,10 @@ services:
     container_name: frappe-scheduler
     command: bench schedule
 
+  # NOTE: myreports is intentionally on traefik-public only.
+  # It reaches Oracle via extra_hosts and BambooHR/Azure AD via internet.
+  # If ERPNext API access is needed later, add the internal network here.
+
   # ── MyReports (Next.js dashboard) ────────────────────────────────────────
   myreports:
     image: ghcr.io/malsalem514/myreports:latest
@@ -200,7 +249,7 @@ services:
       BIGQUERY_PROJECT_ID: ${BIGQUERY_PROJECT_ID:-}
       BIGQUERY_DATASET: ${BIGQUERY_DATASET:-}
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google-sa.json
-      ENABLE_SCHEDULER: "false"
+      ENABLE_SCHEDULER: "${ENABLE_SCHEDULER:-false}"
     extra_hosts:
       - "${ORACLE_DB_HOST:-srv-db-100}:${ORACLE_DB_IP:?Set ORACLE_DB_IP in .env}"
     volumes:
@@ -213,7 +262,7 @@ services:
       retries: 3
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.myreports.rule=Host(`${MYREPORTS_DOMAIN}`)"
+      - "traefik.http.routers.myreports.rule=Host(`${MYREPORTS_DOMAIN:?Set MYREPORTS_DOMAIN in .env}`)"
       - "traefik.http.routers.myreports.entrypoints=http"
       - "traefik.http.services.myreports.loadbalancer.server.port=3773"
       - "com.centurylinklabs.watchtower.enable=true"
@@ -231,6 +280,9 @@ services:
     container_name: watchtower
     restart: unless-stopped
     volumes:
+      # WARNING: Mounting the Docker socket grants Watchtower full control over
+      # the Docker daemon. This is required for Watchtower to pull images and
+      # restart containers. Ensure the host socket is access-controlled.
       - /var/run/docker.sock:/var/run/docker.sock
       - /root/.docker/config.json:/config.json:ro
     command: --interval 120 --cleanup --label-enable
