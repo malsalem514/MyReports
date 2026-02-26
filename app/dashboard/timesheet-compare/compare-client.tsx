@@ -350,7 +350,7 @@ export function CompareClient({ rows, weeks, departments, summary, unmappedEmail
             </thead>
             <tbody className="divide-y divide-gray-100">
               {pageRows.map((row) => (
-                <tr key={row.email} className="hover:bg-gray-50">
+                <tr key={row.email || row.name} className="hover:bg-gray-50">
                   <td className="sticky left-0 z-10 bg-white px-4 py-2">
                     <p className="whitespace-nowrap text-[13px] font-medium text-gray-900">{row.name}</p>
                     <p className="text-[10px] text-gray-400">TBS #{row.tbsEmployeeNo}</p>

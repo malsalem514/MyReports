@@ -7,7 +7,9 @@ import { CompareClient } from './compare-client';
 
 async function CompareData({ lookbackWeeks }: { lookbackWeeks: number }) {
   const endDate = new Date();
+  endDate.setHours(23, 59, 59, 999);
   const startDate = sub(endDate, { weeks: lookbackWeeks });
+  startDate.setHours(0, 0, 0, 0);
 
   const access = await getAccessContext();
   const allowedEmails = access.isHRAdmin ? undefined : access.allowedEmails;

@@ -26,7 +26,9 @@ export default async function EmployeePage({
   if (!canAccessEmployee(access, email)) notFound();
 
   const endDate = sp.endDate ? new Date(sp.endDate) : new Date();
+  endDate.setHours(23, 59, 59, 999);
   const startDate = sp.startDate ? new Date(sp.startDate) : new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+  startDate.setHours(0, 0, 0, 0);
 
   let employee = null as Awaited<ReturnType<typeof getEmployeeByEmail>>;
   let attendance = [] as Awaited<ReturnType<typeof getAttendance>>;

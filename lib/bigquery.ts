@@ -18,8 +18,14 @@ const DAILY_USER_SUMMARY_TABLE = 'daily_user_summary';
 // Schemas
 // ============================================================================
 
+/** Parse "YYYY-MM-DD" as local midnight (not UTC) to avoid oracledb timezone shift */
+function parseLocalDate(s: string): Date {
+  const [y, m, d] = s.split('-').map(Number);
+  return new Date(y!, m! - 1, d!);
+}
+
 const RawDailyUserSummarySchema = z.object({
-  local_date: z.object({ value: z.string() }).transform((d) => new Date(d.value)),
+  local_date: z.object({ value: z.string() }).transform((d) => parseLocalDate(d.value)),
   user_name: z.string(),
   user_id: z.number().optional(),
   productive_active_duration_seconds: z.number().nullable().default(0),
@@ -244,7 +250,7 @@ async function _fetchOfficeAttendanceDataUncached(
     const ptoHours = Number(row.time_off_seconds || 0) / 3600;
     const isPTO = ptoHours > 0 || ((row.time_off_day_count as number) > 0);
     return {
-      date: new Date((row.local_date as { value: string })?.value || (row.local_date as string)),
+      date: parseLocalDate((row.local_date as { value: string })?.value || (row.local_date as string)),
       email: ((row.email as string) || '').toLowerCase(),
       displayName: (row.user_name as string) || '',
       location: normalizeLocation(row.location as string),
@@ -283,7 +289,10 @@ export async function fetchOfficeAttendanceData(
 // ============================================================================
 
 function formatDate(date: Date): string {
-  return date.toISOString().split('T')[0] ?? '';
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 function normalizeLocation(location: string | null): 'Office' | 'Remote' | 'Unknown' {

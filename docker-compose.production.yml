@@ -1,0 +1,67 @@
+# docker-compose.production.yml
+#
+# ── AUTOMATIC UPDATES (CI/CD) ────────────────────────────────────────────────
+# Pushing to the main branch on GitHub automatically builds and pushes a new
+# image to GHCR. Watchtower (below) polls every 2 minutes and restarts the
+# container when a new image is detected — no server access required.
+#
+# ── ONE-TIME SERVER SETUP (run once, then never needed again) ────────────────
+#   docker login ghcr.io -u malsalem514 -p <github_token_with_read:packages>
+#   See IT-HANDOFF.md § CI/CD Setup for details.
+#
+# ── PREREQUISITES ─────────────────────────────────────────────────────────────
+#   1. Create myreports.env from the template in IT-HANDOFF.md
+#   2. Export shell variables:
+#        export ORACLE_DB_HOST=srv-db-100
+#        export ORACLE_DB_IP=<oracle server ip>
+#        export GOOGLE_SA_JSON_PATH=/secure/path/to/google-sa.json  # REQUIRED — no default
+#
+# Run: docker compose -f docker-compose.production.yml up -d
+
+services:
+  myreports:
+    image: ghcr.io/malsalem514/myreports:latest
+    container_name: myreports
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    # Note: place this behind a reverse proxy or firewall — port 3000 is otherwise open on the host
+    env_file:
+      - myreports.env
+    extra_hosts:
+      - "${ORACLE_DB_HOST:-srv-db-100}:${ORACLE_DB_IP:?ORACLE_DB_IP must be set (IP address of Oracle server)}"
+    volumes:
+      - "${GOOGLE_SA_JSON_PATH}:/run/secrets/google-sa.json:ro"
+    healthcheck:
+      # Uses node fetch (not curl) — base image is node:20-slim which has no curl/wget
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Watchtower — polls GHCR every 2 min and hot-swaps the image when a new one is pushed.
+  # Requires GHCR credentials: docker login ghcr.io -u malsalem514 -p <github_token>
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/.docker/config.json:/config.json:ro
+    # --label-enable  : only update containers with the watchtower label (safer on shared hosts)
+    # --cleanup       : remove old image layers after update (saves disk)
+    # --interval 120  : poll every 2 minutes
+    command: --interval 120 --cleanup --label-enable
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

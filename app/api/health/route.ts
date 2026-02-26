@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { auth } from '@/auth';
 import { query as oracleQuery } from '@/lib/oracle';
 import { getBigQueryClient } from '@/lib/bigquery';
 
@@ -82,6 +83,12 @@ export async function GET(request: NextRequest) {
       service: 'myreports',
       timestamp: new Date().toISOString(),
     });
+  }
+
+  // Deep diagnostic exposes internal error messages — require an authenticated session.
+  const session = await auth();
+  if (!session?.user?.email) {
+    return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
   }
 
   const [oracleResult, bigQueryResult, bambooResult] = await Promise.all([
