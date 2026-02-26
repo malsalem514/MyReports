@@ -1,9 +1,17 @@
 # docker-compose.production.yml
 #
-# Prerequisites:
-#   1. docker load -i myreports-latest.tar
-#   2. Create myreports.env from the template in IT-HANDOFF.md
-#   3. Export shell variables:
+# ── AUTOMATIC UPDATES (CI/CD) ────────────────────────────────────────────────
+# Pushing to the main branch on GitHub automatically builds and pushes a new
+# image to GHCR. Watchtower (below) polls every 2 minutes and restarts the
+# container when a new image is detected — no server access required.
+#
+# ── ONE-TIME SERVER SETUP (run once, then never needed again) ────────────────
+#   docker login ghcr.io -u malsalem514 -p <github_token_with_read:packages>
+#   See IT-HANDOFF.md § CI/CD Setup for details.
+#
+# ── PREREQUISITES ─────────────────────────────────────────────────────────────
+#   1. Create myreports.env from the template in IT-HANDOFF.md
+#   2. Export shell variables:
 #        export ORACLE_DB_HOST=srv-db-100
 #        export ORACLE_DB_IP=<oracle server ip>
 #        export GOOGLE_SA_JSON_PATH=/secure/path/to/google-sa.json  # REQUIRED — no default
@@ -12,7 +20,7 @@
 
 services:
   myreports:
-    image: myreports:latest
+    image: ghcr.io/malsalem514/myreports:latest
     container_name: myreports
     restart: unless-stopped
     ports:
@@ -31,8 +39,29 @@ services:
       timeout: 10s
       start_period: 40s
       retries: 3
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     logging:
       driver: "json-file"
       options:
         max-size: "50m"
         max-file: "5"
+
+  # Watchtower — polls GHCR every 2 min and hot-swaps the image when a new one is pushed.
+  # Requires GHCR credentials: docker login ghcr.io -u malsalem514 -p <github_token>
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/.docker/config.json:/config.json:ro
+    # --label-enable  : only update containers with the watchtower label (safer on shared hosts)
+    # --cleanup       : remove old image layers after update (saves disk)
+    # --interval 120  : poll every 2 minutes
+    command: --interval 120 --cleanup --label-enable
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

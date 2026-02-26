@@ -17,24 +17,35 @@ A scheduler inside the container syncs data at **6 AM, 12 PM, and 3 PM Toronto t
 ## What You Receive
 
 ```
-myreports-latest.tar           ← Docker image (load this first)
-docker-compose.production.yml  ← Start/stop the container
+docker-compose.production.yml  ← Start/stop the container (image pulled from GHCR automatically)
 IT-HANDOFF.md                  ← This document
 ```
 
+The Docker image is built and published automatically via GitHub Actions whenever code is
+merged to `main`. You do not need to manually load any `.tar` file.
+
 ---
 
-## Step 1 — Load the Docker image
+## Step 1 — One-time GHCR login (enables auto-updates)
+
+The container image lives in GitHub Container Registry (GHCR). Log in once so Docker can
+pull it and so Watchtower can check for updates automatically:
 
 ```bash
-docker load -i myreports-latest.tar
+docker login ghcr.io -u malsalem514 -p <github_personal_access_token>
 ```
 
-Expected output: `Loaded image: myreports:latest`
+**Creating the token** (takes 2 minutes):
+1. Go to GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens
+2. Set scope: **Read access to packages** (repository: `malsalem514/MyReports`)
+3. Paste the token as the password above
+
+This is needed **once**. Credentials are saved to `/root/.docker/config.json` and
+Watchtower reads them automatically for all future updates.
 
 ---
 
-## Step 2 — Create the environment file
+## Step 2 — Create the environment file (secrets)
 
 Create a file called **`myreports.env`** in the same folder as `docker-compose.production.yml`.
 This file holds all secrets. **Do not commit it to any repository. Set permissions to 600.**
@@ -95,7 +106,15 @@ export GOOGLE_SA_JSON_PATH=/secure/path/to/google-sa.json  # REQUIRED — no def
 docker compose -f docker-compose.production.yml up -d
 ```
 
-Expected: `✔ Container myreports  Started`
+Expected:
+```
+✔ Container myreports   Started
+✔ Container watchtower  Started
+```
+
+Docker will pull `ghcr.io/malsalem514/myreports:latest` automatically on first start.
+After that, **Watchtower handles all future updates** — no manual steps needed when
+developers push new code.
 
 ---
 
@@ -177,21 +196,47 @@ If `ENABLE_SCHEDULER` is not set to `true`, no syncs happen and data must be loa
 
 ---
 
+## Continuous Deployment
+
+Once the container is running, all future code updates are fully automatic:
+
+```
+Developer pushes to main
+       ↓
+GitHub Actions builds image (~3-5 min)
+       ↓
+Image pushed to ghcr.io/malsalem514/myreports:latest
+       ↓
+Watchtower detects new digest (within 2 min)
+       ↓
+Container restarted with new image automatically
+```
+
+To check if Watchtower updated the container:
+```bash
+docker logs watchtower --tail=50
+```
+
+---
+
 ## Common Operations
 
 ```bash
-# View live logs
+# View live app logs
 docker logs myreports --tail=100 -f
 
-# Restart
-docker compose -f docker-compose.production.yml restart
+# View Watchtower update logs
+docker logs watchtower --tail=50
 
-# Stop
+# Restart the app (e.g. after env change)
+docker compose -f docker-compose.production.yml restart myreports
+
+# Stop everything
 docker compose -f docker-compose.production.yml down
 
-# Update to a new image version
-docker load -i myreports-latest.tar
-docker compose -f docker-compose.production.yml up -d
+# Force an immediate update (pull latest image and restart)
+docker compose -f docker-compose.production.yml pull myreports
+docker compose -f docker-compose.production.yml up -d myreports
 ```
 
 ---
@@ -223,14 +268,20 @@ docker compose -f docker-compose.production.yml up -d
 
 ## Pre Go-Live Checklist
 
+**One-time server setup:**
+- [ ] `docker login ghcr.io` completed with a GitHub token that has `read:packages` scope
 - [ ] `myreports.env` created — no empty required fields
 - [ ] `AUTH_SECRET` is a long random string (`openssl rand -base64 32`)
 - [ ] `NEXTAUTH_URL` matches the exact URL users will visit (with `https://`)
 - [ ] Azure AD redirect URI added: `https://your-domain.com/api/auth/callback/microsoft-entra-id`
 - [ ] Oracle reachable from the server (`ping 172.16.25.63` or `ping srv-db-100`)
 - [ ] Google SA JSON file exists at path in `GOOGLE_SA_JSON_PATH`
+
+**Verification:**
+- [ ] `docker ps` shows both `myreports` and `watchtower` running
 - [ ] `curl http://localhost:3000/api/health` returns `"status":"ok"`
 - [ ] Reverse proxy configured — `https://your-domain.com` loads the login page
 - [ ] Login tested with a real Microsoft account
 - [ ] `docker logs myreports | grep scheduler` shows scheduler initialized
 - [ ] `ENABLE_SCHEDULER=true` confirmed in `myreports.env`
+- [ ] `docker logs watchtower` shows no credential errors (GHCR pull working)
