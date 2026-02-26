@@ -21,7 +21,7 @@ services:
     env_file:
       - myreports.env
     extra_hosts:
-      - "${ORACLE_DB_HOST:-srv-db-100}:${ORACLE_DB_IP}"
+      - "${ORACLE_DB_HOST:-srv-db-100}:${ORACLE_DB_IP:?ORACLE_DB_IP must be set (IP address of Oracle server)}"
     volumes:
       - "${GOOGLE_SA_JSON_PATH}:/run/secrets/google-sa.json:ro"
     healthcheck:
