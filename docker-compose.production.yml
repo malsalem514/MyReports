@@ -1,0 +1,36 @@
+# docker-compose.production.yml
+#
+# Prerequisites:
+#   1. docker load -i myreports-latest.tar
+#   2. Create myreports.env from the template in IT-HANDOFF.md
+#   3. Export shell variables:
+#        export ORACLE_DB_HOST=srv-db-100
+#        export ORACLE_DB_IP=<oracle server ip>
+#        export GOOGLE_SA_JSON_PATH=/secure/path/to/google-sa.json
+#
+# Run: docker compose -f docker-compose.production.yml up -d
+
+services:
+  myreports:
+    image: myreports:latest
+    container_name: myreports
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - myreports.env
+    extra_hosts:
+      - "${ORACLE_DB_HOST:-srv-db-100}:${ORACLE_DB_IP}"
+    volumes:
+      - "${GOOGLE_SA_JSON_PATH}:/run/secrets/google-sa.json:ro"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
