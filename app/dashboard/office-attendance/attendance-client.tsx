@@ -47,6 +47,7 @@ interface Props {
   locations: string[];
   summary: AttendanceSummary;
   lookbackWeeks: number;
+  validationEnabled?: boolean;
 }
 
 type SortKey = 'name' | 'department' | 'officeLocation' | 'total' | 'avgPerWeek' | 'trend' | string;
@@ -74,7 +75,15 @@ function getCellHex(officeDays: number, ptoDays: number): string {
   return CELL_HEX.absent;
 }
 
-export function AttendanceClient({ rows, weeks, departments, locations, summary, lookbackWeeks }: Props) {
+export function AttendanceClient({
+  rows,
+  weeks,
+  departments,
+  locations,
+  summary,
+  lookbackWeeks,
+  validationEnabled = true,
+}: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -88,6 +97,7 @@ export function AttendanceClient({ rows, weeks, departments, locations, summary,
   const [page, setPage] = useState(0);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [validationOpen, setValidationOpen] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
   const deptRef = useRef<HTMLDivElement>(null);
@@ -255,14 +265,26 @@ export function AttendanceClient({ rows, weeks, departments, locations, summary,
     downloadBlob(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `office-attendance-${lookbackWeeks}w.xlsx`);
   };
 
-  const SortHeader = ({ label, colKey, align = 'left' }: { label: string; colKey: SortKey; align?: string }) => (
-    <th
-      className={`cursor-pointer select-none whitespace-nowrap px-3 py-3 text-${align} text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900`}
-      onClick={() => handleSort(colKey)}
-    >
-      {label} {sortKey === colKey ? (sortDir === 'asc' ? '↑' : '↓') : ''}
-    </th>
-  );
+  const SortHeader = ({
+    label,
+    colKey,
+    align = 'left',
+  }: {
+    label: string;
+    colKey: SortKey;
+    align?: 'left' | 'center' | 'right';
+  }) => {
+    const alignClass =
+      align === 'center' ? 'text-center' : align === 'right' ? 'text-right' : 'text-left';
+    return (
+      <th
+        className={`cursor-pointer select-none whitespace-nowrap px-3 py-3 ${alignClass} text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900`}
+        onClick={() => handleSort(colKey)}
+      >
+        {label} {sortKey === colKey ? (sortDir === 'asc' ? '↑' : '↓') : ''}
+      </th>
+    );
+  };
 
   return (
     <div className="space-y-6">
@@ -396,22 +418,48 @@ export function AttendanceClient({ rows, weeks, departments, locations, summary,
       <div className="flex items-center gap-3">
         <button
           onClick={() => {
+            if (!validationEnabled) return;
             if (validation) { setValidationOpen((v) => !v); return; }
             startTransition(async () => {
-              const result = await validateAttendanceData(lookbackWeeks);
-              setValidation(result);
-              setValidationOpen(true);
+              try {
+                setValidationError(null);
+                const result = await validateAttendanceData(lookbackWeeks);
+                setValidation(result);
+                setValidationOpen(true);
+              } catch (error) {
+                setValidation(null);
+                setValidationOpen(false);
+                setValidationError(
+                  error instanceof Error
+                    ? error.message
+                    : 'Validation failed. Please try again.',
+                );
+              }
             });
           }}
-          disabled={isPending}
+          disabled={isPending || !validationEnabled}
           className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-[12px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
         >
-          {isPending ? 'Validating...' : validation ? (validationOpen ? 'Hide Validation' : 'Show Validation') : 'Validate vs ActivTrak'}
+          {!validationEnabled
+            ? 'Validation Unavailable'
+            : isPending
+              ? 'Validating...'
+              : validation
+                ? (validationOpen ? 'Hide Validation' : 'Show Validation')
+                : 'Validate vs ActivTrak'}
         </button>
         {validation && !validationOpen ? (
           validation.discrepancies.length === 0
             ? <span className="text-[12px] font-medium text-green-600">All 3 sources match</span>
             : <span className="text-[12px] font-medium text-amber-600">{validation.discrepancies.length} discrepancies found</span>
+        ) : null}
+        {validationError ? (
+          <span className="text-[12px] font-medium text-red-600">{validationError}</span>
+        ) : null}
+        {!validationEnabled ? (
+          <span className="text-[12px] font-medium text-amber-600">
+            Validation requires live Oracle/BigQuery/BambooHR connectivity.
+          </span>
         ) : null}
       </div>
 

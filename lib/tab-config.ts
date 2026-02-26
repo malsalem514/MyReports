@@ -71,7 +71,9 @@ export async function getVisibleTabs(
     if (err && typeof err === 'object' && 'errorNum' in err && (err as { errorNum: number }).errorNum === 942) {
       return FALLBACK_ROLES[role] || [...TAB_KEYS];
     }
-    throw err;
+    // Any datasource outage should not block the UI shell.
+    console.warn('Tab visibility query failed, using fallback role defaults.', err);
+    return FALLBACK_ROLES[role] || [...TAB_KEYS];
   }
 
   // If no role rows exist yet (tables exist but empty), use fallback

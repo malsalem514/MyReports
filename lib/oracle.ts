@@ -188,6 +188,17 @@ export async function initializeSchema(): Promise<void> {
         DATE_RANGE_END DATE
       )
     `);
+    await safeExecuteDDL(conn, `
+      CREATE TABLE TL_TBS_EMPLOYEE_MAP (
+        ID NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        EMAIL VARCHAR2(255) NOT NULL,
+        TBS_EMPLOYEE_NO NUMBER NOT NULL,
+        CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT TL_TBS_EMPLOYEE_MAP_UQ_EMAIL UNIQUE (EMAIL),
+        CONSTRAINT TL_TBS_EMPLOYEE_MAP_UQ_NO UNIQUE (TBS_EMPLOYEE_NO)
+      )
+    `);
     await safeExecuteDDL(conn, `CREATE INDEX TL_ATT_DATE_IDX ON TL_ATTENDANCE(RECORD_DATE)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_ATT_EMAIL_IDX ON TL_ATTENDANCE(EMAIL)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_PROD_DATE_IDX ON TL_PRODUCTIVITY(RECORD_DATE)`);
@@ -195,6 +206,70 @@ export async function initializeSchema(): Promise<void> {
     await safeExecuteDDL(conn, `CREATE INDEX TL_PTO_DATE_IDX ON TL_TIME_OFF(START_DATE, END_DATE)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_EMP_DEPT_IDX ON TL_EMPLOYEES(DEPARTMENT)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_EMP_STATUS_IDX ON TL_EMPLOYEES(STATUS)`);
+    await safeExecuteDDL(conn, `CREATE INDEX TL_TBS_MAP_EMAIL_IDX ON TL_TBS_EMPLOYEE_MAP(EMAIL)`);
+    await safeExecuteDDL(conn, `CREATE INDEX TL_TBS_MAP_NO_IDX ON TL_TBS_EMPLOYEE_MAP(TBS_EMPLOYEE_NO)`);
+
+    // Weekly report views used by the dashboard pages.
+    await safeExecuteDDL(conn, `
+      CREATE OR REPLACE VIEW V_ATTENDANCE_WEEKLY AS
+      SELECT
+        EMAIL,
+        DISPLAY_NAME,
+        DEPARTMENT,
+        OFFICE_LOCATION,
+        WEEK_START,
+        SUM(OFFICE_DAYS) AS OFFICE_DAYS,
+        SUM(REMOTE_DAYS) AS REMOTE_DAYS
+      FROM (
+        SELECT
+          LOWER(e.EMAIL) AS EMAIL,
+          NVL(e.DISPLAY_NAME, e.EMAIL) AS DISPLAY_NAME,
+          NVL(e.DEPARTMENT, 'Unknown') AS DEPARTMENT,
+          NVL(e.LOCATION, 'Unknown') AS OFFICE_LOCATION,
+          TRUNC(d.RECORD_DATE, 'IW') AS WEEK_START,
+          CASE WHEN d.LOCATION = 'Office' THEN 1 ELSE 0 END AS OFFICE_DAYS,
+          CASE WHEN d.LOCATION = 'Remote' THEN 1 ELSE 0 END AS REMOTE_DAYS
+        FROM TL_EMPLOYEES e
+        JOIN (
+          SELECT EMAIL, RECORD_DATE, LOCATION
+          FROM (
+            SELECT
+              EMAIL,
+              RECORD_DATE,
+              LOCATION,
+              ROW_NUMBER() OVER (
+                PARTITION BY EMAIL, TRUNC(RECORD_DATE)
+                ORDER BY DECODE(LOCATION, 'Office', 1, 'Remote', 2, 3)
+              ) AS rn
+            FROM TL_ATTENDANCE
+            WHERE TO_CHAR(RECORD_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')
+          )
+          WHERE rn = 1
+        ) d ON LOWER(d.EMAIL) = LOWER(e.EMAIL)
+        WHERE e.EMAIL IS NOT NULL
+          AND (e.STATUS IS NULL OR UPPER(e.STATUS) != 'INACTIVE')
+      )
+      GROUP BY EMAIL, DISPLAY_NAME, DEPARTMENT, OFFICE_LOCATION, WEEK_START
+    `);
+
+    await safeExecuteDDL(conn, `
+      CREATE OR REPLACE VIEW V_PTO_WEEKLY AS
+      SELECT
+        LOWER(EMAIL) AS EMAIL,
+        TRUNC(PTO_DATE, 'IW') AS WEEK_START,
+        COUNT(*) AS PTO_DAYS
+      FROM (
+        SELECT
+          t.EMAIL,
+          t.START_DATE + LEVEL - 1 AS PTO_DATE
+        FROM TL_TIME_OFF t
+        CONNECT BY LEVEL <= (TRUNC(t.END_DATE) - TRUNC(t.START_DATE) + 1)
+          AND PRIOR t.ROWID = t.ROWID
+          AND PRIOR SYS_GUID() IS NOT NULL
+      )
+      WHERE TO_CHAR(PTO_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')
+      GROUP BY LOWER(EMAIL), TRUNC(PTO_DATE, 'IW')
+    `);
 
     // Tab visibility — role defaults
     await safeExecuteDDL(conn, `

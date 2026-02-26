@@ -18,9 +18,13 @@ const TAB_LABELS: Record<TabKey, string> = {
 
 export default async function DashboardLayout({ children }: { children: ReactNode }) {
   const access = await getAccessContext();
+  if (!access.userEmail) {
+    redirect('/login');
+  }
+
   const visibleTabs = await getVisibleTabs(access.userEmail, access);
 
-  const navItems = visibleTabs.map((key) => ({
+  const navItems: Array<{ key: string; path: string; label: string }> = visibleTabs.map((key) => ({
     key,
     path: TAB_ROUTES[key],
     label: TAB_LABELS[key],
@@ -28,8 +32,11 @@ export default async function DashboardLayout({ children }: { children: ReactNod
 
   // Add Admin link for HR admins (hardcoded, not configurable)
   if (access.isHRAdmin) {
-    navItems.push({ key: 'admin' as TabKey, path: '/dashboard/admin', label: 'Admin' });
+    navItems.push({ key: 'admin', path: '/dashboard/admin', label: 'Admin' });
   }
+
+  // Employee search is available to all authenticated users.
+  navItems.push({ key: 'search', path: '/dashboard/search', label: 'Employee Search' });
 
   // Protect hidden routes: redirect if current path is not in visible tabs
   const headersList = await headers();
@@ -41,6 +48,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
     // Also allow sub-paths like /dashboard/employee/[email]
     const isAllowed =
       allowedPaths.has(pathname) ||
+      pathname === '/dashboard/search' ||
       pathname.startsWith('/dashboard/employee/') ||
       pathname === '/dashboard/admin';
     if (!isAllowed && pathname !== '/dashboard') {

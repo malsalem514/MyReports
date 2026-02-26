@@ -149,14 +149,26 @@ export function CompareClient({ rows, weeks, departments, summary, unmappedEmail
     URL.revokeObjectURL(url);
   };
 
-  const SortHeader = ({ label, colKey, align = 'left' }: { label: string; colKey: SortKey; align?: string }) => (
-    <th
-      className={`cursor-pointer select-none whitespace-nowrap px-3 py-3 text-${align} text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900`}
-      onClick={() => handleSort(colKey)}
-    >
-      {label} {sortKey === colKey ? (sortDir === 'asc' ? '↑' : '↓') : ''}
-    </th>
-  );
+  const SortHeader = ({
+    label,
+    colKey,
+    align = 'left',
+  }: {
+    label: string;
+    colKey: SortKey;
+    align?: 'left' | 'center' | 'right';
+  }) => {
+    const alignClass =
+      align === 'center' ? 'text-center' : align === 'right' ? 'text-right' : 'text-left';
+    return (
+      <th
+        className={`cursor-pointer select-none whitespace-nowrap px-3 py-3 ${alignClass} text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900`}
+        onClick={() => handleSort(colKey)}
+      >
+        {label} {sortKey === colKey ? (sortDir === 'asc' ? '↑' : '↓') : ''}
+      </th>
+    );
+  };
 
   return (
     <div className="space-y-6">

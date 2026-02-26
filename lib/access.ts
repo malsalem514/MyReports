@@ -67,10 +67,10 @@ export async function getAccessContextByEmail(
     (admin) => admin.toLowerCase() === normalizedEmail,
   );
 
-  try {
-    const allEmployees = await fetchEmployeeDirectory();
-
-    if (isHRAdmin) {
+  // HR-admin access must not depend on external directory availability.
+  if (isHRAdmin) {
+    try {
+      const allEmployees = await fetchEmployeeDirectory();
       const allEmails = allEmployees
         .filter((emp) => emp.workEmail)
         .map((emp) => emp.workEmail!.toLowerCase());
@@ -80,11 +80,27 @@ export async function getAccessContextByEmail(
         employeeName: 'HR Admin',
         isHRAdmin: true,
         isManager: true,
-        allowedEmails: allEmails,
+        allowedEmails: allEmails.length > 0 ? allEmails : [normalizedEmail],
         directReportCount: allEmails.length,
         totalReportCount: allEmails.length,
       };
+    } catch (error) {
+      console.error('Error fetching HR admin directory context from BambooHR:', error);
+      return {
+        userEmail: normalizedEmail,
+        employeeId: null,
+        employeeName: 'HR Admin',
+        isHRAdmin: true,
+        isManager: true,
+        allowedEmails: [normalizedEmail],
+        directReportCount: 0,
+        totalReportCount: 0,
+      };
     }
+  }
+
+  try {
+    const allEmployees = await fetchEmployeeDirectory();
 
     const currentUser = allEmployees.find(
       (emp) => emp.workEmail?.toLowerCase() === normalizedEmail,

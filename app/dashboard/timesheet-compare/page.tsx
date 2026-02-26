@@ -12,22 +12,49 @@ async function CompareData({ lookbackWeeks }: { lookbackWeeks: number }) {
   const access = await getAccessContext();
   const allowedEmails = access.isHRAdmin ? undefined : access.allowedEmails;
 
-  const { rows, weeks, departments, summary, unmappedEmails } = await getTbsComparisonReport(
-    startDate,
-    endDate,
-    allowedEmails,
-  );
+  try {
+    const { rows, weeks, departments, summary, unmappedEmails } = await getTbsComparisonReport(
+      startDate,
+      endDate,
+      allowedEmails,
+    );
 
-  return (
-    <CompareClient
-      rows={rows}
-      weeks={weeks}
-      departments={departments}
-      summary={summary}
-      unmappedEmails={unmappedEmails}
-      lookbackWeeks={lookbackWeeks}
-    />
-  );
+    return (
+      <CompareClient
+        rows={rows}
+        weeks={weeks}
+        departments={departments}
+        summary={summary}
+        unmappedEmails={unmappedEmails}
+        lookbackWeeks={lookbackWeeks}
+      />
+    );
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Timesheet datasource unavailable';
+    return (
+      <div className="space-y-3">
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-[12px] text-amber-800">
+          TBS comparison data is currently unavailable. {message}
+        </div>
+        <CompareClient
+          rows={[]}
+          weeks={[]}
+          departments={[]}
+          summary={{
+            totalEmployees: 0,
+            mappedEmployees: 0,
+            unmappedEmployees: 0,
+            totalDiscrepancies: 0,
+            bambooPtoNotInTbs: 0,
+            tbsPtoNotInBamboo: 0,
+          }}
+          unmappedEmails={[]}
+          lookbackWeeks={lookbackWeeks}
+        />
+      </div>
+    );
+  }
 }
 
 function CompareSkeleton() {

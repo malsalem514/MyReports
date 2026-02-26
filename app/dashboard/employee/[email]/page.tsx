@@ -28,13 +28,41 @@ export default async function EmployeePage({
   const endDate = sp.endDate ? new Date(sp.endDate) : new Date();
   const startDate = sp.startDate ? new Date(sp.startDate) : new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-  const [employee, attendance, timeOff] = await Promise.all([
-    getEmployeeByEmail(email),
-    getAttendance(startDate, endDate, [email]),
-    getTimeOff(startDate, endDate, [email]),
-  ]);
+  let employee = null as Awaited<ReturnType<typeof getEmployeeByEmail>>;
+  let attendance = [] as Awaited<ReturnType<typeof getAttendance>>;
+  let timeOff = [] as Awaited<ReturnType<typeof getTimeOff>>;
+  let dataError: string | null = null;
 
-  if (!employee) notFound();
+  try {
+    [employee, attendance, timeOff] = await Promise.all([
+      getEmployeeByEmail(email),
+      getAttendance(startDate, endDate, [email]),
+      getTimeOff(startDate, endDate, [email]),
+    ]);
+  } catch (error) {
+    dataError =
+      error instanceof Error ? error.message : 'Employee data source unavailable';
+  }
+
+  if (!employee && !dataError) notFound();
+  if (!employee && dataError) {
+    employee = {
+      id: '',
+      email,
+      displayName: email,
+      firstName: null,
+      lastName: null,
+      jobTitle: null,
+      department: null,
+      division: null,
+      location: null,
+      supervisorId: null,
+      supervisorEmail: null,
+      hireDate: null,
+      status: null,
+    };
+  }
+  const resolvedEmployee = employee!;
 
   let officeDays = 0, remoteDays = 0, totalHours = 0;
   for (const r of attendance) {
@@ -62,6 +90,11 @@ export default async function EmployeePage({
 
   return (
     <div className="space-y-8">
+      {dataError && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-[12px] text-amber-800">
+          Some employee data is currently unavailable. {dataError}
+        </div>
+      )}
       {/* Back */}
       <Link href="/dashboard/search" className="text-[12px] text-gray-500 hover:text-gray-900">
         ← Back to search
@@ -70,13 +103,13 @@ export default async function EmployeePage({
       {/* Profile */}
       <div className="flex items-start gap-6">
         <div className="flex h-16 w-16 items-center justify-center rounded-full bg-gray-100 text-[24px] font-medium text-gray-600">
-          {(employee.displayName || employee.email).charAt(0).toUpperCase()}
+          {(resolvedEmployee.displayName || resolvedEmployee.email).charAt(0).toUpperCase()}
         </div>
         <div>
-          <h2 className="text-[18px] font-semibold text-gray-900">{employee.displayName || `${employee.firstName} ${employee.lastName}`}</h2>
-          <p className="text-[13px] text-gray-600">{employee.jobTitle || 'No title'}</p>
-          <p className="text-[12px] text-gray-500">{employee.department} · {employee.location}</p>
-          <p className="text-[12px] text-gray-400">{employee.email}</p>
+          <h2 className="text-[18px] font-semibold text-gray-900">{resolvedEmployee.displayName || `${resolvedEmployee.firstName} ${resolvedEmployee.lastName}`}</h2>
+          <p className="text-[13px] text-gray-600">{resolvedEmployee.jobTitle || 'No title'}</p>
+          <p className="text-[12px] text-gray-500">{resolvedEmployee.department} · {resolvedEmployee.location}</p>
+          <p className="text-[12px] text-gray-400">{resolvedEmployee.email}</p>
         </div>
       </div>
 

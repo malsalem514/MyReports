@@ -10,10 +10,15 @@ export default async function AdminPage() {
     redirect('/dashboard');
   }
 
-  // Ensure tab tables exist (idempotent — safe to call on every load)
-  await initializeSchema();
-
-  const roleDefaults = await getRoleDefaults();
+  let roleDefaults: Awaited<ReturnType<typeof getRoleDefaults>> = [];
+  let dataError: string | null = null;
+  try {
+    // Ensure tab tables exist (idempotent — safe to call on every load)
+    await initializeSchema();
+    roleDefaults = await getRoleDefaults();
+  } catch (error) {
+    dataError = error instanceof Error ? error.message : 'Admin datasource unavailable';
+  }
 
   // Build role→tab→visible map
   const roles = ['hr-admin', 'manager', 'employee'] as const;
@@ -31,10 +36,17 @@ export default async function AdminPage() {
   }
 
   return (
-    <AdminClient
-      roles={[...roles]}
-      tabs={[...TAB_KEYS]}
-      roleMap={roleMap}
-    />
+    <div className="space-y-4">
+      {dataError && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-[12px] text-amber-800">
+          Admin configuration data is currently unavailable. {dataError}
+        </div>
+      )}
+      <AdminClient
+        roles={[...roles]}
+        tabs={[...TAB_KEYS]}
+        roleMap={roleMap}
+      />
+    </div>
   );
 }

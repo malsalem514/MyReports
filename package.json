@@ -1,0 +1,41 @@
+{
+  "name": "myreports",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "docker:build": "docker build -t myreports:latest .",
+    "docker:save": "docker save myreports:latest -o myreports-latest.tar",
+    "e2e:preflight": "scripts/preflight-e2e.sh .env.e2e",
+    "e2e:up": "docker compose --env-file .env.e2e -f docker-compose.e2e.yml up -d --build",
+    "e2e:down": "docker compose --env-file .env.e2e -f docker-compose.e2e.yml down",
+    "e2e:logs": "docker compose --env-file .env.e2e -f docker-compose.e2e.yml logs --tail=200 -f"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@google-cloud/bigquery": "^7.9.2",
+    "date-fns": "^4.1.0",
+    "exceljs": "^4.4.0",
+    "next": "^15.1.0",
+    "next-auth": "^5.0.0-beta.25",
+    "node-cron": "^4.2.1",
+    "oracledb": "^6.10.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.8.3"
+  }
+}

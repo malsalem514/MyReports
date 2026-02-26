@@ -12,23 +12,45 @@ async function AttendanceData({ lookbackWeeks }: { lookbackWeeks: number }) {
   const access = await getAccessContext();
   const allowedEmails = access.isHRAdmin ? undefined : access.allowedEmails;
 
-  const { rows, weeks, departments, locations, summary } = await getAttendanceReport(
-    startDate,
-    endDate,
-    OFFICE_DAYS_REQUIRED,
-    allowedEmails,
-  );
+  try {
+    const { rows, weeks, departments, locations, summary } = await getAttendanceReport(
+      startDate,
+      endDate,
+      OFFICE_DAYS_REQUIRED,
+      allowedEmails,
+    );
 
-  return (
-    <AttendanceClient
-      rows={rows}
-      weeks={weeks}
-      departments={departments}
-      locations={locations}
-      summary={summary}
-      lookbackWeeks={lookbackWeeks}
-    />
-  );
+    return (
+      <AttendanceClient
+        rows={rows}
+        weeks={weeks}
+        departments={departments}
+        locations={locations}
+        summary={summary}
+        lookbackWeeks={lookbackWeeks}
+        validationEnabled
+      />
+    );
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Attendance datasource unavailable';
+    return (
+      <div className="space-y-3">
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-[12px] text-amber-800">
+          Attendance data is currently unavailable. {message}
+        </div>
+        <AttendanceClient
+          rows={[]}
+          weeks={[]}
+          departments={[]}
+          locations={[]}
+          summary={{ totalEmployees: 0, avgOfficeDays: 0, complianceRate: 0, zeroAttendanceCount: 0 }}
+          lookbackWeeks={lookbackWeeks}
+          validationEnabled={false}
+        />
+      </div>
+    );
+  }
 }
 
 function AttendanceSkeleton() {

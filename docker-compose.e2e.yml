@@ -1,0 +1,16 @@
+services:
+  myreports:
+    image: myreports:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: myreports-e2e
+    ports:
+      - "3001:3000"
+    env_file:
+      - .env.e2e
+    extra_hosts:
+      - "${ORACLE_DB_HOST:-srv-db-100}:${ORACLE_DB_IP:-172.16.25.63}"
+    volumes:
+      - "${GOOGLE_SA_JSON_PATH}:/run/secrets/google-sa.json:ro"
+    restart: unless-stopped

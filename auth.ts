@@ -2,6 +2,7 @@ import NextAuth from 'next-auth';
 import MicrosoftEntraId from 'next-auth/providers/microsoft-entra-id';
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
+  trustHost: true,
   providers: [
     MicrosoftEntraId({
       clientId: process.env.AZURE_AD_CLIENT_ID!,
@@ -20,18 +21,19 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   callbacks: {
     jwt({ token, account, profile }) {
       if (account && profile) {
-        token.email = profile.email ?? (profile as Record<string, unknown>).preferred_username as string;
+        token.email =
+          profile.email ??
+          ((profile as Record<string, unknown>).preferred_username as string);
         token.name = profile.name;
       }
       return token;
     },
     session({ session, token }) {
-      if (token.email) {
-        session.user.email = token.email;
-      }
-      if (token.name) {
-        session.user.name = token.name;
-      }
+      session.user = {
+        ...session.user,
+        email: token.email ? String(token.email) : session.user?.email || '',
+        name: token.name ? String(token.name) : session.user?.name || '',
+      };
       return session;
     },
   },
