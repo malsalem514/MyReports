@@ -1,65 +1,236 @@
-# IT Handoff: MyReports Container
+# IT Handoff: MyReports
 
-## 1) Build image
+## What You're Deploying
 
-```bash
-docker build -t myreports:latest .
+MyReports is a Next.js web application providing HR attendance and timesheet
+reporting dashboards. It connects to four external services:
+
+- **Oracle DB** — primary data store (on your network at `srv-db-100`)
+- **Google BigQuery** — attendance source data (requires a service account JSON file)
+- **BambooHR** — employee directory (cloud API, requires API key)
+- **Microsoft Azure AD** — user login via Microsoft SSO
+
+A scheduler inside the container syncs data at **6 AM, 12 PM, and 3 PM Toronto time** daily.
+
+---
+
+## What You Receive
+
+```
+myreports-latest.tar           ← Docker image (load this first)
+docker-compose.production.yml  ← Start/stop the container
+IT-HANDOFF.md                  ← This document
 ```
 
-## 2) Export image archive to share
+---
 
-```bash
-docker save myreports:latest -o myreports-latest.tar
-```
-
-## 3) Run in IT environment
+## Step 1 — Load the Docker image
 
 ```bash
 docker load -i myreports-latest.tar
-
-docker run -d \
-  --name myreports \
-  -p 3000:3000 \
-  --env-file /secure/path/myreports.env \
-  --add-host srv-db-100:172.16.25.63 \
-  -v /secure/path/google-sa.json:/run/secrets/google-sa.json:ro \
-  myreports:latest
 ```
 
-## 4) Required env vars
+Expected output: `Loaded image: myreports:latest`
 
-- `AUTH_SECRET`
-- `NEXTAUTH_URL`
-- `AZURE_AD_CLIENT_ID`
-- `AZURE_AD_CLIENT_SECRET`
-- `AZURE_AD_TENANT_ID`
-- `ORACLE_USER`
-- `ORACLE_PASSWORD`
-- `ORACLE_CONNECT_STRING`
-- `BIGQUERY_PROJECT_ID`
-- `BIGQUERY_DATASET`
-- `GOOGLE_APPLICATION_CREDENTIALS` (should be `/run/secrets/google-sa.json`)
-- `BAMBOOHR_API_KEY`
-- `BAMBOOHR_SUBDOMAIN`
-- `ORACLE_DB_HOST` (optional for compose; default `srv-db-100`)
-- `ORACLE_DB_IP` (required if Oracle host is not resolvable inside container)
+---
 
-## 5) Health checks
+## Step 2 — Create the environment file
 
-- App URL: `http://<host>:3000/login`
-- Successful login redirects to `/dashboard`
-- Dashboard pages load without 500 errors
-- Basic health endpoint: `GET /api/health`
-- Deep integration check: `GET /api/health?deep=1` (returns `503` if Oracle/BigQuery/BambooHR are unavailable, with failure reasons in `details`)
+Create a file called **`myreports.env`** in the same folder as `docker-compose.production.yml`.
+This file holds all secrets. **Do not commit it to any repository. Set permissions to 600.**
 
-## 6) Missing-Items Checklist (before go-live)
+```bash
+chmod 600 myreports.env
+```
 
-- Oracle host resolvable inside container (either DNS works or `--add-host` is set)
-- BigQuery service account file mounted and `GOOGLE_APPLICATION_CREDENTIALS` points to it
-- Valid BambooHR API key
-- Valid Azure Entra app credentials (if not using bypass mode)
+Contents of `myreports.env`:
 
-## 7) Notes
+```env
+# ── Authentication ──────────────────────────────────────────────────────────
+AUTH_SECRET=<run: openssl rand -base64 32>
+NEXTAUTH_URL=https://your-domain.com          # Exact URL users will visit
 
-- Scheduler is not auto-started by default in this web container.
-- If scheduled sync is needed, run sync via an external cron job or dedicated worker process.
+AZURE_AD_CLIENT_ID=<from Azure App Registration>
+AZURE_AD_CLIENT_SECRET=<from Azure App Registration>
+AZURE_AD_TENANT_ID=<your Azure tenant ID>
+
+# ── Oracle Database ─────────────────────────────────────────────────────────
+ORACLE_USER=timelogs
+ORACLE_PASSWORD=<oracle password>
+ORACLE_CONNECT_STRING=srv-db-100/suppops
+
+# ── Google BigQuery ─────────────────────────────────────────────────────────
+BIGQUERY_PROJECT_ID=us-activtrak-ac-prod
+BIGQUERY_DATASET=672561
+GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/google-sa.json
+
+# ── BambooHR ────────────────────────────────────────────────────────────────
+BAMBOOHR_API_KEY=<bamboohr api key>
+BAMBOOHR_SUBDOMAIN=jestais
+
+# ── Scheduler ───────────────────────────────────────────────────────────────
+ENABLE_SCHEDULER=true          # Syncs at 6 AM / 12 PM / 3 PM Toronto time
+
+# ── DANGER — never set this in production ───────────────────────────────────
+# DEV_BYPASS_AUTH=true         # Disables ALL login checks — setting this is a no-op in production
+```
+
+---
+
+## Step 3 — Export shell variables
+
+Run these in the same terminal before starting compose:
+
+```bash
+export ORACLE_DB_HOST=srv-db-100
+export ORACLE_DB_IP=172.16.25.63          # IP address of Oracle server
+export GOOGLE_SA_JSON_PATH=/secure/path/to/google-sa.json  # REQUIRED — no default
+```
+
+---
+
+## Step 4 — Start the container
+
+```bash
+docker compose -f docker-compose.production.yml up -d
+```
+
+Expected: `✔ Container myreports  Started`
+
+---
+
+## Step 5 — Verify it's running
+
+```bash
+# Basic liveness check (public — no login required)
+curl http://localhost:3000/api/health
+
+# Full integration check (requires a logged-in session — see note below)
+curl http://localhost:3000/api/health?deep=1
+```
+
+**Basic response** (always works if container started):
+```json
+{"status":"ok","service":"myreports","timestamp":"2026-02-26T10:00:00.000Z"}
+```
+
+**Deep response when all integrations are healthy:**
+```json
+{"status":"ok","checks":{"oracle":true,"bigQuery":true,"bambooHR":true}}
+```
+
+**Deep response when something is failing:**
+```json
+{"status":"degraded","checks":{"oracle":false,"bigQuery":true,"bambooHR":true},
+ "details":{"oracle":{"ok":false,"error":"ORA-12541: no listener"}}}
+```
+
+> **Note:** `/api/health?deep=1` requires a valid login session. To use it for monitoring,
+> log in via the browser first, then use browser devtools to copy the session cookie.
+> For automated monitoring, use the basic `/api/health` endpoint instead.
+
+---
+
+## Step 6 — Configure reverse proxy
+
+The container listens on **port 3000**. Point your reverse proxy (nginx, IIS, Traefik)
+at `localhost:3000`. Do not expose port 3000 directly to the internet.
+
+**Required nginx config** for Microsoft SSO redirects to work correctly:
+
+```nginx
+location / {
+    proxy_pass         http://localhost:3000;
+    proxy_set_header   Host              $host;
+    proxy_set_header   X-Real-IP         $remote_addr;
+    proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header   X-Forwarded-Proto $scheme;
+}
+```
+
+**Also required in Azure Portal** — add a redirect URI to your App Registration:
+```
+https://your-domain.com/api/auth/callback/microsoft-entra-id
+```
+
+`NEXTAUTH_URL` in `myreports.env` must exactly match the URL users visit (including `https://`).
+
+---
+
+## Scheduler
+
+The container runs a built-in data sync scheduler:
+
+| Time (Toronto) | Job |
+|---|---|
+| 6:00 AM | Full 7-day sync (employees, attendance, time-off) |
+| 12:00 PM | 1-day refresh |
+| 3:00 PM | 1-day refresh |
+
+To confirm the scheduler started after deployment:
+```bash
+docker logs myreports | grep -i scheduler
+```
+Expected: `Scheduler initialized. Syncs at 6 AM, 12 PM, 3 PM ET.`
+
+If `ENABLE_SCHEDULER` is not set to `true`, no syncs happen and data must be loaded manually.
+
+---
+
+## Common Operations
+
+```bash
+# View live logs
+docker logs myreports --tail=100 -f
+
+# Restart
+docker compose -f docker-compose.production.yml restart
+
+# Stop
+docker compose -f docker-compose.production.yml down
+
+# Update to a new image version
+docker load -i myreports-latest.tar
+docker compose -f docker-compose.production.yml up -d
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Page doesn't load at all | Reverse proxy not configured, or container not running | Check `docker ps`; check nginx/IIS config |
+| Login redirect error | `NEXTAUTH_URL` doesn't match actual URL | Update and restart |
+| Login works but dashboard is empty | Oracle or BigQuery unreachable | Log in, then run `/api/health?deep=1` in browser |
+| `/api/health` returns connection refused | Container not running | `docker compose up -d` |
+| Container exits immediately | Missing or invalid env var | `docker logs myreports` to see the error |
+| Scheduler not syncing | `ENABLE_SCHEDULER` not `true` | Add to `myreports.env` and restart |
+| `oracle: false` in health check | Oracle host not reachable | Verify `ORACLE_DB_IP`; check `extra_hosts` in compose |
+| `bigQuery: false` in health check | Service account file missing or invalid | Verify `GOOGLE_SA_JSON_PATH` and file contents |
+| `bambooHR: false` in health check | Invalid or expired API key | Verify `BAMBOOHR_API_KEY` in `myreports.env` |
+
+---
+
+## Security Notes
+
+- `myreports.env` contains credentials — store it securely (`chmod 600 myreports.env`)
+- The Google service account JSON is mounted read-only (`:ro`) — do not change this
+- The container runs as a non-root user (uid 1001)
+- `DEV_BYPASS_AUTH=true` is a development flag — it is automatically disabled in production even if set
+
+---
+
+## Pre Go-Live Checklist
+
+- [ ] `myreports.env` created — no empty required fields
+- [ ] `AUTH_SECRET` is a long random string (`openssl rand -base64 32`)
+- [ ] `NEXTAUTH_URL` matches the exact URL users will visit (with `https://`)
+- [ ] Azure AD redirect URI added: `https://your-domain.com/api/auth/callback/microsoft-entra-id`
+- [ ] Oracle reachable from the server (`ping 172.16.25.63` or `ping srv-db-100`)
+- [ ] Google SA JSON file exists at path in `GOOGLE_SA_JSON_PATH`
+- [ ] `curl http://localhost:3000/api/health` returns `"status":"ok"`
+- [ ] Reverse proxy configured — `https://your-domain.com` loads the login page
+- [ ] Login tested with a real Microsoft account
+- [ ] `docker logs myreports | grep scheduler` shows scheduler initialized
+- [ ] `ENABLE_SCHEDULER=true` confirmed in `myreports.env`
