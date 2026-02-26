@@ -4,7 +4,7 @@ export async function register() {
 
   // Initialize Oracle schema on every startup (idempotent — safe to re-run)
   try {
-    const { initializeDataStore } = await import('./lib/scheduler');
+    const { initializeDataStore } = await import(/* webpackIgnore: true */ './lib/scheduler');
     await initializeDataStore(false);
   } catch (err) {
     // Log but don't crash — app should start even if Oracle is temporarily down
@@ -13,7 +13,7 @@ export async function register() {
 
   // Start the cron scheduler
   try {
-    const { initializeScheduler } = await import('./lib/scheduler');
+    const { initializeScheduler } = await import(/* webpackIgnore: true */ './lib/scheduler');
     initializeScheduler();
   } catch (err) {
     console.error('[startup] Scheduler initialization failed:', err);
