@@ -15,3 +15,4 @@ google-sa.json
 coverage
 *.tsbuildinfo
 *.tar
+.claude/

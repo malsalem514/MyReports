@@ -285,3 +285,221 @@ docker compose -f docker-compose.production.yml up -d myreports
 - [ ] `docker logs myreports | grep scheduler` shows scheduler initialized
 - [ ] `ENABLE_SCHEDULER=true` confirmed in `myreports.env`
 - [ ] `docker logs watchtower` shows no credential errors (GHCR pull working)
+
+---
+
+## Combined Deployment (MyReports + Frappe/ERPNext)
+
+Use this when hosting both apps on the same server under one Docker Compose stack.
+
+### What You Get
+
+| URL | App |
+|-----|-----|
+| `myreports.jestais.com` | MyReports attendance dashboard |
+| `projects.jestais.com` | Frappe/ERPNext |
+
+Both are routed by a single Traefik container on port 80. The stack runs 13 containers total.
+
+### Prerequisites
+
+1. **Azure AD app registration** — ask your Entra ID admin to register an app and give you:
+   - `AZURE_AD_CLIENT_ID`
+   - `AZURE_AD_CLIENT_SECRET`
+   - `AZURE_AD_TENANT_ID`
+   - Set redirect URI to: `https://myreports.jestais.com/api/auth/callback/azure-ad`
+
+2. **DNS records** — point both domains to the server IP before starting.
+
+3. **GHCR login** (one-time — lets Watchtower auto-update MyReports):
+   ```bash
+   docker login ghcr.io -u malsalem514 -p <github_token_with_read:packages>
+   ```
+
+### Setup
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/malsalem514/MyReports
+cd MyReports
+
+# 2. Create and fill .env
+cp .env.combined.example .env
+nano .env   # fill in all values
+
+# 3. Generate NEXTAUTH_SECRET
+openssl rand -base64 32
+# paste the output into .env as NEXTAUTH_SECRET
+
+# 4. Start everything (13 containers)
+docker compose -f docker-compose.combined.yml up -d
+
+# 5. Verify all containers are running
+docker compose -f docker-compose.combined.yml ps
+```
+
+### Frappe First-Time Site Setup
+
+Run these once after the stack is up:
+
+```bash
+# Create the ERPNext site
+docker compose -f docker-compose.combined.yml exec backend \
+  bench new-site projects.jestais.com \
+  --mariadb-root-password <DB_PASSWORD from .env> \
+  --admin-password <choose an ERPNext admin password> \
+  --install-app erpnext
+
+# Set the hostname
+docker compose -f docker-compose.combined.yml exec backend \
+  bench --site projects.jestais.com set-config host_name https://projects.jestais.com
+
+# Set site as default
+docker compose -f docker-compose.combined.yml exec backend \
+  bench use projects.jestais.com
+
+# ── CRITICAL: Enable Server Scripts ───────────────────────────────────────────
+# This allows the ERPNext administrator to add custom business logic,
+# validations, and automations entirely through the web interface — without
+# needing server or container access after handoff.
+# Must be set NOW, before handing over to the business admin.
+docker compose -f docker-compose.combined.yml exec backend \
+  bench --site projects.jestais.com set-config server_script_enabled 1
+
+# Restart workers so the setting takes effect
+docker compose -f docker-compose.combined.yml restart backend queue-short queue-long
+```
+
+### ERPNext Pre-Handoff Checklist
+
+Complete this checklist **before** giving the admin credentials to the business team.
+Once handed off, these steps require container access to undo.
+
+**Site configuration (server-side — do once):**
+- [ ] ERPNext site created and accessible at `https://projects.jestais.com`
+- [ ] `server_script_enabled = 1` — set via command above
+- [ ] `host_name` set correctly (HTTPS URL — affects cookies and email links)
+- [ ] Admin password noted and ready to hand to business admin
+- [ ] Backup confirmed working: `docker exec frappe-backend bench --site projects.jestais.com backup`
+
+**What the business admin CAN do without server access (after handoff):**
+
+| Task | Where in ERPNext |
+|---|---|
+| Add custom fields to any form | `Awesome Bar > Custom Field` |
+| Add validation / automation logic | `Awesome Bar > Server Script` |
+| Add UI show/hide / custom buttons | `Awesome Bar > Client Script` |
+| Customize print format layout | `Awesome Bar > Print Format` |
+| Set company branding / logo | `Company master > upload logo` |
+| Manage users and roles | `Home > Users` |
+| Configure modules per user | `Awesome Bar > Module Profile` |
+| Set up workflows | `Awesome Bar > Workflow` |
+| Schedule reports by email | `Awesome Bar > Auto Email Report` |
+
+**What still requires container access (cannot be done via web UI):**
+
+| Task | Why |
+|---|---|
+| Install a new Frappe app | `bench get-app` + `bench install-app` |
+| White-label the Desk navbar/CSS | Requires custom app + `hooks.py` changes |
+| Run database migrations | `bench migrate` |
+| Change `server_script_enabled` toggle | Site config — requires `bench set-config` |
+| Restore a backup | `bench --site … restore` |
+
+### Metabase Setup (BI / Analytics)
+
+Metabase starts automatically with the stack at `https://analytics.jestais.com`.
+**First boot takes ~2 minutes** (Java + database migrations) — the health check will show
+`starting` until it's ready.
+
+#### Step 1 — Create a read-only MariaDB user for Metabase
+
+Run this once after `bench new-site`. Replace `<password>` and the database name
+(the database name matches your site name with dots replaced by underscores,
+e.g. `projects_jestais_com`):
+
+```bash
+docker exec -it frappe-db mariadb -u root -p${DB_PASSWORD}
+```
+
+Then in the MariaDB prompt:
+
+```sql
+CREATE USER 'metabase_ro'@'%' IDENTIFIED BY '<choose a password>';
+GRANT SELECT ON `projects_jestais_com`.* TO 'metabase_ro'@'%';
+FLUSH PRIVILEGES;
+EXIT;
+```
+
+> **Why read-only?** Metabase never needs to write to ERPNext's database. A read-only
+> user prevents accidental data modification and limits blast radius if credentials leak.
+
+#### Step 2 — First-time Metabase UI setup
+
+1. Open `https://analytics.jestais.com` — you'll see the Metabase setup wizard
+2. Create your admin account (email + password)
+3. When asked **"Add your data"**, choose **MariaDB** and enter:
+   - **Host:** `frappe-db`
+   - **Port:** `3306`
+   - **Database name:** `projects_jestais_com` (your ERPNext site db)
+   - **Username:** `metabase_ro`
+   - **Password:** the password you set above
+4. Click **"Test connection"** → should show ✅
+5. Finish setup
+
+#### What you can do in Metabase
+
+| Task | How |
+|---|---|
+| Browse ERPNext tables | Browse Data → frappe-db → pick any table |
+| Write SQL queries | New → SQL query → select frappe-db |
+| Build visual charts | New → Question → select table → pick chart type |
+| Assemble dashboards | New → Dashboard → add saved questions/charts |
+| Schedule email reports | Dashboard → `...` → Subscriptions → add email/Slack |
+| Share a dashboard | Dashboard → Share → public link or embed |
+
+#### Useful ERPNext tables in Metabase
+
+| Table | Contains |
+|---|---|
+| `tabSales Invoice` | All sales invoices |
+| `tabSales Invoice Item` | Line items per invoice |
+| `tabProject` | Projects with billing/cost totals |
+| `tabTimesheet Detail` | Individual time logs |
+| `tabPayment Entry` | Payments received/made |
+| `tabCustomer` | Customer master |
+| `tabEmployee` | Employee master |
+| `tabGL Entry` | Full general ledger (every accounting entry) |
+
+> **Tip:** All ERPNext doctypes are stored as `tab<DocType Name>` in MariaDB.
+> Use Metabase's table browser to explore — all fields are visible.
+
+---
+
+### Continuous Deployment (MyReports only)
+
+```
+git push to main
+      ↓
+GitHub Actions builds image → pushes to ghcr.io/malsalem514/myreports:latest
+      ↓
+Watchtower detects new digest (polls every 2 min)
+      ↓
+Pulls new image → restarts myreports container automatically
+```
+
+No server access needed after initial setup.
+
+### Common Operations
+
+| Task | Command |
+|------|---------|
+| View all logs | `docker compose -f docker-compose.combined.yml logs -f` |
+| MyReports logs only | `docker logs -f myreports` |
+| Frappe backend logs | `docker logs -f frappe-backend` |
+| Watchtower logs | `docker logs -f watchtower` |
+| Restart MyReports | `docker compose -f docker-compose.combined.yml restart myreports` |
+| Restart Frappe services | `docker compose -f docker-compose.combined.yml restart backend frontend websocket` |
+| Stop everything | `docker compose -f docker-compose.combined.yml down` |
+| Force pull latest MyReports | `docker compose -f docker-compose.combined.yml pull myreports && docker compose -f docker-compose.combined.yml up -d myreports` |
+| Update ERPNext version | Edit `ERPNEXT_VERSION` in `.env`, then `docker compose -f docker-compose.combined.yml up -d` |

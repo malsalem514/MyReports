@@ -1,0 +1,382 @@
+# docker-compose.combined.yml
+#
+# ── ROUTING ──────────────────────────────────────────────────────────────────
+#   projects.jestais.com   → Frappe/ERPNext  (frontend:8080 internal)
+#   myreports.jestais.com  → MyReports       (myreports:3773 internal)
+#   analytics.jestais.com  → Metabase BI     (metabase:3000 internal)
+#
+# ── FIRST-TIME SETUP ─────────────────────────────────────────────────────────
+#   1. cp .env.combined.example .env  and fill in all values
+#   2. docker login ghcr.io -u malsalem514 -p <github_token_read_packages>
+#   3. docker compose -f docker-compose.combined.yml up -d
+#   4. Run Frappe site creation (see IT-HANDOFF.md § Frappe Setup)
+#
+# ── CI/CD ─────────────────────────────────────────────────────────────────────
+#   Push to main → GitHub Actions builds image → pushes to GHCR →
+#   Watchtower detects new digest → restarts myreports (~2 min)
+
+# ── Shared config for all Frappe services ────────────────────────────────────
+# x-frappe-image: image+platform only — used by configurator (needs custom restart/volumes/depends_on)
+# x-frappe-common: full worker baseline — used by all long-running Frappe services
+x-frappe-image: &frappe-image
+  image: ${CUSTOM_IMAGE:-frappe/erpnext}:${CUSTOM_TAG:-${ERPNEXT_VERSION:?Set ERPNEXT_VERSION in .env}}
+  platform: linux/amd64
+
+x-frappe-common: &frappe-common
+  <<: *frappe-image
+  restart: unless-stopped
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+  depends_on:
+    configurator:
+      condition: service_completed_successfully
+  networks:
+    - internal
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+
+  # ── Traefik (reverse proxy) ───────────────────────────────────────────────
+  # HTTP-only is intentional for corporate internal deployments where TLS is
+  # terminated upstream (load balancer / corporate firewall). Traefik never
+  # sees HTTPS traffic directly.
+  #
+  # To enable Let's Encrypt instead, replace the command block with:
+  #   - --entrypoints.http.address=:80
+  #   - --entrypoints.https.address=:443
+  #   - --certificatesresolvers.le.acme.tlschallenge=true
+  #   - --certificatesresolvers.le.acme.email=<your-email>
+  #   - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+  # and mount a letsencrypt volume, then add HTTPS router labels to services.
+  traefik:
+    image: traefik:v3.6
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=traefik-public
+      - --entrypoints.http.address=:80
+      - --accesslog
+      - --log
+    ports:
+      - "80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - traefik-public
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ── MariaDB (Frappe only) ─────────────────────────────────────────────────
+  db:
+    image: mariadb:11.8
+    container_name: frappe-db
+    restart: unless-stopped
+    healthcheck:
+      # CMD-SHELL with double-dollar ($$) so the shell inside the container
+      # resolves $MYSQL_ROOT_PASSWORD — Compose never sees the plaintext value.
+      # MariaDB 11+ renamed mysqladmin → mariadb-admin
+      test: ["CMD-SHELL", "mariadb-admin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 1s
+      retries: 20
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_CHARACTER_SET_SERVER: utf8mb4
+      MYSQL_COLLATION_SERVER: utf8mb4_unicode_ci
+    volumes:
+      - db-data:/var/lib/mysql
+    networks:
+      - internal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ── Redis (Frappe only) ───────────────────────────────────────────────────
+  redis-cache:
+    image: redis:6.2-alpine
+    container_name: frappe-redis-cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - internal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  redis-queue:
+    image: redis:6.2-alpine
+    container_name: frappe-redis-queue
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - internal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ── Frappe Configurator (runs once on first start) ────────────────────────
+  # Sets connection strings in common_site_config.json only.
+  # Per-site settings (server_script_enabled, host_name) must be set AFTER
+  # bench new-site — see IT-HANDOFF.md § Frappe First-Time Site Setup.
+  configurator:
+    <<: *frappe-image
+    container_name: frappe-configurator
+    restart: "no"
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host $$DB_HOST;
+        bench set-config -gp db_port $$DB_PORT;
+        bench set-config -g redis_cache "redis://$$REDIS_CACHE";
+        bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
+        bench set-config -g socketio_port $$SOCKETIO_PORT;
+    environment:
+      DB_HOST: db
+      DB_PORT: "3306"
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      SOCKETIO_PORT: "9000"
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+
+  # ── Frappe Backend (app workers) ──────────────────────────────────────────
+  backend:
+    <<: *frappe-common
+    container_name: frappe-backend
+
+  # ── Frappe Frontend (nginx — serves ERPNext UI) ───────────────────────────
+  frontend:
+    <<: *frappe-common
+    container_name: frappe-frontend
+    command: nginx-entrypoint.sh
+    environment:
+      BACKEND: backend:8000
+      SOCKETIO: websocket:9000
+      FRAPPE_SITE_NAME_HEADER: $$host
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      PROXY_READ_TIMEOUT: "120"
+      CLIENT_MAX_BODY_SIZE: "50m"
+    depends_on:
+      backend:
+        condition: service_started
+      websocket:
+        condition: service_started
+      configurator:
+        condition: service_completed_successfully
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frappe.rule=Host(`${FRAPPE_DOMAIN:?Set FRAPPE_DOMAIN in .env}`)"
+      - "traefik.http.routers.frappe.entrypoints=http"
+      - "traefik.http.services.frappe.loadbalancer.server.port=8080"
+    networks:
+      - internal
+      - traefik-public
+
+  # ── Frappe WebSocket ──────────────────────────────────────────────────────
+  websocket:
+    <<: *frappe-common
+    container_name: frappe-websocket
+    command:
+      - node
+      - /home/frappe/frappe-bench/apps/frappe/socketio.js
+
+  # ── Frappe Queue Workers ──────────────────────────────────────────────────
+  queue-short:
+    <<: *frappe-common
+    container_name: frappe-queue-short
+    command: bench worker --queue short,default
+
+  queue-long:
+    <<: *frappe-common
+    container_name: frappe-queue-long
+    command: bench worker --queue long
+
+  # ── Frappe Scheduler ──────────────────────────────────────────────────────
+  scheduler:
+    <<: *frappe-common
+    container_name: frappe-scheduler
+    command: bench schedule
+
+  # NOTE: myreports is intentionally on traefik-public only.
+  # It reaches Oracle via extra_hosts and BambooHR/Azure AD via internet.
+  # If ERPNext API access is needed later, add the internal network here.
+
+  # ── MyReports (Next.js dashboard) ────────────────────────────────────────
+  # platform: linux/amd64 — GHCR image is amd64-only; runs under Rosetta on Apple Silicon.
+  # No-op on production Linux (amd64) servers.
+  # To fix permanently: configure GitHub Actions with buildx multi-arch push.
+  myreports:
+    image: ghcr.io/malsalem514/myreports:latest
+    platform: linux/amd64
+    container_name: myreports
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3773"
+      NEXTAUTH_URL: "https://${MYREPORTS_DOMAIN:?Set MYREPORTS_DOMAIN in .env}"
+      AUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in .env}
+      AZURE_AD_CLIENT_ID: ${AZURE_AD_CLIENT_ID:?Set AZURE_AD_CLIENT_ID in .env}
+      AZURE_AD_CLIENT_SECRET: ${AZURE_AD_CLIENT_SECRET:?Set AZURE_AD_CLIENT_SECRET in .env}
+      AZURE_AD_TENANT_ID: ${AZURE_AD_TENANT_ID:?Set AZURE_AD_TENANT_ID in .env}
+      ORACLE_USER: ${ORACLE_USER:?Set ORACLE_USER in .env}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:?Set ORACLE_PASSWORD in .env}
+      ORACLE_CONNECT_STRING: ${ORACLE_CONNECT_STRING:?Set ORACLE_CONNECT_STRING in .env}
+      BAMBOOHR_API_KEY: ${BAMBOOHR_API_KEY:?Set BAMBOOHR_API_KEY in .env}
+      BAMBOOHR_SUBDOMAIN: ${BAMBOOHR_SUBDOMAIN:-jestais}
+      BIGQUERY_PROJECT_ID: ${BIGQUERY_PROJECT_ID:-}
+      BIGQUERY_DATASET: ${BIGQUERY_DATASET:-}
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google-sa.json
+      ENABLE_SCHEDULER: "${ENABLE_SCHEDULER:-false}"
+    extra_hosts:
+      - "${ORACLE_DB_HOST:-srv-db-100}:${ORACLE_DB_IP:?Set ORACLE_DB_IP in .env}"
+    volumes:
+      - "${GOOGLE_SA_JSON_PATH:?Set GOOGLE_SA_JSON_PATH in .env}:/run/secrets/google-sa.json:ro"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3773/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.myreports.rule=Host(`${MYREPORTS_DOMAIN:?Set MYREPORTS_DOMAIN in .env}`)"
+      - "traefik.http.routers.myreports.entrypoints=http"
+      - "traefik.http.services.myreports.loadbalancer.server.port=3773"
+      - "com.centurylinklabs.watchtower.enable=true"
+    networks:
+      - traefik-public
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ── Watchtower (auto-deploy MyReports on push) ────────────────────────────
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      # WARNING: Mounting the Docker socket grants Watchtower full control over
+      # the Docker daemon. This is required for Watchtower to pull images and
+      # restart containers. Ensure the host socket is access-controlled.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/.docker/config.json:/config.json:ro
+    command: --interval 120 --cleanup --label-enable
+    networks:
+      - internal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Metabase DB (PostgreSQL — stores Metabase metadata/questions/dashboards) ─
+  metabase-db:
+    image: postgres:16-alpine
+    container_name: metabase-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: metabase
+      POSTGRES_USER: metabase
+      POSTGRES_PASSWORD: ${METABASE_DB_PASSWORD:?Set METABASE_DB_PASSWORD in .env}
+    volumes:
+      - metabase-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U metabase"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - internal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Metabase (BI dashboards + SQL explorer) ───────────────────────────────
+  # First boot takes ~2 min (Java + DB migrations). Dashboard UI at analytics.jestais.com
+  # Connect ERPNext data: Metabase UI → Add Database → MariaDB
+  #   Host: frappe-db  |  Port: 3306  |  Database: <site db name>  |  User: metabase_ro
+  # Create the read-only MariaDB user FIRST — see IT-HANDOFF.md § Metabase Setup
+  metabase:
+    image: metabase/metabase:latest
+    container_name: metabase
+    restart: unless-stopped
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: metabase
+      MB_DB_PORT: "5432"
+      MB_DB_USER: metabase
+      MB_DB_PASS: ${METABASE_DB_PASSWORD:?Set METABASE_DB_PASSWORD in .env}
+      MB_DB_HOST: metabase-db
+      MB_SITE_URL: "https://${METABASE_DOMAIN:?Set METABASE_DOMAIN in .env}"
+      JAVA_TIMEZONE: America/Toronto
+    depends_on:
+      metabase-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.metabase.rule=Host(`${METABASE_DOMAIN:?Set METABASE_DOMAIN in .env}`)"
+      - "traefik.http.routers.metabase.entrypoints=http"
+      - "traefik.http.services.metabase.loadbalancer.server.port=3000"
+    networks:
+      - internal        # reaches frappe-db (MariaDB) for ERPNext data
+      - traefik-public  # exposed via Traefik
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+volumes:
+  db-data:
+  sites:
+  metabase-db-data:
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  traefik-public:
+    name: traefik-public
+  internal:
+    name: jestais-internal
