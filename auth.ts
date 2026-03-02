@@ -1,8 +1,22 @@
 import NextAuth from 'next-auth';
 import MicrosoftEntraId from 'next-auth/providers/microsoft-entra-id';
 
+const useSecureCookies = process.env.NEXTAUTH_URL?.startsWith('https://') ?? false;
+const cookiePrefix = useSecureCookies ? '__Secure-' : '';
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
   trustHost: true,
+  cookies: {
+    pkceCodeVerifier: {
+      name: `${cookiePrefix}authjs.pkce.code_verifier`,
+      options: {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+        secure: useSecureCookies,
+      },
+    },
+  },
   providers: [
     MicrosoftEntraId({
       clientId: process.env.AZURE_AD_CLIENT_ID!,
