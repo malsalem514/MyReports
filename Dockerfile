@@ -10,6 +10,20 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
+# Compile lib/ to CJS for instrumentation runtime imports
+# (webpackIgnore in instrumentation.ts skips bundling these; they must exist
+# at .next/server/lib/*.js for the dynamic import to resolve at runtime)
+RUN npx tsc --outDir .next/standalone/.next/server \
+    --rootDir . \
+    --module commonjs --target es2022 \
+    --esModuleInterop --skipLibCheck \
+    --declaration false --sourceMap false \
+    --moduleResolution node \
+    lib/scheduler.ts && \
+    # Copy packages that the lib files require but standalone tracing missed
+    # (because webpackIgnore prevented webpack from tracing them)
+    cp -r node_modules/node-cron .next/standalone/node_modules/ && \
+    cp -r node_modules/zod .next/standalone/node_modules/
 
 FROM base AS runner
 ENV NODE_ENV=production
