@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
-import { auth, signIn } from '@/auth';
+import { auth } from '@/auth';
 import { isDevBypassEnabled } from '@/lib/dev-bypass';
 
 export const dynamic = 'force-dynamic';
@@ -36,7 +36,7 @@ export default async function LoginPage() {
 
   // Auto-redirect to Azure SSO — no click needed
   if (hasAzureConfig) {
-    await signIn('microsoft-entra-id', { redirectTo: '/dashboard' });
+    redirect('/api/auth/signin/microsoft-entra-id');
   }
 
   // Only show manual login page if Azure is not configured
