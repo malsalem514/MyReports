@@ -1,10 +1,10 @@
-# Server Access — srv-test-Office64
+# Server Access — srv-test-docker-musa
 
 ## Connection Details
 
 | Field | Value |
 |-------|-------|
-| Hostname | srv-test-Office64 |
+| Hostname | srv-test-docker-musa |
 | IP | 172.16.30.77 |
 | OS | Windows 11 Pro (VMware VM) |
 | User | `malsalem@jestais.com` |
@@ -73,7 +73,7 @@ C:\erpnext\
 
 | Service | Container(s) | External Port | Internal Port | Image |
 |---------|-------------|---------------|---------------|-------|
-| SSL Proxy | nginx-ssl | 3000 (HTTPS), 8443 (HTTPS) | — | nginx:alpine |
+| SSL Proxy | nginx-ssl | 443 (HTTPS) | — | nginx:alpine |
 | MyReports | myreports | — | 3001 → 3000 | ghcr.io/malsalem514/myreports:latest |
 | ERPNext Frontend | frappe-frontend | 8080 | 8080 | frappe/erpnext:v15.99.1 |
 | ERPNext Backend | frappe-backend | — | 8000 | frappe/erpnext:v15.99.1 |
@@ -86,9 +86,11 @@ C:\erpnext\
 ### Traffic Flow
 
 ```
-Browser → nginx-ssl (HTTPS :3000) → MyReports (HTTP :3001)
-Browser → nginx-ssl (HTTPS :8443) → ERPNext  (HTTP :8080)
+Browser → https://myreports.jestais.com  → nginx-ssl (:443) → MyReports (HTTP :3001)
+Browser → https://myprojects.jestais.com → nginx-ssl (:443) → ERPNext  (HTTP :8080)
 ```
+
+DNS: Both domains resolve to `172.16.30.77`. Nginx uses `server_name` to route traffic.
 
 ## Credentials
 
@@ -98,8 +100,8 @@ Browser → nginx-ssl (HTTPS :8443) → ERPNext  (HTTP :8080)
 | App (Client) ID | `620f7434-4322-4d2a-8e44-14972f728a84` |
 | Tenant ID | `e066e01b-f090-4220-8ac6-acf706a671aa` |
 | Client Secret | `<see myreports.env on server or memory/server-access.md>` |
-| NEXTAUTH_URL | `https://srv-test-office64:3000` |
-| Redirect URI | `https://srv-test-office64:3000/api/auth/callback/microsoft-entra-id` |
+| NEXTAUTH_URL | `https://myreports.jestais.com` |
+| Redirect URI | `https://myreports.jestais.com/api/auth/callback/microsoft-entra-id` |
 
 ### ERPNext
 | Field | Value |
