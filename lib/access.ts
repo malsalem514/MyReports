@@ -14,6 +14,7 @@ import {
 const HR_ADMIN_EMAILS = [
   'hr@jestais.com',
   'malsalem@jestais.com',
+  'iferber@jestais.com',
 ];
 
 // ============================================================================
