@@ -1,6 +1,6 @@
 import { fetchActiveEmployees, fetchTimeOffRequests } from './bamboohr';
 import { fetchOfficeAttendanceData } from './bigquery';
-import { executeMany, initializeSchema } from './oracle';
+import { execute, executeMany, initializeSchema } from './oracle';
 
 export interface SyncSummary {
   startedAt: string;
@@ -9,12 +9,53 @@ export interface SyncSummary {
   employeesSynced: number;
   attendanceSynced: number;
   timeOffSynced: number;
+  tbsMapped: number;
   errors: string[];
 }
 
 function parseDateOnly(dateStr: string): Date {
   const [year, month, day] = dateStr.split('-').map((part) => Number(part));
   return new Date(year || 1970, (month || 1) - 1, day || 1);
+}
+
+/**
+ * Auto-maps unmapped BambooHR employees to TBS employee numbers by matching
+ * on first+last name. When multiple TBS records share a name, picks the one
+ * with the most recent time entry.
+ */
+export async function syncTbsEmployeeMap(): Promise<number> {
+  const result = await execute(`
+    MERGE INTO TL_TBS_EMPLOYEE_MAP m
+    USING (
+      SELECT b.EMAIL, t.EMPLOYEE_NO
+      FROM TL_EMPLOYEES b
+      JOIN (
+        SELECT EMPLOYEE_NO, EMPLOYEE_FIRST_NAME, EMPLOYEE_LAST_NAME,
+               ROW_NUMBER() OVER (
+                 PARTITION BY UPPER(TRIM(EMPLOYEE_FIRST_NAME)), UPPER(TRIM(EMPLOYEE_LAST_NAME))
+                 ORDER BY NVL(LAST_ENTRY, DATE '1900-01-01') DESC
+               ) AS RN
+        FROM (
+          SELECT e.EMPLOYEE_NO, e.EMPLOYEE_FIRST_NAME, e.EMPLOYEE_LAST_NAME,
+                 (SELECT MAX(v.ENTRY_DATE) FROM TBS_ALL_TIME_ENTRIES_V@TBS_LINK v
+                  WHERE v.EMPLOYEE_NO = e.EMPLOYEE_NO) AS LAST_ENTRY
+          FROM TBS_EMPLOYEES@TBS_LINK e
+        )
+      ) t ON UPPER(b.FIRST_NAME) = UPPER(TRIM(t.EMPLOYEE_FIRST_NAME))
+          AND UPPER(b.LAST_NAME) = UPPER(TRIM(t.EMPLOYEE_LAST_NAME))
+          AND t.RN = 1
+      WHERE b.EMAIL IS NOT NULL
+        AND (b.STATUS IS NULL OR UPPER(b.STATUS) != 'INACTIVE')
+        AND LOWER(b.EMAIL) NOT IN (SELECT LOWER(EMAIL) FROM TL_TBS_EMPLOYEE_MAP)
+    ) src
+    ON (LOWER(m.EMAIL) = LOWER(src.EMAIL))
+    WHEN NOT MATCHED THEN INSERT (EMAIL, TBS_EMPLOYEE_NO, CREATED_AT, UPDATED_AT)
+    VALUES (LOWER(src.EMAIL), src.EMPLOYEE_NO, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  `);
+
+  const mapped = result.rowsAffected || 0;
+  console.log(`[Sync] TBS mapping: ${mapped} new employee(s) mapped`);
+  return mapped;
 }
 
 export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
@@ -28,6 +69,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
   let employeesSynced = 0;
   let attendanceSynced = 0;
   let timeOffSynced = 0;
+  let tbsMapped = 0;
 
   try {
     const employees = await fetchActiveEmployees();
@@ -214,6 +256,13 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     errors.push(`Time-off sync failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  // Step 4: Auto-map BambooHR employees to TBS employee numbers
+  try {
+    tbsMapped = await syncTbsEmployeeMap();
+  } catch (error) {
+    errors.push(`TBS mapping sync failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   const completedAt = new Date();
   const summary: SyncSummary = {
     startedAt: now.toISOString(),
@@ -222,6 +271,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     employeesSynced,
     attendanceSynced,
     timeOffSynced,
+    tbsMapped,
     errors,
   };
 
