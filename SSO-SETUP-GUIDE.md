@@ -324,6 +324,143 @@ Use this checklist when onboarding a new application:
 
 The redirect URI is validated at step 2 (authorize) and again at step 5 (token exchange). Both must match exactly.
 
+---
+
+## ERPNext / Frappe: Social Login Key Setup
+
+ERPNext uses Frappe's **Social Login Key** doctype for SSO. This section covers the exact setup steps and critical pitfalls discovered during the MyProjects deployment.
+
+### Prerequisites
+
+- Azure AD app registration already created (see steps above)
+- Client ID and Client Secret ready
+- Redirect URI registered in Azure: `https://<domain>/api/method/frappe.integrations.oauth2_logins.login_via_office365`
+
+### Configure via Frappe UI (Recommended)
+
+1. Log into ERPNext as Administrator
+2. Navigate to: **Setup → Integrations → Social Login Key**
+3. Click **"+ Add Social Login Key"**
+4. Select **Social Login Provider**: `Office 365`
+5. Fill in:
+   - **Provider Name**: `Office 365`
+   - **Client ID**: Your Azure AD Application (Client) ID
+   - **Client Secret**: Your Azure AD Client Secret Value
+   - **Base URL**: `https://login.microsoftonline.com`
+   - **Authorize URL**: `https://login.microsoftonline.com/<TENANT_ID>/oauth2/v2.0/authorize`
+   - **Access Token URL**: `https://login.microsoftonline.com/<TENANT_ID>/oauth2/v2.0/token`
+   - **Redirect URL**: `/api/method/frappe.integrations.oauth2_logins.login_via_office365`
+   - **API Endpoint**: `https://graph.microsoft.com/v1.0/me`
+   - **API Endpoint Args**: `{"select": "mail,givenName,surname"}`
+   - **Auth URL Data**: `{"scope": "openid profile email User.Read", "response_type": "code"}`
+   - **Sign Ups**: `Allow` (so new SSO users get auto-created)
+   - **Enable Social Login**: checked
+6. **Save** — this stores the client_secret properly in Frappe's encrypted `__Auth` table
+
+### Critical: Document Naming
+
+Frappe auto-names the document using `frappe.scrub(provider_name)`. For "Office 365", this produces `office_365`. The callback function `login_via_office365()` **hardcodes** `"office_365"` as the provider key. If the document name doesn't match, the OAuth callback will fail with a `KeyError`.
+
+**Always verify** the document name matches:
+```sql
+SELECT name FROM `tabSocial Login Key` WHERE name='office_365';
+```
+
+### Critical: Client Secret Storage
+
+Frappe stores passwords in the `__Auth` table with encryption. The `client_secret` field in `tabSocial Login Key` should contain `***` — the real value lives in `__Auth`.
+
+**If you set the client_secret via direct SQL** (instead of the Frappe UI), it will be stored in plaintext in the wrong table. Frappe's `get_decrypted_password()` only reads from `__Auth` where `encrypted=1`, so the login button won't appear.
+
+**Diagnosis** — login page shows the `social-logins` div but no button:
+```sql
+-- Check if secret is in __Auth (where Frappe looks)
+SELECT doctype, name, fieldname, encrypted
+FROM `__Auth`
+WHERE doctype='Social Login Key' AND name='office_365';
+
+-- If empty, the secret is missing or stored wrong
+-- Check if it's in plaintext on the doc (wrong place)
+SELECT client_secret FROM `tabSocial Login Key` WHERE name='office_365';
+-- If this shows the actual secret instead of '***', it needs to be moved
+```
+
+**Fix** — use `bench execute` to properly encrypt and store:
+```python
+# Create a file: /tmp/fix_secret.py
+import frappe
+from frappe.utils.password import set_encrypted_password
+
+def run():
+    # If secret is in plaintext on the doc:
+    secret = frappe.db.get_value("Social Login Key", "office_365", "client_secret")
+    if secret and secret != '***':
+        # Delete any existing __Auth entry
+        frappe.db.sql(
+            "DELETE FROM `__Auth` WHERE doctype='Social Login Key' "
+            "AND name='office_365' AND fieldname='client_secret'"
+        )
+        # Store with proper encryption
+        set_encrypted_password("Social Login Key", "office_365", secret, "client_secret")
+        # Clear plaintext from doc
+        frappe.db.set_value("Social Login Key", "office_365", "client_secret", "***")
+        frappe.db.commit()
+        print(f"Fixed: secret ({len(secret)} chars) moved to __Auth")
+    else:
+        print("Secret already in __Auth or missing")
+    return "done"
+```
+```bash
+# Copy to frappe apps dir and execute
+docker cp /tmp/fix_secret.py frappe-backend:/home/frappe/frappe-bench/apps/frappe/frappe/fix_secret.py
+docker exec frappe-backend bench --site <site-name> execute frappe.fix_secret.run
+# Clean up
+docker exec frappe-backend rm /home/frappe/frappe-bench/apps/frappe/frappe/fix_secret.py
+```
+
+### Critical: Sign Ups Must Be Allowed
+
+If the Social Login Key's `sign_ups` field is empty, Frappe falls back to the global Website Settings `disable_signup` flag. If signup is disabled globally (common in production ERPNext), SSO users who don't already have an ERPNext account will see **"Signup is Disabled"**.
+
+**Fix**:
+```sql
+UPDATE `tabSocial Login Key` SET sign_ups='Allow' WHERE name='office_365';
+```
+Or set it in the Frappe UI: Social Login Key → Office 365 → **Sign Ups** = `Allow`.
+
+### Verification Checklist
+
+After setup, verify all of these:
+
+```sql
+-- 1. Document name is correct (must be office_365, not "Office 365")
+SELECT name, provider_name, social_login_provider, enable_social_login, sign_ups
+FROM `tabSocial Login Key` WHERE name='office_365';
+-- Expected: office_365 | Office 365 | Office 365 | 1 | Allow
+
+-- 2. Client secret is in __Auth with encryption
+SELECT doctype, name, fieldname, encrypted
+FROM `__Auth` WHERE doctype='Social Login Key' AND name='office_365';
+-- Expected: Social Login Key | office_365 | client_secret | 1
+
+-- 3. Client secret is NOT in plaintext on the doc
+SELECT client_secret FROM `tabSocial Login Key` WHERE name='office_365';
+-- Expected: ***
+```
+
+Then clear cache and test:
+```bash
+docker exec frappe-backend bench --site <site-name> clear-cache
+```
+
+Visit the login page — you should see a **"Login with Office 365"** button.
+
+### Auto-Login (Skip the Login Page)
+
+ERPNext doesn't natively support auto-redirect to SSO. Users must click the "Login with Office 365" button. To implement auto-login, you would need to customize the Frappe login page template or add client-side JavaScript to auto-click the SSO button.
+
+---
+
 ### Why "Web" Platform, Not "SPA"
 
 - **Web**: App has a server that exchanges the authorization code using a client_secret. The redirect URI receives a POST with the code. This is what NextAuth, ERPNext, Django, Laravel, etc. use.
