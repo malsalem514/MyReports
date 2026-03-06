@@ -290,7 +290,8 @@ export async function getAttendanceReport(
       WHERE PTO_DATE BETWEEN :sd AND :ed
         AND TO_CHAR(PTO_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')`,
       {
-        ...params,
+        sd: startDate,
+        ed: endDate,
         ...(emails && emails.length > 0
           ? Object.fromEntries(emails.map((email, i) => [`pe${i}`, email.toLowerCase()]))
           : {}),
