@@ -1,4 +1,5 @@
-import { getAccessContext } from '@/lib/access';
+import { getAccessContext, getRoleDiagnostics } from '@/lib/access';
+import { fetchActiveEmployees } from '@/lib/bamboohr';
 import { getRoleDefaults, TAB_KEYS } from '@/lib/tab-config';
 import { initializeSchema } from '@/lib/oracle';
 import { redirect } from 'next/navigation';
@@ -11,17 +12,43 @@ export default async function AdminPage() {
   }
 
   let roleDefaults: Awaited<ReturnType<typeof getRoleDefaults>> = [];
+  let directorUsers: Array<{
+    name: string;
+    email: string;
+    department: string;
+    jobTitle: string;
+    reason: string;
+  }> = [];
   let dataError: string | null = null;
   try {
     // Ensure tab tables exist (idempotent — safe to call on every load)
     await initializeSchema();
-    roleDefaults = await getRoleDefaults();
+    const [defaults, employees] = await Promise.all([
+      getRoleDefaults(),
+      fetchActiveEmployees(),
+    ]);
+    roleDefaults = defaults;
+    directorUsers = employees
+      .filter((employee) => employee.workEmail)
+      .map((employee) => ({
+        employee,
+        diagnostics: getRoleDiagnostics(employee),
+      }))
+      .filter(({ diagnostics }) => diagnostics.isDirector)
+      .map(({ employee, diagnostics }) => ({
+        name: employee.displayName || `${employee.firstName || ''} ${employee.lastName || ''}`.trim() || employee.workEmail || '',
+        email: employee.workEmail?.toLowerCase() || '',
+        department: employee.department || '',
+        jobTitle: employee.jobTitle || '',
+        reason: diagnostics.reason || 'Matched director rule',
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
   } catch (error) {
     dataError = error instanceof Error ? error.message : 'Admin datasource unavailable';
   }
 
   // Build role→tab→visible map
-  const roles = ['hr-admin', 'manager', 'employee'] as const;
+  const roles = ['hr-admin', 'director', 'manager', 'employee'] as const;
   const roleMap: Record<string, Record<string, boolean>> = {};
   for (const role of roles) {
     roleMap[role] = {};
@@ -46,6 +73,7 @@ export default async function AdminPage() {
         roles={[...roles]}
         tabs={[...TAB_KEYS]}
         roleMap={roleMap}
+        directorUsers={directorUsers}
       />
     </div>
   );

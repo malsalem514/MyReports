@@ -1,10 +1,9 @@
 'use client';
 
-import { useState, useMemo, useRef, useEffect, useTransition } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useState, useMemo, useRef, useEffect } from 'react';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { OFFICE_DAYS_REQUIRED, LOOKBACK_OPTIONS, CELL_COLORS, CELL_HEX } from '@/lib/constants';
-import { validateAttendanceData, type ValidationResult } from './actions';
 
 // --- Types (exported for server component) ---
 
@@ -12,6 +11,7 @@ export interface DayDetail {
   date: string;       // YYYY-MM-DD
   dayLabel: string;   // "Mon", "Tue", etc.
   location: 'Office' | 'Remote' | 'PTO' | 'Unknown';
+  ptoType?: string | null;
 }
 
 export interface WeekCell {
@@ -26,6 +26,8 @@ export interface AttendanceRow {
   name: string;
   department: string;
   officeLocation: string;
+  approvedRemoteWorkRequest: boolean;
+  remoteWorkdayPolicyAssigned: boolean;
   weeks: Record<string, WeekCell>;
   total: number;
   avgPerWeek: number;
@@ -50,11 +52,46 @@ interface Props {
   locations: string[];
   summary: AttendanceSummary;
   lookbackWeeks: number;
-  validationEnabled?: boolean;
+  startDate: string;
+  endDate: string;
 }
 
 type SortKey = 'name' | 'department' | 'officeLocation' | 'total' | 'avgPerWeek' | 'trend' | string;
 type SortDir = 'asc' | 'desc';
+type ViewMode = 'employees' | 'departments';
+type RemoteWorkFilter = 'all' | 'approved';
+
+interface DepartmentRow {
+  id: string;
+  department: string;
+  employeeCount: number;
+  officeLocation: string;
+  weeks: Record<string, WeekCell>;
+  total: number;
+  avgPerWeek: number;
+  scorePct: number;
+  trend: 'up' | 'down' | 'flat';
+}
+
+interface DisplayRow {
+  id: string;
+  label: string;
+  secondary: string;
+  officeLocation: string;
+  approvedRemoteWorkRequest: boolean;
+  remoteWorkdayPolicyAssigned: boolean;
+  weeks: Record<string, WeekCell>;
+  total: number;
+  avgPerWeek: number;
+  scorePct: number;
+  trend: 'up' | 'down' | 'flat';
+  employeeCount?: number;
+  email?: string;
+}
+
+interface DetailState {
+  row: DisplayRow;
+}
 
 const PAGE_SIZE = 50;
 
@@ -78,6 +115,65 @@ function getCellHex(officeDays: number, ptoDays: number): string {
   return CELL_HEX.absent;
 }
 
+function getWeekPointCapacity(cell?: WeekCell): number {
+  const ptoDays = cell?.ptoDays ?? 0;
+  return Math.max(0, Math.min(OFFICE_DAYS_REQUIRED, 5 - ptoDays));
+}
+
+function getWeekPoints(cell?: WeekCell): number {
+  const officeDays = cell?.officeDays ?? 0;
+  return Math.min(officeDays, getWeekPointCapacity(cell));
+}
+
+function calculateScorePct(weeksByKey: Record<string, WeekCell>, scopedWeeks: string[]): number {
+  let earned = 0;
+  let capacity = 0;
+  for (const week of scopedWeeks) {
+    const cell = weeksByKey[week];
+    earned += getWeekPoints(cell);
+    capacity += getWeekPointCapacity(cell);
+  }
+  if (capacity <= 0) return 0;
+  return Math.round((earned / capacity) * 100);
+}
+
+function scoreTone(scorePct: number): string {
+  if (scorePct >= 80) return 'bg-green-50 text-green-700';
+  if (scorePct >= 50) return 'bg-amber-50 text-amber-700';
+  return 'bg-red-50 text-red-700';
+}
+
+function formatRangeLabel(startDate: string, endDate: string): string {
+  const start = parseLocalDate(startDate);
+  const end = parseLocalDate(endDate);
+  return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+}
+
+function parseListParam(value: string | null): string[] {
+  if (!value) return [];
+  return value.split(',').map((part) => part.trim()).filter(Boolean);
+}
+
+function buildReturnTo(pathname: string, params: URLSearchParams): string {
+  const query = params.toString();
+  return query ? `${pathname}?${query}` : pathname;
+}
+
+function formatDayLabel(date: string): string {
+  return parseLocalDate(date).toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+function getWeekLabel(week: string): string {
+  const start = parseLocalDate(week);
+  const end = new Date(start);
+  end.setDate(start.getDate() + 4);
+  return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+}
+
 export function AttendanceClient({
   rows,
   weeks,
@@ -87,26 +183,67 @@ export function AttendanceClient({
   locations,
   summary,
   lookbackWeeks,
-  validationEnabled = true,
+  startDate,
+  endDate,
 }: Props) {
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  const [search, setSearch] = useState('');
-  const [selectedDepts, setSelectedDepts] = useState<string[]>([]);
-  const [selectedLocs, setSelectedLocs] = useState<string[]>([]);
+  const [search, setSearch] = useState(() => searchParams.get('q') || '');
+  const [selectedDepts, setSelectedDepts] = useState<string[]>(() => parseListParam(searchParams.get('departments')));
+  const [selectedLocs, setSelectedLocs] = useState<string[]>(() => parseListParam(searchParams.get('locations')));
   const [deptOpen, setDeptOpen] = useState(false);
   const [locOpen, setLocOpen] = useState(false);
-  const [sortKey, setSortKey] = useState<SortKey>('name');
-  const [sortDir, setSortDir] = useState<SortDir>('asc');
-  const [page, setPage] = useState(0);
-  const [validation, setValidation] = useState<ValidationResult | null>(null);
-  const [validationOpen, setValidationOpen] = useState(false);
-  const [validationError, setValidationError] = useState<string | null>(null);
-  const [isPending, startTransition] = useTransition();
+  const [sortKey, setSortKey] = useState<SortKey>(() => (searchParams.get('sortKey') as SortKey) || 'name');
+  const [sortDir, setSortDir] = useState<SortDir>(() => (searchParams.get('sortDir') as SortDir) || 'asc');
+  const [page, setPage] = useState(() => Math.max(0, Number(searchParams.get('page') || '0') || 0));
+  const [viewMode, setViewMode] = useState<ViewMode>(() => (searchParams.get('view') as ViewMode) || 'employees');
+  const [remoteWorkFilter, setRemoteWorkFilter] = useState<RemoteWorkFilter>(() => (searchParams.get('remoteWork') as RemoteWorkFilter) || 'all');
+  const [detail, setDetail] = useState<DetailState | null>(null);
+  const [showScrollRail, setShowScrollRail] = useState(false);
 
   const deptRef = useRef<HTMLDivElement>(null);
   const locRef = useRef<HTMLDivElement>(null);
+  const detailHistoryPushed = useRef(false);
+  const tableScrollRef = useRef<HTMLDivElement>(null);
+  const topScrollRef = useRef<HTMLDivElement>(null);
+  const topScrollContentRef = useRef<HTMLDivElement>(null);
+  const syncingScrollRef = useRef(false);
+  const scoredWeeks = useMemo(
+    () => (currentWeek ? weeks.filter((week) => week !== currentWeek) : weeks),
+    [currentWeek, weeks],
+  );
+  const buildStateParams = useMemo(() => {
+    const params = new URLSearchParams(searchParams.toString());
+
+    if (search) params.set('q', search);
+    else params.delete('q');
+
+    if (selectedDepts.length > 0) params.set('departments', selectedDepts.join(','));
+    else params.delete('departments');
+
+    if (selectedLocs.length > 0) params.set('locations', selectedLocs.join(','));
+    else params.delete('locations');
+
+    if (sortKey !== 'name') params.set('sortKey', String(sortKey));
+    else params.delete('sortKey');
+
+    if (sortDir !== 'asc') params.set('sortDir', sortDir);
+    else params.delete('sortDir');
+
+    if (page > 0) params.set('page', String(page));
+    else params.delete('page');
+
+    if (viewMode !== 'employees') params.set('view', viewMode);
+    else params.delete('view');
+
+    if (remoteWorkFilter !== 'all') params.set('remoteWork', remoteWorkFilter);
+    else params.delete('remoteWork');
+
+    return params;
+  }, [page, remoteWorkFilter, search, searchParams, selectedDepts, selectedLocs, sortDir, sortKey, viewMode]);
+  const returnTo = useMemo(() => buildReturnTo(pathname, buildStateParams), [buildStateParams, pathname]);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -117,6 +254,62 @@ export function AttendanceClient({
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
+
+  useEffect(() => {
+    const next = buildStateParams.toString();
+    const current = searchParams.toString();
+    if (next !== current) {
+      router.replace(`${pathname}?${next}`, { scroll: false });
+    }
+  }, [buildStateParams, pathname, router, searchParams]);
+
+  useEffect(() => {
+    if (!detail || typeof window === 'undefined') return;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    if (!detailHistoryPushed.current) {
+      window.history.pushState(
+        { ...(window.history.state ?? {}), officeAttendanceDetailOpen: true },
+        '',
+        window.location.href,
+      );
+      detailHistoryPushed.current = true;
+    }
+
+    const handlePopState = () => {
+      detailHistoryPushed.current = false;
+      setDetail(null);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setDetail(null);
+      if (detailHistoryPushed.current) {
+        detailHistoryPushed.current = false;
+        window.history.back();
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+      window.removeEventListener('keydown', handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [detail]);
+
+  const closeDetail = () => {
+    setDetail(null);
+    if (typeof window !== 'undefined' && detailHistoryPushed.current) {
+      detailHistoryPushed.current = false;
+      window.history.back();
+    }
+  };
 
   const toggleDept = (d: string) => {
     setSelectedDepts((prev) => prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]);
@@ -134,12 +327,18 @@ export function AttendanceClient({
   };
 
   const changeLookback = (val: string) => {
+    const weeksBack = Number(val);
+    const nextEnd = new Date();
+    const nextStart = new Date(nextEnd);
+    nextStart.setDate(nextEnd.getDate() - (weeksBack * 7));
     const params = new URLSearchParams(searchParams.toString());
     params.set('lookbackWeeks', val);
+    params.set('startDate', nextStart.toISOString().split('T')[0] ?? '');
+    params.set('endDate', nextEnd.toISOString().split('T')[0] ?? '');
     router.push(`/dashboard/office-attendance?${params.toString()}`);
   };
 
-  const hasFilters = search || selectedDepts.length > 0 || selectedLocs.length > 0;
+  const hasFilters = search || selectedDepts.length > 0 || selectedLocs.length > 0 || remoteWorkFilter !== 'all';
 
   // Filter
   const filtered = useMemo(() => {
@@ -152,6 +351,9 @@ export function AttendanceClient({
       const locSet = new Set(selectedLocs);
       list = list.filter((r) => locSet.has(r.officeLocation));
     }
+    if (remoteWorkFilter === 'approved') {
+      list = list.filter((r) => r.approvedRemoteWorkRequest);
+    }
     if (search) {
       const q = search.toLowerCase();
       list = list.filter((r) =>
@@ -161,53 +363,232 @@ export function AttendanceClient({
       );
     }
     return list;
-  }, [rows, selectedDepts, selectedLocs, search]);
+  }, [remoteWorkFilter, rows, search, selectedDepts, selectedLocs]);
 
-  // Sort
+  const departmentRows = useMemo<DepartmentRow[]>(() => {
+    const grouped = new Map<string, DepartmentRow>();
+    for (const row of filtered) {
+      const key = row.department || 'Unknown';
+      const existing = grouped.get(key) || {
+        id: key,
+        department: key,
+        employeeCount: 0,
+        officeLocation: row.officeLocation || 'Unknown',
+        weeks: {},
+        total: 0,
+        avgPerWeek: 0,
+        scorePct: 0,
+        trend: 'flat',
+      };
+
+      existing.employeeCount += 1;
+      existing.total += row.total;
+      if (existing.officeLocation !== row.officeLocation) {
+        existing.officeLocation = 'Mixed';
+      }
+
+      for (const week of weeks) {
+        const cell = row.weeks[week];
+        if (!cell) continue;
+        const current = existing.weeks[week] || {
+          officeDays: 0,
+          remoteDays: 0,
+          ptoDays: 0,
+          days: [],
+        };
+        current.officeDays += cell.officeDays;
+        current.remoteDays += cell.remoteDays;
+        current.ptoDays += cell.ptoDays;
+        existing.weeks[week] = current;
+      }
+
+      grouped.set(key, existing);
+    }
+
+    return [...grouped.values()].map((row) => {
+      const avgPerWeek = scoredWeeks.length > 0
+        ? Math.round((row.total / Math.max(1, row.employeeCount) / scoredWeeks.length) * 10) / 10
+        : 0;
+      const scorePct = row.employeeCount > 0
+        ? Math.round(
+          filtered
+            .filter((employee) => employee.department === row.department)
+            .reduce((sum, employee) => sum + calculateScorePct(employee.weeks, scoredWeeks), 0) / row.employeeCount,
+        )
+        : 0;
+      let trend: 'up' | 'down' | 'flat' = 'flat';
+      if (scoredWeeks.length >= 2) {
+        const prevWeek = scoredWeeks[scoredWeeks.length - 2]!;
+        const lastWeek = scoredWeeks[scoredWeeks.length - 1]!;
+        const prevAvg = (row.weeks[prevWeek]?.officeDays ?? 0) / Math.max(1, row.employeeCount);
+        const lastAvg = (row.weeks[lastWeek]?.officeDays ?? 0) / Math.max(1, row.employeeCount);
+        if (lastAvg > prevAvg) trend = 'up';
+        else if (lastAvg < prevAvg) trend = 'down';
+      }
+      return {
+        ...row,
+        avgPerWeek,
+        scorePct,
+        trend,
+      };
+    });
+  }, [filtered, scoredWeeks, weeks]);
+
+  const displayRows = useMemo<DisplayRow[]>(() => {
+    const employeeRows: DisplayRow[] = filtered.map((row) => ({
+      id: row.email,
+      label: row.name,
+      secondary: row.department,
+      officeLocation: row.officeLocation,
+      approvedRemoteWorkRequest: row.approvedRemoteWorkRequest,
+      remoteWorkdayPolicyAssigned: row.remoteWorkdayPolicyAssigned,
+      weeks: row.weeks,
+      total: row.total,
+      avgPerWeek: row.avgPerWeek,
+      scorePct: calculateScorePct(row.weeks, scoredWeeks),
+      trend: row.trend,
+      email: row.email,
+    }));
+
+    const departmentDisplayRows: DisplayRow[] = departmentRows.map((row) => ({
+      id: row.id,
+      label: row.department,
+      secondary: String(row.employeeCount),
+      officeLocation: row.officeLocation,
+      approvedRemoteWorkRequest: false,
+      remoteWorkdayPolicyAssigned: false,
+      weeks: Object.fromEntries(
+        weeks.map((week) => {
+          const cell = row.weeks[week];
+          const employeeCount = Math.max(1, row.employeeCount);
+          return [week, {
+            officeDays: cell ? Math.round((cell.officeDays / employeeCount) * 10) / 10 : 0,
+            remoteDays: cell ? Math.round((cell.remoteDays / employeeCount) * 10) / 10 : 0,
+            ptoDays: cell ? Math.round((cell.ptoDays / employeeCount) * 10) / 10 : 0,
+            days: [],
+          }];
+        }),
+      ),
+      total: row.total,
+      avgPerWeek: row.avgPerWeek,
+      scorePct: row.scorePct,
+      trend: row.trend,
+      employeeCount: row.employeeCount,
+    }));
+
+    return viewMode === 'departments' ? departmentDisplayRows : employeeRows;
+  }, [departmentRows, filtered, scoredWeeks, viewMode, weeks]);
+
   const sorted = useMemo(() => {
-    const arr = [...filtered];
+    const arr = [...displayRows];
     const dir = sortDir === 'asc' ? 1 : -1;
     arr.sort((a, b) => {
-      if (sortKey === 'name') return dir * a.name.localeCompare(b.name);
-      if (sortKey === 'department') return dir * a.department.localeCompare(b.department);
+      if (sortKey === 'name') return dir * a.label.localeCompare(b.label);
+      if (sortKey === 'department') {
+        if (viewMode === 'departments') return dir * ((Number(a.secondary) || 0) - (Number(b.secondary) || 0));
+        return dir * a.secondary.localeCompare(b.secondary);
+      }
       if (sortKey === 'officeLocation') return dir * a.officeLocation.localeCompare(b.officeLocation);
       if (sortKey === 'total') return dir * (a.total - b.total);
       if (sortKey === 'avgPerWeek') return dir * (a.avgPerWeek - b.avgPerWeek);
+      if (sortKey === 'status') return dir * (a.scorePct - b.scorePct);
       if (sortKey === 'trend') {
         const order = { up: 2, flat: 1, down: 0 };
         return dir * (order[a.trend] - order[b.trend]);
       }
-      // Week column sort
       const aDays = a.weeks[sortKey]?.officeDays ?? 0;
       const bDays = b.weeks[sortKey]?.officeDays ?? 0;
       return dir * (aDays - bDays);
     });
     return arr;
-  }, [filtered, sortKey, sortDir]);
+  }, [displayRows, sortDir, sortKey, viewMode]);
 
-  // Recompute summary from filtered rows so filters affect summary cards
   const filteredSummary = useMemo(() => {
     const totalEmployees = filtered.length;
-    // Use dataWeeks (actual data weeks) to avoid dilution by empty display weeks
-    const cWeeks = dataWeeks ?? (currentWeek ? weeks.filter(w => w !== currentWeek) : weeks);
-    const numCompletedWeeks = cWeeks.length;
-    let compliantCount = 0, zeroCount = 0, sumOfficeDays = 0;
-    for (const r of filtered) {
-      if (r.compliant) compliantCount++;
-      if (r.total === 0) zeroCount++;
-      for (const wk of cWeeks) {
-        sumOfficeDays += r.weeks[wk]?.officeDays ?? 0;
+    const totalDepartments = departmentRows.length;
+    const numCompletedWeeks = scoredWeeks.length;
+    let zeroCount = 0;
+    let sumOfficeDays = 0;
+    let sumScorePct = 0;
+
+    for (const row of filtered) {
+      if (row.total === 0) zeroCount++;
+      sumScorePct += calculateScorePct(row.weeks, scoredWeeks);
+      for (const week of scoredWeeks) {
+        sumOfficeDays += row.weeks[week]?.officeDays ?? 0;
       }
     }
+
     const avgOfficeDays = totalEmployees > 0 && numCompletedWeeks > 0
       ? Math.round((sumOfficeDays / totalEmployees / numCompletedWeeks) * 10) / 10
       : 0;
-    const complianceRate = totalEmployees > 0 ? Math.round((compliantCount / totalEmployees) * 100) : 0;
-    return { totalEmployees, avgOfficeDays, complianceRate, zeroOfficeDaysCount: zeroCount };
-  }, [filtered, weeks, dataWeeks, currentWeek]);
+    const complianceRate = totalEmployees > 0 ? Math.round(sumScorePct / totalEmployees) : 0;
+    const zeroOfficeDepartments = departmentRows.filter((row) => row.total === 0).length;
+
+    return {
+      totalEmployees,
+      totalDepartments,
+      avgOfficeDays,
+      complianceRate,
+      zeroOfficeDaysCount: zeroCount,
+      zeroOfficeDepartments,
+    };
+  }, [departmentRows, filtered, scoredWeeks]);
 
   const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
   const pageRows = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  useEffect(() => {
+    const tableNode = tableScrollRef.current;
+    const topNode = topScrollRef.current;
+    const topContentNode = topScrollContentRef.current;
+    if (!tableNode || !topNode || !topContentNode) return;
+
+    const syncSizes = () => {
+      const scrollWidth = tableNode.scrollWidth;
+      const clientWidth = tableNode.clientWidth;
+      topContentNode.style.width = `${scrollWidth}px`;
+      setShowScrollRail(scrollWidth > clientWidth + 8);
+      if (topNode.scrollLeft !== tableNode.scrollLeft) {
+        topNode.scrollLeft = tableNode.scrollLeft;
+      }
+    };
+
+    const syncFromTable = () => {
+      if (syncingScrollRef.current) return;
+      syncingScrollRef.current = true;
+      topNode.scrollLeft = tableNode.scrollLeft;
+      requestAnimationFrame(() => {
+        syncingScrollRef.current = false;
+      });
+    };
+
+    const syncFromTop = () => {
+      if (syncingScrollRef.current) return;
+      syncingScrollRef.current = true;
+      tableNode.scrollLeft = topNode.scrollLeft;
+      requestAnimationFrame(() => {
+        syncingScrollRef.current = false;
+      });
+    };
+
+    syncSizes();
+    tableNode.addEventListener('scroll', syncFromTable, { passive: true });
+    topNode.addEventListener('scroll', syncFromTop, { passive: true });
+
+    const resizeObserver = new ResizeObserver(syncSizes);
+    resizeObserver.observe(tableNode);
+    const tableElement = tableNode.querySelector('table');
+    if (tableElement) resizeObserver.observe(tableElement);
+    window.addEventListener('resize', syncSizes);
+
+    return () => {
+      tableNode.removeEventListener('scroll', syncFromTable);
+      topNode.removeEventListener('scroll', syncFromTop);
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', syncSizes);
+    };
+  }, [pageRows.length, viewMode, weeks.length]);
 
   // --- Export helpers ---
   const downloadBlob = (blob: Blob, filename: string) => {
@@ -220,19 +601,38 @@ export function AttendanceClient({
   };
 
   const exportCSV = () => {
-    const headers = ['Employee', 'Email', 'Department', 'Location', ...weeks.map((w) =>
-      new Date(w).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-    ), 'Total', 'Avg/Week', 'Compliant', 'Trend'];
+    const headers = [
+      viewMode === 'departments' ? 'Department' : 'Employee',
+      viewMode === 'departments' ? 'Employees' : 'Department',
+      'Location',
+      'Remote Workday',
+      ...weeks.map((w) => parseLocalDate(w).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })),
+      viewMode === 'departments' ? 'Total Office Days' : 'Total',
+      'Avg/Week',
+      'Score %',
+      'Trend',
+    ];
 
     const csvRows = sorted.map((r) => [
-      r.name, r.email, r.department, r.officeLocation,
+      r.label,
+      r.secondary,
+      r.officeLocation,
+      viewMode === 'employees'
+        ? (r.approvedRemoteWorkRequest
+          ? 'Approved Request'
+          : r.remoteWorkdayPolicyAssigned
+            ? 'Policy Assigned'
+            : 'Standard Policy')
+        : '—',
       ...weeks.map((w) => String(r.weeks[w]?.officeDays ?? 0)),
-      String(r.total), String(r.avgPerWeek),
-      r.compliant ? 'Yes' : 'No', r.trend,
+      String(r.total),
+      String(r.avgPerWeek),
+      `${r.scorePct}%`,
+      r.trend,
     ]);
 
     const csv = [headers.join(','), ...csvRows.map((row) => row.map((c) => `"${c}"`).join(','))].join('\n');
-    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), `office-attendance-${lookbackWeeks}w.csv`);
+    downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), `office-attendance-${startDate}-${endDate}-${viewMode}.csv`);
   };
 
   const exportXLSX = async () => {
@@ -240,9 +640,17 @@ export function AttendanceClient({
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Office Attendance');
 
-    const headers = ['Employee', 'Email', 'Department', 'Location', ...weeks.map((w) =>
-      new Date(w).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-    ), 'Total', 'Avg/Week', 'Compliant', 'Trend'];
+    const headers = [
+      viewMode === 'departments' ? 'Department' : 'Employee',
+      viewMode === 'departments' ? 'Employees' : 'Department',
+      'Location',
+      'Remote Workday',
+      ...weeks.map((w) => parseLocalDate(w).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })),
+      viewMode === 'departments' ? 'Total Office Days' : 'Total',
+      'Avg/Week',
+      'Score %',
+      'Trend',
+    ];
 
     const headerRow = ws.addRow(headers);
     headerRow.font = { bold: true, size: 11 };
@@ -252,29 +660,38 @@ export function AttendanceClient({
 
     // Summary row (must match header column count: Employee, Email, Department, Location, ...weeks, Total, Avg, Compliant, Trend)
     const summaryRow = ws.addRow([
-      `${filteredSummary.totalEmployees} employees`,
+      viewMode === 'departments' ? `${filteredSummary.totalDepartments} departments` : `${filteredSummary.totalEmployees} employees`,
+      viewMode === 'departments' ? `${filteredSummary.totalEmployees} employees` : '',
       '',
-      `${filteredSummary.complianceRate}% compliant`,
-      '', // Location column
+      `${filteredSummary.complianceRate}% score`,
       ...weeks.map(() => ''),
       '',
       String(filteredSummary.avgOfficeDays),
-      `${filteredSummary.zeroOfficeDaysCount} zero office days`,
+      viewMode === 'departments'
+        ? `${filteredSummary.zeroOfficeDepartments} zero-office departments`
+        : `${filteredSummary.zeroOfficeDaysCount} zero office days`,
       '',
     ]);
     summaryRow.font = { italic: true, size: 10, color: { argb: '6B7280' } };
 
     for (const r of sorted) {
       const row = ws.addRow([
-        r.name, r.email, r.department, r.officeLocation,
+        r.label, r.secondary, r.officeLocation,
+        viewMode === 'employees'
+          ? (r.approvedRemoteWorkRequest
+            ? 'Approved Request'
+            : r.remoteWorkdayPolicyAssigned
+              ? 'Policy Assigned'
+              : 'Standard Policy')
+          : '—',
         ...weeks.map((w) => r.weeks[w]?.officeDays ?? 0),
         r.total, r.avgPerWeek,
-        r.compliant ? 'Yes' : 'No', r.trend,
+        r.scorePct, r.trend,
       ]);
 
       // Color week cells
       weeks.forEach((w, i) => {
-        const cell = row.getCell(5 + i); // 1-indexed, after name/email/dept/location
+        const cell = row.getCell(5 + i); // 1-indexed, after label/secondary/location/remote-work
         const wc = r.weeks[w];
         const hex = getCellHex(wc?.officeDays ?? 0, wc?.ptoDays ?? 0);
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: hex } };
@@ -288,7 +705,7 @@ export function AttendanceClient({
     if (ws.columns[0]) ws.columns[0].width = 24;
 
     const buffer = await wb.xlsx.writeBuffer();
-    downloadBlob(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `office-attendance-${lookbackWeeks}w.xlsx`);
+    downloadBlob(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `office-attendance-${startDate}-${endDate}-${viewMode}.xlsx`);
   };
 
   const SortHeader = ({
@@ -319,10 +736,26 @@ export function AttendanceClient({
         <div>
           <h2 className="text-[15px] font-semibold text-gray-900">Office Attendance</h2>
           <p className="mt-0.5 text-[12px] text-gray-500">
-            Last {lookbackWeeks} weeks — office days per week (min {OFFICE_DAYS_REQUIRED} required)
+            {formatRangeLabel(startDate, endDate)} — office days per week (target {OFFICE_DAYS_REQUIRED})
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <div className="flex items-center rounded-lg border border-gray-200 bg-white p-0.5">
+            {([
+              { id: 'employees', label: 'Employees' },
+              { id: 'departments', label: 'Departments' },
+            ] as const).map((option) => (
+              <button
+                key={option.id}
+                onClick={() => { setViewMode(option.id); setPage(0); }}
+                className={`rounded-md px-3 py-1.5 text-[12px] font-medium ${
+                  viewMode === option.id ? 'bg-gray-900 text-white' : 'text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
           <select
             value={lookbackWeeks}
             onChange={(e) => changeLookback(e.target.value)}
@@ -406,9 +839,20 @@ export function AttendanceClient({
             </div>
           )}
         </div>
+        <div className="w-full md:w-56">
+          <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Remote Workday</label>
+          <select
+            value={remoteWorkFilter}
+            onChange={(event) => { setRemoteWorkFilter(event.target.value as RemoteWorkFilter); setPage(0); }}
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-600 focus:border-gray-300 focus:outline-none"
+          >
+            <option value="all">All Employees</option>
+            <option value="approved">Approved Remote Work</option>
+          </select>
+        </div>
         {hasFilters && (
           <button
-            onClick={() => { setSearch(''); setSelectedDepts([]); setSelectedLocs([]); setPage(0); }}
+            onClick={() => { setSearch(''); setSelectedDepts([]); setSelectedLocs([]); setRemoteWorkFilter('all'); setPage(0); }}
             className="rounded-lg border border-gray-200 px-3 py-2 text-[12px] text-gray-600 hover:bg-gray-50"
           >
             Clear
@@ -419,250 +863,62 @@ export function AttendanceClient({
       {/* Summary */}
       <div className="grid gap-4 sm:grid-cols-4">
         <div className="rounded-xl border border-gray-200 bg-white p-4">
-          <p className="text-[11px] font-medium text-gray-500">Employees</p>
-          <p className="mt-1 text-[22px] font-semibold text-gray-900">{filteredSummary.totalEmployees}</p>
+          <p className="text-[11px] font-medium text-gray-500">{viewMode === 'departments' ? 'Departments' : 'Employees'}</p>
+          <p className="mt-1 text-[22px] font-semibold text-gray-900">
+            {viewMode === 'departments' ? filteredSummary.totalDepartments : filteredSummary.totalEmployees}
+          </p>
+          {viewMode === 'departments' && (
+            <p className="mt-1 text-[11px] text-gray-400">{filteredSummary.totalEmployees} employees covered</p>
+          )}
         </div>
         <div className="rounded-xl border border-gray-200 bg-white p-4">
-          <p className="text-[11px] font-medium text-gray-500">Avg Office Days/Week</p>
+          <p className="text-[11px] font-medium text-gray-500">
+            {viewMode === 'departments' ? 'Avg Office Days/Emp/Week' : 'Avg Office Days/Week'}
+          </p>
           <p className="mt-1 text-[22px] font-semibold text-gray-900">{filteredSummary.avgOfficeDays}</p>
         </div>
         <div className="rounded-xl border border-gray-200 bg-white p-4">
-          <p className="text-[11px] font-medium text-gray-500">Compliance</p>
+          <p className="text-[11px] font-medium text-gray-500">Score</p>
           <p className={`mt-1 text-[22px] font-semibold ${filteredSummary.complianceRate >= 80 ? 'text-green-600' : filteredSummary.complianceRate >= 50 ? 'text-amber-600' : 'text-red-600'}`}>
             {filteredSummary.complianceRate}%
           </p>
+          <p className="mt-1 text-[11px] text-gray-400">0 days = 0, 1 day = 50, 2+ days = 100</p>
         </div>
         <div className="rounded-xl border border-gray-200 bg-white p-4">
-          <p className="text-[11px] font-medium text-gray-500">Zero Office Days</p>
-          <p className={`mt-1 text-[22px] font-semibold ${filteredSummary.zeroOfficeDaysCount > 0 ? 'text-red-600' : 'text-gray-900'}`}>
-            {filteredSummary.zeroOfficeDaysCount}
+          <p className="text-[11px] font-medium text-gray-500">{viewMode === 'departments' ? 'Zero-Office Departments' : 'Zero Office Days'}</p>
+          <p className={`mt-1 text-[22px] font-semibold ${
+            (viewMode === 'departments' ? filteredSummary.zeroOfficeDepartments : filteredSummary.zeroOfficeDaysCount) > 0
+              ? 'text-red-600'
+              : 'text-gray-900'
+          }`}>
+            {viewMode === 'departments' ? filteredSummary.zeroOfficeDepartments : filteredSummary.zeroOfficeDaysCount}
           </p>
         </div>
       </div>
 
-      {/* Validation */}
-      <div className="flex items-center gap-3">
-        <button
-          onClick={() => {
-            if (!validationEnabled) return;
-            if (validation) { setValidationOpen((v) => !v); return; }
-            startTransition(async () => {
-              try {
-                setValidationError(null);
-                const result = await validateAttendanceData(lookbackWeeks);
-                setValidation(result);
-                setValidationOpen(true);
-              } catch (error) {
-                setValidation(null);
-                setValidationOpen(false);
-                setValidationError(
-                  error instanceof Error
-                    ? error.message
-                    : 'Validation failed. Please try again.',
-                );
-              }
-            });
-          }}
-          disabled={isPending || !validationEnabled}
-          className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-[12px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-        >
-          {!validationEnabled
-            ? 'Validation Unavailable'
-            : isPending
-              ? 'Validating...'
-              : validation
-                ? (validationOpen ? 'Hide Validation' : 'Show Validation')
-                : 'Validate vs ActivTrak'}
-        </button>
-        {validation && !validationOpen ? (
-          validation.discrepancies.length === 0
-            ? <span className="text-[12px] font-medium text-green-600">All 3 sources match</span>
-            : <span className="text-[12px] font-medium text-amber-600">{validation.discrepancies.length} discrepancies found</span>
-        ) : null}
-        {validationError ? (
-          <span className="text-[12px] font-medium text-red-600">{validationError}</span>
-        ) : null}
-        {!validationEnabled ? (
-          <span className="text-[12px] font-medium text-amber-600">
-            Validation requires live Oracle/BigQuery/BambooHR connectivity.
-          </span>
-        ) : null}
-      </div>
-
-      {validationOpen && validation && (
-        <div className="rounded-xl border border-gray-200 bg-white">
-          <div className="border-b border-gray-100 px-6 py-4">
-            <h3 className="text-[13px] font-semibold text-gray-900">3-Source Validation — ActivTrak vs Oracle vs BambooHR</h3>
-            <p className="mt-0.5 text-[11px] text-gray-500">{validation.rangeStart} to {validation.rangeEnd}</p>
-          </div>
-
-          {/* Source metrics */}
-          <div className="grid gap-4 border-b border-gray-100 p-4 sm:grid-cols-3">
-            <div className="rounded-lg border border-blue-100 bg-blue-50 p-3">
-              <p className="text-[11px] font-medium text-blue-700">ActivTrak (Source)</p>
-              <p className="text-[18px] font-semibold text-gray-900">{validation.activtrak.totalRecords.toLocaleString()}</p>
-              <p className="text-[11px] text-gray-500">{validation.activtrak.uniqueEmployees} employees</p>
-              <div className="mt-1 flex gap-3 text-[10px] text-gray-400">
-                <span>{validation.activtrak.officeDays} office</span>
-                <span>{validation.activtrak.remoteDays} remote</span>
-                {validation.activtrak.unknownDays > 0 && <span>{validation.activtrak.unknownDays} unknown</span>}
-              </div>
-            </div>
-            <div className="rounded-lg border border-purple-100 bg-purple-50 p-3">
-              <p className="text-[11px] font-medium text-purple-700">Oracle (Synced)</p>
-              <p className="text-[18px] font-semibold text-gray-900">{validation.oracle.totalRecords.toLocaleString()}</p>
-              <p className="text-[11px] text-gray-500">{validation.oracle.uniqueEmployees} employees</p>
-              <div className="mt-1 flex gap-3 text-[10px] text-gray-400">
-                <span>{validation.oracle.officeDays} office</span>
-                <span>{validation.oracle.remoteDays} remote</span>
-                {validation.oracle.unknownDays > 0 && <span>{validation.oracle.unknownDays} unknown</span>}
-              </div>
-            </div>
-            <div className="rounded-lg border border-green-100 bg-green-50 p-3">
-              <p className="text-[11px] font-medium text-green-700">BambooHR (Directory)</p>
-              <p className="text-[18px] font-semibold text-gray-900">{validation.bamboo.activeEmployees}</p>
-              <p className="text-[11px] text-gray-500">active employees</p>
-              <p className="mt-1 text-[10px] text-gray-400">{validation.bamboo.withPTO} with PTO in range</p>
-            </div>
-          </div>
-
-          {/* Match summary */}
-          <div className="grid gap-4 border-b border-gray-100 p-4 sm:grid-cols-5">
-            <div className="text-center">
-              <p className="text-[10px] text-gray-500">Record Diff</p>
-              <p className={`text-[14px] font-semibold ${validation.activtrak.totalRecords === validation.oracle.totalRecords ? 'text-green-600' : 'text-amber-600'}`}>
-                {validation.oracle.totalRecords - validation.activtrak.totalRecords >= 0 ? '+' : ''}{validation.oracle.totalRecords - validation.activtrak.totalRecords}
-              </p>
-            </div>
-            <div className="text-center">
-              <p className="text-[10px] text-gray-500">Discrepancies</p>
-              <p className={`text-[14px] font-semibold ${validation.discrepancies.length === 0 ? 'text-green-600' : 'text-amber-600'}`}>
-                {validation.discrepancies.length}
-              </p>
-            </div>
-            <div className="text-center">
-              <p className="text-[10px] text-gray-500">ActivTrak Only</p>
-              <p className={`text-[14px] font-semibold ${validation.activtrakOnlyEmails.length === 0 ? 'text-green-600' : 'text-red-600'}`}>
-                {validation.activtrakOnlyEmails.length}
-              </p>
-            </div>
-            <div className="text-center">
-              <p className="text-[10px] text-gray-500">Not in Bamboo</p>
-              <p className={`text-[14px] font-semibold ${validation.notInBamboo.length === 0 ? 'text-green-600' : 'text-amber-600'}`}>
-                {validation.notInBamboo.length}
-              </p>
-            </div>
-            <div className="text-center">
-              <p className="text-[10px] text-gray-500">Ghost (0 records)</p>
-              <p className="text-[14px] font-semibold text-gray-500">
-                {validation.ghostEmployees.length}
-              </p>
-            </div>
-          </div>
-
-          {/* Discrepancy table */}
-          {validation.discrepancies.length > 0 && (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-gray-100">
-                    <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-500">Employee</th>
-                    <th className="px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-gray-500">Dept</th>
-                    <th className="px-3 py-2 text-center text-[10px] font-medium uppercase tracking-wider text-blue-600" colSpan={2}>ActivTrak</th>
-                    <th className="px-3 py-2 text-center text-[10px] font-medium uppercase tracking-wider text-purple-600" colSpan={2}>Oracle</th>
-                    <th className="px-3 py-2 text-center text-[10px] font-medium uppercase tracking-wider text-gray-500">Diff</th>
-                    <th className="px-3 py-2 text-center text-[10px] font-medium uppercase tracking-wider text-gray-500">Flags</th>
-                  </tr>
-                  <tr className="border-b border-gray-50">
-                    <th></th><th></th>
-                    <th className="px-2 py-1 text-center text-[9px] text-gray-400">Office</th>
-                    <th className="px-2 py-1 text-center text-[9px] text-gray-400">Remote</th>
-                    <th className="px-2 py-1 text-center text-[9px] text-gray-400">Office</th>
-                    <th className="px-2 py-1 text-center text-[9px] text-gray-400">Remote</th>
-                    <th></th><th></th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {validation.discrepancies.map((d) => (
-                    <tr key={d.email} className="hover:bg-gray-50">
-                      <td className="px-3 py-2">
-                        <p className="text-[12px] font-medium text-gray-900">{d.name}</p>
-                        <p className="text-[10px] text-gray-400">{d.email}</p>
-                      </td>
-                      <td className="px-3 py-2 text-[11px] text-gray-500">{d.department}</td>
-                      <td className="px-3 py-2 text-center text-[12px] text-blue-700">{d.activtrak.office}</td>
-                      <td className="px-3 py-2 text-center text-[12px] text-blue-400">{d.activtrak.remote}</td>
-                      <td className="px-3 py-2 text-center text-[12px] text-purple-700">{d.oracle.office}</td>
-                      <td className="px-3 py-2 text-center text-[12px] text-purple-400">{d.oracle.remote}</td>
-                      <td className="px-3 py-2 text-center">
-                        <span className={`text-[12px] font-semibold ${d.diff > 0 ? 'text-green-600' : d.diff < 0 ? 'text-red-600' : 'text-gray-400'}`}>
-                          {d.diff > 0 ? '+' : ''}{d.diff}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 text-center space-x-1">
-                        {d.locationMismatch && <span className="inline-block rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-medium text-amber-700">LOC</span>}
-                        {!d.inBamboo && <span className="inline-block rounded bg-red-100 px-1.5 py-0.5 text-[9px] font-medium text-red-700">NO-HR</span>}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {validation.discrepancies.length >= 50 && (
-                <p className="border-t border-gray-100 p-3 text-center text-[11px] text-gray-400">Showing top 50 discrepancies by magnitude</p>
-              )}
-            </div>
-          )}
-
-          {/* Email lists */}
-          {(validation.activtrakOnlyEmails.length > 0 || validation.oracleOnlyEmails.length > 0 || validation.notInBamboo.length > 0 || validation.ghostEmployees.length > 0) && (
-            <div className="grid gap-4 border-t border-gray-100 p-4 sm:grid-cols-2 lg:grid-cols-4">
-              {validation.activtrakOnlyEmails.length > 0 && (
-                <div>
-                  <p className="mb-1 text-[11px] font-medium text-red-600">ActivTrak Only ({validation.activtrakOnlyEmails.length})</p>
-                  <div className="space-y-0.5">
-                    {validation.activtrakOnlyEmails.map((e) => <p key={e} className="text-[10px] text-gray-600">{e}</p>)}
-                  </div>
-                </div>
-              )}
-              {validation.oracleOnlyEmails.length > 0 && (
-                <div>
-                  <p className="mb-1 text-[11px] font-medium text-amber-600">Oracle Only ({validation.oracleOnlyEmails.length})</p>
-                  <div className="space-y-0.5">
-                    {validation.oracleOnlyEmails.map((e) => <p key={e} className="text-[10px] text-gray-600">{e}</p>)}
-                  </div>
-                </div>
-              )}
-              {validation.notInBamboo.length > 0 && (
-                <div>
-                  <p className="mb-1 text-[11px] font-medium text-red-600">Not in BambooHR ({validation.notInBamboo.length})</p>
-                  <div className="space-y-0.5">
-                    {validation.notInBamboo.map((e) => <p key={e} className="text-[10px] text-gray-600">{e}</p>)}
-                  </div>
-                </div>
-              )}
-              {validation.ghostEmployees.length > 0 && (
-                <div>
-                  <p className="mb-1 text-[11px] font-medium text-gray-500">Ghost Employees ({validation.ghostEmployees.length})</p>
-                  <p className="mb-1 text-[9px] text-gray-400">In BambooHR but 0 records in ActivTrak & Oracle</p>
-                  <div className="space-y-0.5">
-                    {validation.ghostEmployees.map((e) => <p key={e} className="text-[10px] text-gray-600">{e}</p>)}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Count + pagination info */}
       <div className="flex items-center justify-between text-[12px] text-gray-500">
-        <span>{sorted.length} employees {hasFilters ? '(filtered)' : ''}</span>
+        <span>{sorted.length} {viewMode === 'departments' ? 'departments' : 'employees'} {hasFilters ? '(filtered)' : ''}</span>
         <span>Page {page + 1} of {totalPages}</span>
       </div>
 
+      {showScrollRail ? (
+        <div className="sticky top-20 z-20 -mb-2">
+          <div className="rounded-xl border border-gray-200 bg-white/95 px-3 py-2 shadow-sm backdrop-blur">
+            <div className="mb-1 flex items-center justify-between text-[10px] font-medium uppercase tracking-wider text-gray-400">
+              <span>Horizontal Scroll</span>
+              <span>Drag here to move across weeks</span>
+            </div>
+            <div ref={topScrollRef} className="overflow-x-auto overflow-y-hidden">
+              <div ref={topScrollContentRef} className="h-2 rounded-full bg-gray-200" />
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {/* Table */}
       <div className="rounded-xl border border-gray-200 bg-white">
-        <div className="overflow-x-auto">
+        <div ref={tableScrollRef} className="overflow-x-auto">
           <table className="w-full border-collapse">
             <thead>
               <tr className="border-b border-gray-100">
@@ -670,9 +926,9 @@ export function AttendanceClient({
                   className="sticky left-0 z-10 cursor-pointer select-none whitespace-nowrap bg-white px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900"
                   onClick={() => handleSort('name')}
                 >
-                  Employee {sortKey === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : ''}
+                  {viewMode === 'departments' ? 'Department' : 'Employee'} {sortKey === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : ''}
                 </th>
-                <SortHeader label="Dept" colKey="department" />
+                <SortHeader label={viewMode === 'departments' ? 'Employees' : 'Dept'} colKey="department" />
                 <SortHeader label="Location" colKey="officeLocation" />
                 {weeks.map((w) => {
                   const isCurrent = w === currentWeek;
@@ -690,19 +946,27 @@ export function AttendanceClient({
                 })}
                 <SortHeader label="Total" colKey="total" align="center" />
                 <SortHeader label="Avg" colKey="avgPerWeek" align="center" />
-                <th className="whitespace-nowrap px-3 py-3 text-center text-[11px] font-medium uppercase tracking-wider text-gray-500">Status</th>
+                <SortHeader label="Score" colKey="status" align="center" />
                 <SortHeader label="Trend" colKey="trend" align="center" />
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {pageRows.map((row) => (
-                <tr key={row.email || row.name} className="hover:bg-gray-50">
+                <tr key={row.id} className="hover:bg-gray-50">
                   <td className="sticky left-0 z-10 bg-white px-4 py-2 group-hover:bg-gray-50">
-                    <Link href={`/dashboard/employee/${encodeURIComponent(row.email)}`} className="whitespace-nowrap text-[13px] font-medium text-gray-900 hover:underline">
-                      {row.name}
-                    </Link>
+                    {row.email ? (
+                      <button
+                        type="button"
+                        onClick={() => setDetail({ row })}
+                        className="whitespace-nowrap text-[13px] font-medium text-gray-900 hover:underline"
+                      >
+                        {row.label}
+                      </button>
+                    ) : (
+                      <span className="whitespace-nowrap text-[13px] font-medium text-gray-900">{row.label}</span>
+                    )}
                   </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-[12px] text-gray-500">{row.department}</td>
+                  <td className="whitespace-nowrap px-3 py-2 text-[12px] text-gray-500">{row.secondary}</td>
                   <td className="whitespace-nowrap px-3 py-2 text-[12px] text-gray-500">{row.officeLocation}</td>
                   {weeks.map((w) => {
                     const cell = row.weeks[w];
@@ -713,12 +977,19 @@ export function AttendanceClient({
                     return (
                       <td key={w} className="px-2 py-1.5 text-center">
                         <div className="group relative inline-flex">
-                          <span className={`inline-flex h-6 w-6 cursor-default items-center justify-center rounded text-[11px] font-medium ${color}`}>
+                          <span className={`inline-flex min-h-6 min-w-8 cursor-default items-center justify-center rounded px-1 text-[11px] font-medium ${color}`}>
                             {office}
                           </span>
-                          <div className="pointer-events-none absolute bottom-full left-1/2 z-30 mb-2 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-3 py-2.5 opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
-                            <div className="whitespace-nowrap text-left text-[11px]">
-                              {cell && cell.days.length > 0 ? (
+                          <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-64 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-3 py-2.5 opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
+                            <div className="text-left text-[11px]">
+                              {viewMode === 'departments' ? (
+                                <div className="space-y-1 text-gray-600">
+                                  <div className="flex justify-between gap-3"><span>Employees</span><span className="font-medium text-gray-900">{row.employeeCount ?? 0}</span></div>
+                                  <div className="flex justify-between gap-3"><span>Office Days</span><span className="font-medium text-gray-900">{office}</span></div>
+                                  <div className="flex justify-between gap-3"><span>Remote Days</span><span className="font-medium text-gray-900">{remote}</span></div>
+                                  <div className="flex justify-between gap-3"><span>PTO Days</span><span className="font-medium text-gray-900">{pto}</span></div>
+                                </div>
+                              ) : cell && cell.days.length > 0 ? (
                                 <div className="space-y-0.5">
                                   {cell.days.map((d) => (
                                     <div key={d.date} className="flex items-center gap-2">
@@ -733,7 +1004,9 @@ export function AttendanceClient({
                                         d.location === 'Office' ? 'text-green-700' :
                                         d.location === 'Remote' ? 'text-gray-500' :
                                         d.location === 'PTO' ? 'text-blue-600' : 'text-amber-600'
-                                      }`}>{d.location}</span>
+                                      }`}>
+                                        {d.location === 'PTO' && d.ptoType ? `${d.location} • ${d.ptoType}` : d.location}
+                                      </span>
                                     </div>
                                   ))}
                                 </div>
@@ -741,7 +1014,6 @@ export function AttendanceClient({
                                 <div className="text-gray-400">No activity</div>
                               )}
                             </div>
-                            <div className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-white" />
                           </div>
                         </div>
                       </td>
@@ -750,8 +1022,8 @@ export function AttendanceClient({
                   <td className="whitespace-nowrap px-3 py-1.5 text-center text-[13px] font-semibold text-gray-900">{row.total}</td>
                   <td className="whitespace-nowrap px-3 py-1.5 text-center text-[12px] text-gray-600">{row.avgPerWeek}</td>
                   <td className="whitespace-nowrap px-3 py-1.5 text-center">
-                    <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${row.compliant ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`}>
-                      {row.compliant ? 'Compliant' : 'Non-Compliant'}
+                    <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${scoreTone(row.scorePct)}`}>
+                      {row.scorePct}%
                     </span>
                   </td>
                   <td className="whitespace-nowrap px-3 py-1.5 text-center text-[14px]">
@@ -764,7 +1036,7 @@ export function AttendanceClient({
             </tbody>
           </table>
           {sorted.length === 0 && (
-            <div className="p-12 text-center text-[13px] text-gray-500">No employees match filters.</div>
+            <div className="p-12 text-center text-[13px] text-gray-500">No {viewMode === 'departments' ? 'departments' : 'employees'} match filters.</div>
           )}
         </div>
       </div>
@@ -806,9 +1078,229 @@ export function AttendanceClient({
         <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.compliant}`} /> {OFFICE_DAYS_REQUIRED}+ days</span>
         <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.partial}`} /> 1 day</span>
         <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.absent}`} /> 0 days</span>
-        <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.pto}`} /> PTO week (excused if insufficient working days)</span>
-        {currentWeek && <span className="flex items-center gap-1.5"><span className="text-gray-400">*</span> Current week (in progress, excluded from compliance)</span>}
+        <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.pto}`} /> PTO week overlay</span>
+        {currentWeek && <span className="flex items-center gap-1.5"><span className="text-gray-400">*</span> Current week (in progress, excluded from score)</span>}
       </div>
+
+      {detail ? (
+        <AttendanceDetailModal
+          row={detail.row}
+          weeks={weeks}
+          scoredWeeks={scoredWeeks}
+          returnTo={returnTo}
+          onClose={closeDetail}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function AttendanceDetailModal({
+  row,
+  weeks,
+  scoredWeeks,
+  returnTo,
+  onClose,
+}: {
+  row: DisplayRow;
+  weeks: string[];
+  scoredWeeks: string[];
+  returnTo: string;
+  onClose: () => void;
+}) {
+  const weekSummaries = weeks.map((week) => {
+    const cell = row.weeks[week] || { officeDays: 0, remoteDays: 0, ptoDays: 0, days: [] };
+    return {
+      week,
+      label: getWeekLabel(week),
+      officeDays: cell.officeDays ?? 0,
+      remoteDays: cell.remoteDays ?? 0,
+      ptoDays: cell.ptoDays ?? 0,
+      scorePct: getWeekPointCapacity(cell) > 0
+        ? Math.round((getWeekPoints(cell) / getWeekPointCapacity(cell)) * 100)
+        : 0,
+      days: [...(cell.days ?? [])].sort((a, b) => a.date.localeCompare(b.date)),
+    };
+  });
+
+  const allDays = weekSummaries.flatMap((weekSummary) =>
+    weekSummary.days.map((day) => ({ ...day, weekLabel: weekSummary.label })),
+  );
+  const officeDays = allDays.filter((day) => day.location === 'Office').length;
+  const remoteDays = allDays.filter((day) => day.location === 'Remote').length;
+  const ptoDays = allDays.filter((day) => day.location === 'PTO').length;
+  const unknownDays = allDays.filter((day) => day.location === 'Unknown').length;
+  const activeWeeks = scoredWeeks.filter((week) => {
+    const cell = row.weeks[week];
+    return (cell?.officeDays ?? 0) > 0 || (cell?.remoteDays ?? 0) > 0 || (cell?.ptoDays ?? 0) > 0;
+  }).length;
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-gray-900/40 px-4 py-6" onClick={onClose}>
+      <div
+        className="flex h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-3xl border border-gray-200 bg-white shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-6 border-b border-gray-100 px-6 py-5">
+          <div>
+            <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-gray-400">Employee Attendance Detail</p>
+            <h3 className="mt-1 text-[24px] font-semibold text-gray-900">{row.label}</h3>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-[13px] text-gray-500">
+              <span>{row.secondary} • {row.officeLocation}</span>
+              {row.approvedRemoteWorkRequest ? (
+                <span className="inline-flex rounded-full bg-green-50 px-2 py-0.5 text-[10px] font-medium text-green-700">
+                  Approved Remote Work Request
+                </span>
+              ) : null}
+              <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                row.remoteWorkdayPolicyAssigned ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-600'
+              }`}>
+                {row.remoteWorkdayPolicyAssigned ? 'Remote Workday Policy Assigned' : 'Standard Policy'}
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {row.email ? (
+              <Link
+                href={`/dashboard/employee/${encodeURIComponent(row.email)}?returnTo=${encodeURIComponent(returnTo)}`}
+                className="rounded-lg border border-gray-200 px-3 py-2 text-[12px] font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Open Full Profile
+              </Link>
+            ) : null}
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg border border-gray-200 px-3 py-2 text-[12px] font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+
+        <div className="grid gap-4 border-b border-gray-100 bg-gray-50/70 px-6 py-4 md:grid-cols-5">
+          <MetricCard label="Score" value={`${row.scorePct}%`} tone={scoreTone(row.scorePct)} />
+          <MetricCard label="Office Days" value={String(officeDays)} />
+          <MetricCard label="Remote Days" value={String(remoteDays)} />
+          <MetricCard label="PTO Days" value={String(ptoDays)} />
+          <MetricCard label="Weeks With Activity" value={String(activeWeeks)} />
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-6 py-5">
+          <div className="grid gap-6 xl:grid-cols-[1.1fr,0.9fr]">
+            <section className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-[13px] font-semibold uppercase tracking-wider text-gray-500">Weekly Breakdown</h4>
+                  <p className="mt-1 text-[12px] text-gray-400">Each completed week uses the same scoring model as the main report.</p>
+                </div>
+              </div>
+              <div className="overflow-hidden rounded-2xl border border-gray-200">
+                <div className="max-h-[28rem] overflow-auto">
+                  <table className="w-full">
+                    <thead className="sticky top-0 z-10 bg-white">
+                      <tr className="border-b border-gray-100">
+                        <th className="px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Week</th>
+                        <th className="px-3 py-3 text-center text-[11px] font-medium uppercase tracking-wider text-gray-500">Office</th>
+                        <th className="px-3 py-3 text-center text-[11px] font-medium uppercase tracking-wider text-gray-500">Remote</th>
+                        <th className="px-3 py-3 text-center text-[11px] font-medium uppercase tracking-wider text-gray-500">PTO</th>
+                        <th className="px-3 py-3 text-center text-[11px] font-medium uppercase tracking-wider text-gray-500">Score</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {weekSummaries.map((weekSummary) => (
+                        <tr key={weekSummary.week} className="bg-white">
+                          <td className="px-4 py-3">
+                            <p className="text-[13px] font-medium text-gray-900">{weekSummary.label}</p>
+                            <p className="text-[11px] text-gray-400">{weekSummary.days.length} tracked days</p>
+                          </td>
+                          <td className="px-3 py-3 text-center text-[13px] font-medium text-gray-900">{weekSummary.officeDays}</td>
+                          <td className="px-3 py-3 text-center text-[13px] text-gray-600">{weekSummary.remoteDays}</td>
+                          <td className="px-3 py-3 text-center text-[13px] text-blue-600">{weekSummary.ptoDays}</td>
+                          <td className="px-3 py-3 text-center">
+                            <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${scoreTone(weekSummary.scorePct)}`}>
+                              {weekSummary.scorePct}%
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+
+            <section className="space-y-4">
+              <div>
+                <h4 className="text-[13px] font-semibold uppercase tracking-wider text-gray-500">Daily Activity</h4>
+                <p className="mt-1 text-[12px] text-gray-400">Expanded office, remote, PTO, and unknown days from the selected range.</p>
+              </div>
+              <div className="overflow-hidden rounded-2xl border border-gray-200">
+                <div className="max-h-[28rem] overflow-auto">
+                  <table className="w-full">
+                    <thead className="sticky top-0 z-10 bg-white">
+                      <tr className="border-b border-gray-100">
+                        <th className="px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Date</th>
+                        <th className="px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Week</th>
+                        <th className="px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Location</th>
+                        <th className="px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">PTO</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {allDays.length > 0 ? allDays.map((day) => (
+                        <tr key={day.date} className="bg-white">
+                          <td className="px-4 py-3 text-[13px] font-medium text-gray-900">{formatDayLabel(day.date)}</td>
+                          <td className="px-3 py-3 text-[12px] text-gray-500">{day.weekLabel}</td>
+                          <td className="px-3 py-3">
+                            <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                              day.location === 'Office'
+                                ? 'bg-green-50 text-green-700'
+                                : day.location === 'Remote'
+                                  ? 'bg-gray-100 text-gray-700'
+                                  : day.location === 'PTO'
+                                    ? 'bg-blue-50 text-blue-700'
+                                    : 'bg-amber-50 text-amber-700'
+                            }`}>
+                              {day.location}
+                            </span>
+                          </td>
+                          <td className="px-3 py-3 text-[12px] text-gray-500">{day.ptoType ?? '—'}</td>
+                        </tr>
+                      )) : (
+                        <tr>
+                          <td colSpan={4} className="px-4 py-8 text-center text-[13px] text-gray-500">No day-level activity in this range.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <MetricCard label="Unknown Days" value={String(unknownDays)} />
+                <MetricCard label="Avg Office / Week" value={String(row.avgPerWeek)} />
+                <MetricCard label="Trend" value={row.trend === 'flat' ? 'Flat' : row.trend === 'up' ? 'Up' : 'Down'} />
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: string;
+}) {
+  return (
+    <div className={`rounded-2xl border border-gray-200 bg-white p-4 ${tone ?? ''}`}>
+      <p className="text-[11px] font-medium uppercase tracking-wider text-gray-500">{label}</p>
+      <p className="mt-2 text-[24px] font-semibold text-gray-900">{value}</p>
     </div>
   );
 }

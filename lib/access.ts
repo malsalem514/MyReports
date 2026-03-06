@@ -26,6 +26,7 @@ export interface AccessContext {
   employeeId: string | null;
   employeeName: string | null;
   isHRAdmin: boolean;
+  isDirector: boolean;
   isManager: boolean;
   allowedEmails: string[];
   directReportCount: number;
@@ -33,6 +34,26 @@ export interface AccessContext {
 }
 
 export type AccessLevel = 'none' | 'self' | 'team' | 'all';
+
+export interface RoleDiagnostics {
+  isDirector: boolean;
+  reason: string | null;
+}
+
+export function getRoleDiagnostics(employee: BambooHREmployee): RoleDiagnostics {
+  const jobTitle = (employee.jobTitle || '').toLowerCase().trim();
+  const department = (employee.department || '').toLowerCase().trim();
+
+  if (department === 'executive') {
+    return { isDirector: true, reason: 'Department is Executive' };
+  }
+
+  if (/(director)/.test(jobTitle)) {
+    return { isDirector: true, reason: 'Job title contains Director' };
+  }
+
+  return { isDirector: false, reason: null };
+}
 
 // ============================================================================
 // Core — React.cache deduplicates per request
@@ -52,6 +73,7 @@ export const getAccessContext = cache(async (): Promise<AccessContext> => {
       employeeId: null,
       employeeName: null,
       isHRAdmin: false,
+      isDirector: false,
       isManager: false,
       allowedEmails: [],
       directReportCount: 0,
@@ -81,6 +103,7 @@ export async function getAccessContextByEmail(
         employeeId: null,
         employeeName: 'HR Admin',
         isHRAdmin: true,
+        isDirector: true,
         isManager: true,
         allowedEmails: allEmails.length > 0 ? allEmails : [normalizedEmail],
         directReportCount: allEmails.length,
@@ -93,6 +116,7 @@ export async function getAccessContextByEmail(
         employeeId: null,
         employeeName: 'HR Admin',
         isHRAdmin: true,
+        isDirector: true,
         isManager: true,
         allowedEmails: [normalizedEmail],
         directReportCount: 0,
@@ -114,6 +138,7 @@ export async function getAccessContextByEmail(
         employeeId: null,
         employeeName: null,
         isHRAdmin: false,
+        isDirector: false,
         isManager: false,
         allowedEmails: [normalizedEmail],
         directReportCount: 0,
@@ -122,6 +147,7 @@ export async function getAccessContextByEmail(
     }
 
     const reports = await fetchReportingStructure(currentUser.id);
+    const diagnostics = getRoleDiagnostics(currentUser);
 
     const allowedEmails = new Set<string>();
     allowedEmails.add(normalizedEmail);
@@ -147,6 +173,7 @@ export async function getAccessContextByEmail(
       employeeId: currentUser.id,
       employeeName: userName,
       isHRAdmin: false,
+      isDirector: diagnostics.isDirector,
       isManager: reports.length > 0,
       allowedEmails: Array.from(allowedEmails),
       directReportCount,
@@ -159,6 +186,7 @@ export async function getAccessContextByEmail(
       employeeId: null,
       employeeName: null,
       isHRAdmin: false,
+      isDirector: false,
       isManager: false,
       allowedEmails: [normalizedEmail],
       directReportCount: 0,
@@ -173,7 +201,7 @@ export async function getAccessContextByEmail(
 
 export function getAccessLevel(context: AccessContext): AccessLevel {
   if (context.isHRAdmin) return 'all';
-  if (context.isManager && context.totalReportCount > 0) return 'team';
+  if ((context.isDirector || context.isManager) && context.totalReportCount > 0) return 'team';
   if (context.employeeId) return 'self';
   return 'none';
 }

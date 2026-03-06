@@ -1,5 +1,5 @@
 import { fetchActiveEmployees, fetchTimeOffRequests } from './bamboohr';
-import { fetchOfficeAttendanceData } from './bigquery';
+import { fetchOfficeAttendanceData, fetchProductivityData } from './bigquery';
 import { execute, executeMany, initializeSchema } from './oracle';
 
 export interface SyncSummary {
@@ -8,6 +8,7 @@ export interface SyncSummary {
   daysBack: number;
   employeesSynced: number;
   attendanceSynced: number;
+  productivitySynced: number;
   timeOffSynced: number;
   tbsMapped: number;
   errors: string[];
@@ -60,14 +61,34 @@ export async function syncTbsEmployeeMap(): Promise<number> {
 
 export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
   const now = new Date();
+  const syncType = 'full';
   const startDate = new Date(now);
   startDate.setDate(now.getDate() - Math.max(1, daysBack));
 
   await initializeSchema();
 
+  try {
+    await execute(
+      `INSERT INTO TL_SYNC_LOG (
+         SYNC_TYPE, STARTED_AT, STATUS, DATE_RANGE_START, DATE_RANGE_END
+       ) VALUES (
+         :syncType, :startedAt, 'running', :rangeStart, :rangeEnd
+       )`,
+      {
+        syncType,
+        startedAt: now,
+        rangeStart: startDate,
+        rangeEnd: now,
+      },
+    );
+  } catch (error) {
+    console.error('[Sync] Failed to write sync start log:', error);
+  }
+
   const errors: string[] = [];
   let employeesSynced = 0;
   let attendanceSynced = 0;
+  let productivitySynced = 0;
   let timeOffSynced = 0;
   let tbsMapped = 0;
 
@@ -90,6 +111,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
         HIRE_DATE: emp.hireDate ? parseDateOnly(emp.hireDate) : null,
         STATUS: emp.status || emp.employmentStatus || null,
         PHOTO_URL: emp.photoUrl || null,
+        REMOTE_WORKDAY_POLICY_ASSIGNED: emp['4631.0'] === 'Yes' ? 1 : 0,
       }));
 
     if (employeeBinds.length > 0) {
@@ -109,7 +131,8 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
            :SUPERVISOR_EMAIL AS SUPERVISOR_EMAIL,
            :HIRE_DATE AS HIRE_DATE,
            :STATUS AS STATUS,
-           :PHOTO_URL AS PHOTO_URL
+           :PHOTO_URL AS PHOTO_URL,
+           :REMOTE_WORKDAY_POLICY_ASSIGNED AS REMOTE_WORKDAY_POLICY_ASSIGNED
          FROM DUAL) s
          ON (t.ID = s.ID)
          WHEN MATCHED THEN UPDATE SET
@@ -126,15 +149,16 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
            t.HIRE_DATE = s.HIRE_DATE,
            t.STATUS = s.STATUS,
            t.PHOTO_URL = s.PHOTO_URL,
+           t.REMOTE_WORKDAY_POLICY_ASSIGNED = s.REMOTE_WORKDAY_POLICY_ASSIGNED,
            t.UPDATED_AT = CURRENT_TIMESTAMP
          WHEN NOT MATCHED THEN INSERT (
            ID, EMAIL, DISPLAY_NAME, FIRST_NAME, LAST_NAME, JOB_TITLE,
            DEPARTMENT, DIVISION, LOCATION, SUPERVISOR_ID, SUPERVISOR_EMAIL,
-           HIRE_DATE, STATUS, PHOTO_URL
+           HIRE_DATE, STATUS, PHOTO_URL, REMOTE_WORKDAY_POLICY_ASSIGNED
          ) VALUES (
            s.ID, s.EMAIL, s.DISPLAY_NAME, s.FIRST_NAME, s.LAST_NAME, s.JOB_TITLE,
            s.DEPARTMENT, s.DIVISION, s.LOCATION, s.SUPERVISOR_ID, s.SUPERVISOR_EMAIL,
-           s.HIRE_DATE, s.STATUS, s.PHOTO_URL
+           s.HIRE_DATE, s.STATUS, s.PHOTO_URL, s.REMOTE_WORKDAY_POLICY_ASSIGNED
          )`,
         employeeBinds,
       );
@@ -193,6 +217,109 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     attendanceSynced = attendanceBinds.length;
   } catch (error) {
     errors.push(`Attendance sync failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    const productivity = await fetchProductivityData(startDate, now);
+    const productivityBinds = productivity
+      .filter((row) => row.email)
+      .map((row) => ({
+        RECORD_DATE: row.date,
+        EMAIL: row.email.toLowerCase(),
+        PRODUCTIVE_TIME: row.productive_time || 0,
+        UNPRODUCTIVE_TIME: row.unproductive_time || 0,
+        NEUTRAL_TIME: row.neutral_time || 0,
+        TOTAL_TIME: row.total_time || 0,
+        PRODUCTIVITY_SCORE: row.productivity_score,
+        ACTIVE_TIME: row.active_time || 0,
+        IDLE_TIME: row.idle_time || 0,
+        FOCUS_TIME: row.focus_time || 0,
+        COLLABORATION_TIME: row.collaboration_time || 0,
+        PRODUCTIVE_ACTIVE_TIME: row.productive_active_time || 0,
+        PRODUCTIVE_PASSIVE_TIME: row.productive_passive_time || 0,
+        UNPRODUCTIVE_ACTIVE_TIME: row.unproductive_active_time || 0,
+        UNPRODUCTIVE_PASSIVE_TIME: row.unproductive_passive_time || 0,
+        UNDEFINED_ACTIVE_TIME: row.undefined_active_time || 0,
+        UNDEFINED_PASSIVE_TIME: row.undefined_passive_time || 0,
+        UTILIZATION_LEVEL: row.utilization_level || null,
+        LOCATION: row.location || null,
+        TIME_OFF_TIME: row.time_off_time || 0,
+        TIME_OFF_TYPE: row.time_off_type || null,
+        FIRST_ACTIVITY_AT: row.first_activity_datetime ? new Date(row.first_activity_datetime.replace(' ', 'T')) : null,
+        LAST_ACTIVITY_AT: row.last_activity_datetime ? new Date(row.last_activity_datetime.replace(' ', 'T')) : null,
+      }));
+
+    if (productivityBinds.length > 0) {
+      await executeMany(
+        `MERGE INTO TL_PRODUCTIVITY t
+         USING (SELECT
+           :RECORD_DATE AS RECORD_DATE,
+           :EMAIL AS EMAIL,
+           :PRODUCTIVE_TIME AS PRODUCTIVE_TIME,
+           :UNPRODUCTIVE_TIME AS UNPRODUCTIVE_TIME,
+           :NEUTRAL_TIME AS NEUTRAL_TIME,
+           :TOTAL_TIME AS TOTAL_TIME,
+           :PRODUCTIVITY_SCORE AS PRODUCTIVITY_SCORE,
+           :ACTIVE_TIME AS ACTIVE_TIME,
+           :IDLE_TIME AS IDLE_TIME,
+           :FOCUS_TIME AS FOCUS_TIME,
+           :COLLABORATION_TIME AS COLLABORATION_TIME,
+           :PRODUCTIVE_ACTIVE_TIME AS PRODUCTIVE_ACTIVE_TIME,
+           :PRODUCTIVE_PASSIVE_TIME AS PRODUCTIVE_PASSIVE_TIME,
+           :UNPRODUCTIVE_ACTIVE_TIME AS UNPRODUCTIVE_ACTIVE_TIME,
+           :UNPRODUCTIVE_PASSIVE_TIME AS UNPRODUCTIVE_PASSIVE_TIME,
+           :UNDEFINED_ACTIVE_TIME AS UNDEFINED_ACTIVE_TIME,
+           :UNDEFINED_PASSIVE_TIME AS UNDEFINED_PASSIVE_TIME,
+           :UTILIZATION_LEVEL AS UTILIZATION_LEVEL,
+           :LOCATION AS LOCATION,
+           :TIME_OFF_TIME AS TIME_OFF_TIME,
+           :TIME_OFF_TYPE AS TIME_OFF_TYPE,
+           :FIRST_ACTIVITY_AT AS FIRST_ACTIVITY_AT,
+           :LAST_ACTIVITY_AT AS LAST_ACTIVITY_AT
+         FROM DUAL) s
+         ON (t.RECORD_DATE = s.RECORD_DATE AND LOWER(t.EMAIL) = LOWER(s.EMAIL))
+         WHEN MATCHED THEN UPDATE SET
+           t.PRODUCTIVE_TIME = s.PRODUCTIVE_TIME,
+           t.UNPRODUCTIVE_TIME = s.UNPRODUCTIVE_TIME,
+           t.NEUTRAL_TIME = s.NEUTRAL_TIME,
+           t.TOTAL_TIME = s.TOTAL_TIME,
+           t.PRODUCTIVITY_SCORE = s.PRODUCTIVITY_SCORE,
+           t.ACTIVE_TIME = s.ACTIVE_TIME,
+           t.IDLE_TIME = s.IDLE_TIME,
+           t.FOCUS_TIME = s.FOCUS_TIME,
+           t.COLLABORATION_TIME = s.COLLABORATION_TIME,
+           t.PRODUCTIVE_ACTIVE_TIME = s.PRODUCTIVE_ACTIVE_TIME,
+           t.PRODUCTIVE_PASSIVE_TIME = s.PRODUCTIVE_PASSIVE_TIME,
+           t.UNPRODUCTIVE_ACTIVE_TIME = s.UNPRODUCTIVE_ACTIVE_TIME,
+           t.UNPRODUCTIVE_PASSIVE_TIME = s.UNPRODUCTIVE_PASSIVE_TIME,
+           t.UNDEFINED_ACTIVE_TIME = s.UNDEFINED_ACTIVE_TIME,
+           t.UNDEFINED_PASSIVE_TIME = s.UNDEFINED_PASSIVE_TIME,
+           t.UTILIZATION_LEVEL = s.UTILIZATION_LEVEL,
+           t.LOCATION = s.LOCATION,
+           t.TIME_OFF_TIME = s.TIME_OFF_TIME,
+           t.TIME_OFF_TYPE = s.TIME_OFF_TYPE,
+           t.FIRST_ACTIVITY_AT = s.FIRST_ACTIVITY_AT,
+           t.LAST_ACTIVITY_AT = s.LAST_ACTIVITY_AT
+         WHEN NOT MATCHED THEN INSERT (
+           RECORD_DATE, EMAIL, PRODUCTIVE_TIME, UNPRODUCTIVE_TIME, NEUTRAL_TIME, TOTAL_TIME,
+           PRODUCTIVITY_SCORE, ACTIVE_TIME, IDLE_TIME, FOCUS_TIME, COLLABORATION_TIME,
+           PRODUCTIVE_ACTIVE_TIME, PRODUCTIVE_PASSIVE_TIME, UNPRODUCTIVE_ACTIVE_TIME, UNPRODUCTIVE_PASSIVE_TIME,
+           UNDEFINED_ACTIVE_TIME, UNDEFINED_PASSIVE_TIME, UTILIZATION_LEVEL, LOCATION,
+           TIME_OFF_TIME, TIME_OFF_TYPE, FIRST_ACTIVITY_AT, LAST_ACTIVITY_AT
+         ) VALUES (
+           s.RECORD_DATE, s.EMAIL, s.PRODUCTIVE_TIME, s.UNPRODUCTIVE_TIME, s.NEUTRAL_TIME, s.TOTAL_TIME,
+           s.PRODUCTIVITY_SCORE, s.ACTIVE_TIME, s.IDLE_TIME, s.FOCUS_TIME, s.COLLABORATION_TIME,
+           s.PRODUCTIVE_ACTIVE_TIME, s.PRODUCTIVE_PASSIVE_TIME, s.UNPRODUCTIVE_ACTIVE_TIME, s.UNPRODUCTIVE_PASSIVE_TIME,
+           s.UNDEFINED_ACTIVE_TIME, s.UNDEFINED_PASSIVE_TIME, s.UTILIZATION_LEVEL, s.LOCATION,
+           s.TIME_OFF_TIME, s.TIME_OFF_TYPE, s.FIRST_ACTIVITY_AT, s.LAST_ACTIVITY_AT
+         )`,
+        productivityBinds,
+      );
+    }
+
+    productivitySynced = productivityBinds.length;
+  } catch (error) {
+    errors.push(`Productivity sync failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   try {
@@ -264,12 +391,43 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
   }
 
   const completedAt = new Date();
+  const recordsSynced =
+    employeesSynced +
+    attendanceSynced +
+    productivitySynced +
+    timeOffSynced +
+    tbsMapped;
+
+  try {
+    await execute(
+      `UPDATE TL_SYNC_LOG
+       SET COMPLETED_AT = :completedAt,
+           STATUS = :status,
+           RECORDS_SYNCED = :recordsSynced,
+           ERROR_MESSAGE = :errorMessage
+       WHERE SYNC_TYPE = :syncType
+         AND STARTED_AT = :startedAt
+         AND STATUS = 'running'`,
+      {
+        completedAt,
+        status: errors.length > 0 ? 'completed_error' : 'completed',
+        recordsSynced,
+        errorMessage: errors.length > 0 ? errors.join(' | ').slice(0, 4000) : null,
+        syncType,
+        startedAt: now,
+      },
+    );
+  } catch (error) {
+    console.error('[Sync] Failed to write sync completion log:', error);
+  }
+
   const summary: SyncSummary = {
     startedAt: now.toISOString(),
     completedAt: completedAt.toISOString(),
     daysBack,
     employeesSynced,
     attendanceSynced,
+    productivitySynced,
     timeOffSynced,
     tbsMapped,
     errors,

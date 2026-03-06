@@ -6,6 +6,13 @@ interface AdminClientProps {
   roles: string[];
   tabs: string[];
   roleMap: Record<string, Record<string, boolean>>;
+  directorUsers: Array<{
+    name: string;
+    email: string;
+    department: string;
+    jobTitle: string;
+    reason: string;
+  }>;
 }
 
 interface EmployeeResult {
@@ -24,7 +31,12 @@ interface EmployeeTabState {
 
 type OverrideState = 'inherit' | 'show' | 'hide';
 
-export function AdminClient({ roles, tabs, roleMap: initialRoleMap }: AdminClientProps) {
+function formatRoleLabel(role: string): string {
+  if (role === 'hr-admin') return 'HR Admin';
+  return role.charAt(0).toUpperCase() + role.slice(1);
+}
+
+export function AdminClient({ roles, tabs, roleMap: initialRoleMap, directorUsers }: AdminClientProps) {
   const [roleMap, setRoleMap] = useState(initialRoleMap);
   const [saving, setSaving] = useState(false);
 
@@ -175,7 +187,7 @@ export function AdminClient({ roles, tabs, roleMap: initialRoleMap }: AdminClien
                     key={role}
                     className="px-4 py-3 text-center text-[12px] font-medium text-gray-500 uppercase tracking-wider"
                   >
-                    {role}
+                    {formatRoleLabel(role)}
                   </th>
                 ))}
               </tr>
@@ -203,6 +215,55 @@ export function AdminClient({ roles, tabs, roleMap: initialRoleMap }: AdminClien
                   ))}
                 </tr>
               ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <div className="mb-4 flex items-end justify-between gap-4">
+          <div>
+            <h3 className="text-[15px] font-semibold text-gray-800">Resolved Directors</h3>
+            <p className="mt-1 text-[12px] text-gray-500">
+              Live BambooHR classification for users who currently resolve to the `director` role.
+            </p>
+          </div>
+          <div className="rounded-full bg-blue-50 px-3 py-1 text-[12px] font-medium text-blue-700">
+            {directorUsers.length} directors
+          </div>
+        </div>
+        <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-100 bg-gray-50/50">
+                <th className="px-4 py-3 text-left text-[12px] font-medium uppercase tracking-wider text-gray-500">Name</th>
+                <th className="px-4 py-3 text-left text-[12px] font-medium uppercase tracking-wider text-gray-500">Email</th>
+                <th className="px-4 py-3 text-left text-[12px] font-medium uppercase tracking-wider text-gray-500">Department</th>
+                <th className="px-4 py-3 text-left text-[12px] font-medium uppercase tracking-wider text-gray-500">Job Title</th>
+                <th className="px-4 py-3 text-left text-[12px] font-medium uppercase tracking-wider text-gray-500">Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {directorUsers.map((user) => (
+                <tr key={user.email} className="border-b border-gray-50 last:border-0">
+                  <td className="px-4 py-3 font-medium text-gray-800">{user.name}</td>
+                  <td className="px-4 py-3 text-gray-600">{user.email}</td>
+                  <td className="px-4 py-3 text-gray-600">{user.department || '—'}</td>
+                  <td className="px-4 py-3 text-gray-600">{user.jobTitle || '—'}</td>
+                  <td className="px-4 py-3">
+                    <span className="inline-flex rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-700">
+                      {user.reason}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+              {directorUsers.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="px-4 py-8 text-center text-[13px] text-gray-500">
+                    No users currently resolve to the director role.
+                  </td>
+                </tr>
+              ) : null}
             </tbody>
           </table>
         </div>
@@ -259,7 +320,7 @@ export function AdminClient({ roles, tabs, roleMap: initialRoleMap }: AdminClien
               <div>
                 <div className="font-medium text-gray-900">{selectedEmployee.name}</div>
                 <div className="text-[12px] text-gray-500">
-                  Role: <span className="font-medium text-gray-700">{selectedEmployee.role}</span>
+                  Role: <span className="font-medium text-gray-700">{formatRoleLabel(selectedEmployee.role)}</span>
                 </div>
               </div>
             </div>

@@ -8,6 +8,7 @@ import type { AccessContext } from './access';
 export const TAB_KEYS = [
   'office-attendance',
   'timesheet-compare',
+  'working-hours',
 ] as const;
 
 export type TabKey = (typeof TAB_KEYS)[number];
@@ -18,6 +19,7 @@ export type TabKey = (typeof TAB_KEYS)[number];
 
 export function resolveRole(access: AccessContext): string {
   if (access.isHRAdmin) return 'hr-admin';
+  if (access.isDirector) return 'director';
   if (access.isManager) return 'manager';
   return 'employee';
 }
@@ -41,9 +43,15 @@ interface TabOverrideRow {
 // Hardcoded fallbacks when tables don't exist yet (before first sync/schema init)
 const FALLBACK_ROLES: Record<string, TabKey[]> = {
   'hr-admin': [...TAB_KEYS],
-  'manager': ['office-attendance', 'timesheet-compare'],
+  'director': ['office-attendance', 'timesheet-compare', 'working-hours'],
+  'manager': ['office-attendance', 'timesheet-compare', 'working-hours'],
   'employee': ['office-attendance'],
 };
+
+function getFallbackVisibilityMap(role: string): Map<TabKey, boolean> {
+  const visibleTabs = new Set(FALLBACK_ROLES[role] || TAB_KEYS);
+  return new Map(TAB_KEYS.map((tabKey) => [tabKey, visibleTabs.has(tabKey)]));
+}
 
 /** Resolve visible tab keys for a user: role defaults + email overrides */
 export async function getVisibleTabs(
@@ -81,15 +89,20 @@ export async function getVisibleTabs(
     return FALLBACK_ROLES[role] || [...TAB_KEYS];
   }
 
-  // Build visibility map: start with role defaults
-  const visibility = new Map<string, boolean>();
+  // Build visibility map: start with hardcoded fallbacks so newly-added tabs
+  // remain visible even if TL_TAB_ROLES hasn't been reseeded yet.
+  const visibility = getFallbackVisibilityMap(role);
   for (const row of roleDefaults) {
-    visibility.set(row.TAB_KEY, row.VISIBLE === 1);
+    if (TAB_KEYS.includes(row.TAB_KEY as TabKey)) {
+      visibility.set(row.TAB_KEY as TabKey, row.VISIBLE === 1);
+    }
   }
 
   // Apply per-email overrides (wins over role)
   for (const row of overrides) {
-    visibility.set(row.TAB_KEY, row.VISIBLE === 1);
+    if (TAB_KEYS.includes(row.TAB_KEY as TabKey)) {
+      visibility.set(row.TAB_KEY as TabKey, row.VISIBLE === 1);
+    }
   }
 
   // Return only visible tabs, preserving TAB_KEYS order

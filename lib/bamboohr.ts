@@ -45,6 +45,7 @@ export const BambooHREmployeeSchema = z.object({
   employmentStatus: z.string().optional().nullable(),
   status: z.string().optional().nullable(),
   photoUrl: z.string().optional().nullable(),
+  '4631.0': z.string().optional().nullable(),
 });
 
 export type BambooHREmployee = z.infer<typeof BambooHREmployeeSchema>;
@@ -127,7 +128,7 @@ const EMPLOYEE_FIELDS = [
   'id', 'displayName', 'firstName', 'lastName', 'preferredName',
   'jobTitle', 'workPhone', 'mobilePhone', 'workEmail', 'department',
   'location', 'division', 'supervisor', 'supervisorId', 'supervisorEId',
-  'hireDate', 'employmentStatus', 'status', 'photoUrl',
+  'hireDate', 'employmentStatus', 'status', 'photoUrl', '4631',
 ];
 
 async function _fetchEmployeeDirectoryUncached(): Promise<BambooHREmployee[]> {
@@ -239,6 +240,7 @@ export function transformEmployee(emp: BambooHREmployee) {
     hireDate: emp.hireDate ? new Date(emp.hireDate) : null,
     employmentStatus: emp.employmentStatus || emp.status || null,
     isActive: emp.status?.toLowerCase() !== 'inactive',
+    remoteWorkdayPolicyAssigned: emp['4631.0'] === 'Yes',
   };
 }
 

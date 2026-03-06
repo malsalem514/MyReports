@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@/auth';
 import { isHRAdminEmail } from '@/lib/access';
+import { getDevBypassEmail } from '@/lib/dev-bypass';
 import {
   setRoleTabVisibility,
   setOverride,
@@ -22,9 +23,17 @@ interface TabsRequestBody {
   visible?: boolean;
 }
 
-export async function GET(request: NextRequest) {
+async function getAdminEmail(): Promise<string | null> {
+  const bypassEmail = getDevBypassEmail('api-admin-tabs');
+  if (bypassEmail) return bypassEmail.toLowerCase();
+
   const session = await auth();
-  if (!session?.user?.email || !isHRAdminEmail(session.user.email)) {
+  return session?.user?.email?.toLowerCase() || null;
+}
+
+export async function GET(request: NextRequest) {
+  const adminEmail = await getAdminEmail();
+  if (!adminEmail || !isHRAdminEmail(adminEmail)) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
@@ -91,8 +100,8 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await auth();
-  if (!session?.user?.email || !isHRAdminEmail(session.user.email)) {
+  const adminEmail = await getAdminEmail();
+  if (!adminEmail || !isHRAdminEmail(adminEmail)) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 

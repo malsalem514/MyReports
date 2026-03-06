@@ -121,10 +121,12 @@ export async function initializeSchema(): Promise<void> {
         HIRE_DATE DATE,
         STATUS VARCHAR2(50),
         PHOTO_URL VARCHAR2(2000),
+        REMOTE_WORKDAY_POLICY_ASSIGNED NUMBER(1) DEFAULT 0,
         CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_EMPLOYEES ADD REMOTE_WORKDAY_POLICY_ASSIGNED NUMBER(1) DEFAULT 0`);
     await safeExecuteDDL(conn, `
       CREATE TABLE TL_ATTENDANCE (
         ID NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -158,6 +160,18 @@ export async function initializeSchema(): Promise<void> {
         CONSTRAINT TL_PROD_UNIQUE UNIQUE (RECORD_DATE, EMAIL)
       )
     `);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_PRODUCTIVITY ADD PRODUCTIVE_ACTIVE_TIME NUMBER(12) DEFAULT 0`);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_PRODUCTIVITY ADD PRODUCTIVE_PASSIVE_TIME NUMBER(12) DEFAULT 0`);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_PRODUCTIVITY ADD UNPRODUCTIVE_ACTIVE_TIME NUMBER(12) DEFAULT 0`);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_PRODUCTIVITY ADD UNPRODUCTIVE_PASSIVE_TIME NUMBER(12) DEFAULT 0`);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_PRODUCTIVITY ADD UNDEFINED_ACTIVE_TIME NUMBER(12) DEFAULT 0`);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_PRODUCTIVITY ADD UNDEFINED_PASSIVE_TIME NUMBER(12) DEFAULT 0`);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_PRODUCTIVITY ADD UTILIZATION_LEVEL VARCHAR2(100)`);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_PRODUCTIVITY ADD LOCATION VARCHAR2(100)`);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_PRODUCTIVITY ADD TIME_OFF_TIME NUMBER(12) DEFAULT 0`);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_PRODUCTIVITY ADD TIME_OFF_TYPE VARCHAR2(100)`);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_PRODUCTIVITY ADD FIRST_ACTIVITY_AT TIMESTAMP`);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_PRODUCTIVITY ADD LAST_ACTIVITY_AT TIMESTAMP`);
     await safeExecuteDDL(conn, `
       CREATE TABLE TL_TIME_OFF (
         ID NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -294,8 +308,9 @@ export async function initializeSchema(): Promise<void> {
     `);
 
     // Seed role defaults (MERGE = idempotent)
-    const allTabs = ['office-attendance','timesheet-compare'];
-    const managerTabs = ['office-attendance','timesheet-compare'];
+    const allTabs = ['office-attendance','timesheet-compare','working-hours'];
+    const directorTabs = ['office-attendance','timesheet-compare','working-hours'];
+    const managerTabs = ['office-attendance','timesheet-compare','working-hours'];
     const employeeTabs = ['office-attendance'];
 
     for (const tab of allTabs) {
@@ -304,6 +319,15 @@ export async function initializeSchema(): Promise<void> {
         USING (SELECT 'hr-admin' AS ROLE_NAME, '${tab}' AS TAB_KEY FROM DUAL) s
         ON (t.ROLE_NAME = s.ROLE_NAME AND t.TAB_KEY = s.TAB_KEY)
         WHEN NOT MATCHED THEN INSERT (ROLE_NAME, TAB_KEY, VISIBLE) VALUES ('hr-admin', '${tab}', 1)
+      `);
+    }
+    for (const tab of allTabs) {
+      const visible = directorTabs.includes(tab) ? 1 : 0;
+      await safeExecuteDDL(conn, `
+        MERGE INTO TL_TAB_ROLES t
+        USING (SELECT 'director' AS ROLE_NAME, '${tab}' AS TAB_KEY FROM DUAL) s
+        ON (t.ROLE_NAME = s.ROLE_NAME AND t.TAB_KEY = s.TAB_KEY)
+        WHEN NOT MATCHED THEN INSERT (ROLE_NAME, TAB_KEY, VISIBLE) VALUES ('director', '${tab}', ${visible})
       `);
     }
     for (const tab of allTabs) {
@@ -337,8 +361,8 @@ async function safeExecuteDDL(conn: oracledb.Connection, sql: string): Promise<v
   } catch (error: unknown) {
     if (error && typeof error === 'object' && 'errorNum' in error) {
       const errNum = (error as { errorNum: number }).errorNum;
-      // Ignore: already exists (955), name used (957), index exists (1408)
-      if (errNum === 955 || errNum === 957 || errNum === 1408) return;
+      // Ignore: already exists (955), name used (957), index exists (1408), column exists (1430)
+      if (errNum === 955 || errNum === 957 || errNum === 1408 || errNum === 1430) return;
     }
     console.error('DDL Error:', sql, error);
   }

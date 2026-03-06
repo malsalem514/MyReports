@@ -13,7 +13,7 @@ interface NavItem {
 function getDefaultDateRange() {
   const endDate = new Date();
   const startDate = new Date();
-  startDate.setDate(startDate.getDate() - 7);
+  startDate.setDate(startDate.getDate() - 30);
   return {
     startDate: startDate.toISOString().split('T')[0] ?? '',
     endDate: endDate.toISOString().split('T')[0] ?? '',
@@ -41,6 +41,7 @@ export function DashboardNav({ navItems, children }: { navItems: NavItem[]; chil
   const defaults = getDefaultDateRange();
   const startDate = searchParams.get('startDate') || defaults.startDate;
   const endDate = searchParams.get('endDate') || defaults.endDate;
+  const currentRangeKey = getRangePresetKey(startDate, endDate);
 
   const handleDateChange = (newStart: string, newEnd: string) => {
     const params = new URLSearchParams(searchParams);
@@ -105,7 +106,11 @@ export function DashboardNav({ navItems, children }: { navItems: NavItem[]; chil
                     <button
                       key={label}
                       onClick={() => handlePreset(preset)}
-                      className="px-3 py-1.5 text-[12px] font-medium text-gray-600 transition-colors first:rounded-l-lg last:rounded-r-lg hover:bg-gray-50 hover:text-gray-900"
+                      className={`px-3 py-1.5 text-[12px] font-medium transition-colors first:rounded-l-lg last:rounded-r-lg ${
+                        currentRangeKey === preset
+                          ? 'bg-gray-900 text-white'
+                          : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                      }`}
                     >
                       {label}
                     </button>
@@ -154,4 +159,32 @@ export function DashboardNav({ navItems, children }: { navItems: NavItem[]; chil
       <main className="mx-auto max-w-7xl px-6 py-8">{children}</main>
     </div>
   );
+}
+
+function getRangePresetKey(
+  startDate: string,
+  endDate: string,
+): 'thisweek' | 'week' | '30days' | null {
+  const today = new Date();
+  const expectedEnd = today.toISOString().split('T')[0] ?? '';
+  if (endDate !== expectedEnd) return null;
+
+  const last7 = new Date(today);
+  last7.setDate(today.getDate() - 7);
+  if (startDate === (last7.toISOString().split('T')[0] ?? '')) {
+    return 'week';
+  }
+
+  const last30 = new Date(today);
+  last30.setDate(today.getDate() - 30);
+  if (startDate === (last30.toISOString().split('T')[0] ?? '')) {
+    return '30days';
+  }
+
+  const weekRange = getWeekRange();
+  if (startDate === weekRange.startDate && endDate === weekRange.endDate) {
+    return 'thisweek';
+  }
+
+  return null;
 }

@@ -1,9 +1,8 @@
 import { Suspense } from 'react';
 import { sub } from 'date-fns';
 import { getAccessContext } from '@/lib/access';
-import { getAttendanceReport } from '@/lib/dashboard-data';
-import { OFFICE_DAYS_REQUIRED, DEFAULT_LOOKBACK_WEEKS, LOOKBACK_OPTIONS } from '@/lib/constants';
-import { AttendanceClient } from './attendance-client';
+import { getWorkingHoursReport } from '@/lib/dashboard-data';
+import { WorkingHoursClient } from './working-hours-client';
 
 function parseDateInput(
   value: string | undefined,
@@ -35,14 +34,12 @@ function toDateParam(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
-async function AttendanceData({
-  lookbackWeeks,
+async function WorkingHoursData({
   startDate,
   endDate,
   startDateLabel,
   endDateLabel,
 }: {
-  lookbackWeeks: number;
   startDate: Date;
   endDate: Date;
   startDateLabel: string;
@@ -52,63 +49,59 @@ async function AttendanceData({
   const allowedEmails = access.isHRAdmin ? undefined : access.allowedEmails;
 
   try {
-    const { rows, weeks, dataWeeks, currentWeek, departments, locations, summary } = await getAttendanceReport(
+    const { weeks, groups, employeeNumbers, users, weekOptions, lastSyncedAt } = await getWorkingHoursReport(
       startDate,
       endDate,
-      OFFICE_DAYS_REQUIRED,
       allowedEmails,
     );
 
     return (
-      <AttendanceClient
-        rows={rows}
+      <WorkingHoursClient
         weeks={weeks}
-        dataWeeks={dataWeeks}
-        currentWeek={currentWeek}
-        departments={departments}
-        locations={locations}
-        summary={summary}
-        lookbackWeeks={lookbackWeeks}
+        groups={groups}
+        employeeNumbers={employeeNumbers}
+        users={users}
+        weekOptions={weekOptions}
         startDate={startDateLabel}
         endDate={endDateLabel}
+        lastSyncedAt={lastSyncedAt}
       />
     );
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : 'Attendance datasource unavailable';
+      error instanceof Error ? error.message : 'Working hours datasource unavailable';
     return (
       <div className="space-y-3">
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-[12px] text-amber-800">
-          Attendance data is currently unavailable. {message}
+          Working hours data is currently unavailable. {message}
         </div>
-        <AttendanceClient
-          rows={[]}
+        <WorkingHoursClient
           weeks={[]}
-          dataWeeks={[]}
-          departments={[]}
-          locations={[]}
-          summary={{ totalEmployees: 0, avgOfficeDays: 0, complianceRate: 0, zeroOfficeDaysCount: 0 }}
-          lookbackWeeks={lookbackWeeks}
+          groups={[]}
+          employeeNumbers={[]}
+          users={[]}
+          weekOptions={[]}
           startDate={startDateLabel}
           endDate={endDateLabel}
+          lastSyncedAt={null}
         />
       </div>
     );
   }
 }
 
-function AttendanceSkeleton() {
+function WorkingHoursSkeleton() {
   return (
     <div className="space-y-6 animate-pulse">
       <div className="flex justify-between">
-        <div><div className="h-5 w-40 rounded bg-gray-200" /><div className="mt-1 h-3 w-56 rounded bg-gray-100" /></div>
-        <div className="flex gap-2"><div className="h-8 w-20 rounded bg-gray-100" /><div className="h-8 w-14 rounded bg-gray-100" /></div>
+        <div><div className="h-5 w-40 rounded bg-gray-200" /><div className="mt-1 h-3 w-64 rounded bg-gray-100" /></div>
+        <div className="h-8 w-16 rounded bg-gray-100" />
       </div>
-      <div className="grid gap-4 sm:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, i) => (
+      <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-6">
+        {Array.from({ length: 6 }).map((_, i) => (
           <div key={i} className="rounded-xl border border-gray-200 bg-white p-4">
-            <div className="h-3 w-16 rounded bg-gray-100" />
-            <div className="mt-2 h-7 w-12 rounded bg-gray-200" />
+            <div className="h-3 w-20 rounded bg-gray-100" />
+            <div className="mt-2 h-7 w-14 rounded bg-gray-200" />
           </div>
         ))}
       </div>
@@ -117,22 +110,19 @@ function AttendanceSkeleton() {
   );
 }
 
-export default async function OfficeAttendancePage({
+export default async function WorkingHoursPage({
   searchParams,
 }: {
-  searchParams: Promise<{ lookbackWeeks?: string; startDate?: string; endDate?: string }>;
+  searchParams: Promise<{ startDate?: string; endDate?: string }>;
 }) {
   const params = await searchParams;
-  const lookbackWeeks = LOOKBACK_OPTIONS.includes(Number(params.lookbackWeeks) as any)
-    ? (Number(params.lookbackWeeks) as (typeof LOOKBACK_OPTIONS)[number])
-    : DEFAULT_LOOKBACK_WEEKS;
-  const fallbackEndDate = new Date();
-  fallbackEndDate.setHours(23, 59, 59, 999);
-  const fallbackStartDate = sub(fallbackEndDate, { weeks: lookbackWeeks });
-  fallbackStartDate.setHours(0, 0, 0, 0);
 
-  let startDate = parseDateInput(params.startDate, fallbackStartDate, false);
-  let endDate = parseDateInput(params.endDate, fallbackEndDate, true);
+  const defaultEndDate = new Date();
+  const defaultStartDate = sub(defaultEndDate, { days: 30 });
+
+  let startDate = parseDateInput(params.startDate, defaultStartDate, false);
+  let endDate = parseDateInput(params.endDate, defaultEndDate, true);
+
   if (startDate > endDate) {
     const nextStart = new Date(endDate);
     nextStart.setHours(0, 0, 0, 0);
@@ -146,9 +136,8 @@ export default async function OfficeAttendancePage({
   const endDateLabel = toDateParam(endDate);
 
   return (
-    <Suspense fallback={<AttendanceSkeleton />}>
-      <AttendanceData
-        lookbackWeeks={lookbackWeeks}
+    <Suspense fallback={<WorkingHoursSkeleton />}>
+      <WorkingHoursData
         startDate={startDate}
         endDate={endDate}
         startDateLabel={startDateLabel}

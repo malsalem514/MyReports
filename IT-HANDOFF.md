@@ -10,7 +10,7 @@ reporting dashboards. It connects to four external services:
 - **BambooHR** — employee directory (cloud API, requires API key)
 - **Microsoft Azure AD** — user login via Microsoft SSO
 
-A scheduler inside the container syncs data at **6 AM, 12 PM, and 3 PM Toronto time** daily.
+A scheduler inside the container syncs data **once daily at 6 AM Toronto time**.
 
 ---
 
@@ -80,7 +80,7 @@ BAMBOOHR_API_KEY=<bamboohr api key>
 BAMBOOHR_SUBDOMAIN=jestais
 
 # ── Scheduler ───────────────────────────────────────────────────────────────
-ENABLE_SCHEDULER=true          # Syncs at 6 AM / 12 PM / 3 PM Toronto time
+ENABLE_SCHEDULER=true          # Syncs once daily at 6 AM Toronto time
 
 # ── DANGER — never set this in production ───────────────────────────────────
 # DEV_BYPASS_AUTH=true         # Disables ALL login checks — setting this is a no-op in production
@@ -190,7 +190,7 @@ To confirm the scheduler started after deployment:
 ```bash
 docker logs myreports | grep -i scheduler
 ```
-Expected: `Scheduler initialized. Syncs at 6 AM, 12 PM, 3 PM ET.`
+Expected: `Scheduler initialized. Syncs once daily at 6 AM ET.`
 
 If `ENABLE_SCHEDULER` is not set to `true`, no syncs happen and data must be loaded manually.
 

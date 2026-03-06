@@ -16,7 +16,7 @@ export default async function EmployeePage({
   searchParams,
 }: {
   params: Promise<Params>;
-  searchParams: Promise<{ startDate?: string; endDate?: string }>;
+  searchParams: Promise<{ startDate?: string; endDate?: string; returnTo?: string }>;
 }) {
   const { email: rawEmail } = await params;
   const sp = await searchParams;
@@ -29,6 +29,10 @@ export default async function EmployeePage({
   endDate.setHours(23, 59, 59, 999);
   const startDate = sp.startDate ? new Date(sp.startDate) : new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
   startDate.setHours(0, 0, 0, 0);
+  const fallbackReturnTo = `/dashboard/search?startDate=${startDate.toISOString().split('T')[0] ?? ''}&endDate=${endDate.toISOString().split('T')[0] ?? ''}`;
+  const returnTo = sp.returnTo && sp.returnTo.startsWith('/dashboard/')
+    ? sp.returnTo
+    : fallbackReturnTo;
 
   let employee = null as Awaited<ReturnType<typeof getEmployeeByEmail>>;
   let attendance = [] as Awaited<ReturnType<typeof getAttendance>>;
@@ -62,6 +66,7 @@ export default async function EmployeePage({
       supervisorEmail: null,
       hireDate: null,
       status: null,
+      remoteWorkdayPolicyAssigned: false,
     };
   }
   const resolvedEmployee = employee!;
@@ -98,8 +103,8 @@ export default async function EmployeePage({
         </div>
       )}
       {/* Back */}
-      <Link href="/dashboard/search" className="text-[12px] text-gray-500 hover:text-gray-900">
-        ← Back to search
+      <Link href={returnTo} className="text-[12px] text-gray-500 hover:text-gray-900">
+        ← Back to report
       </Link>
 
       {/* Profile */}

@@ -1,5 +1,4 @@
 import cron from 'node-cron';
-import { runFullSync } from './sync';
 import { initializeSchema } from './oracle';
 
 let schedulerInitialized = false;
@@ -14,23 +13,13 @@ export function initializeScheduler(): void {
 
   console.log('Initializing data sync scheduler...');
 
-  // 6 AM — full 7-day sync
+  // 6 AM — daily ActivTrak export and Oracle refresh
   cron.schedule('0 6 * * *', async () => {
     try { await runFullSync(7); } catch (e) { console.error('[Scheduler] 6 AM sync failed:', e); }
   }, { timezone: 'America/Toronto' });
 
-  // 12 PM — quick refresh
-  cron.schedule('0 12 * * *', async () => {
-    try { await runFullSync(1); } catch (e) { console.error('[Scheduler] 12 PM sync failed:', e); }
-  }, { timezone: 'America/Toronto' });
-
-  // 3 PM — quick refresh
-  cron.schedule('0 15 * * *', async () => {
-    try { await runFullSync(1); } catch (e) { console.error('[Scheduler] 3 PM sync failed:', e); }
-  }, { timezone: 'America/Toronto' });
-
   schedulerInitialized = true;
-  console.log('Scheduler initialized. Syncs at 6 AM, 12 PM, 3 PM ET.');
+  console.log('Scheduler initialized. Syncs once daily at 6 AM ET.');
 }
 
 export async function initializeDataStore(runBackfill: boolean = false): Promise<void> {
@@ -38,4 +27,9 @@ export async function initializeDataStore(runBackfill: boolean = false): Promise
   if (runBackfill) {
     await runFullSync(90);
   }
+}
+
+async function runFullSync(daysBack: number): Promise<void> {
+  const { runFullSync: runSync } = await import('./sync');
+  await runSync(daysBack);
 }

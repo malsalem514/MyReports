@@ -40,6 +40,25 @@ const RawDailyUserSummarySchema = z.object({
   collaboration_duration_seconds: z.number().nullable().default(0),
   break_duration_seconds: z.number().nullable().default(0),
   utilization_level: z.string().nullable().optional(),
+  location: z.string().nullable().optional(),
+  time_off_duration_seconds: z.number().nullable().default(0),
+  time_off_type: z.string().nullable().optional(),
+  first_activity_datetime: z
+    .union([z.string(), z.object({ value: z.string() })])
+    .nullable()
+    .optional()
+    .transform((value) => {
+      if (!value) return null;
+      return typeof value === 'string' ? value : value.value;
+    }),
+  last_activity_datetime: z
+    .union([z.string(), z.object({ value: z.string() })])
+    .nullable()
+    .optional()
+    .transform((value) => {
+      if (!value) return null;
+      return typeof value === 'string' ? value : value.value;
+    }),
 });
 
 export const DailyUserSummarySchema = RawDailyUserSummarySchema.transform((raw) => {
@@ -52,6 +71,12 @@ export const DailyUserSummarySchema = RawDailyUserSummarySchema.transform((raw) 
     date: raw.local_date,
     username: raw.user_name,
     email: raw.user_name,
+    productive_active_time: raw.productive_active_duration_seconds || 0,
+    productive_passive_time: raw.productive_passive_duration_seconds || 0,
+    unproductive_active_time: raw.unproductive_active_duration_seconds || 0,
+    unproductive_passive_time: raw.unproductive_passive_duration_seconds || 0,
+    undefined_active_time: raw.undefined_active_duration_seconds || 0,
+    undefined_passive_time: raw.undefined_passive_duration_seconds || 0,
     productive_time,
     unproductive_time,
     neutral_time,
@@ -62,6 +87,12 @@ export const DailyUserSummarySchema = RawDailyUserSummarySchema.transform((raw) 
     offline_time: 0,
     focus_time: raw.focused_duration_seconds || 0,
     collaboration_time: raw.collaboration_duration_seconds || 0,
+    utilization_level: raw.utilization_level || null,
+    location: raw.location || null,
+    time_off_time: raw.time_off_duration_seconds || 0,
+    time_off_type: raw.time_off_type || null,
+    first_activity_datetime: raw.first_activity_datetime,
+    last_activity_datetime: raw.last_activity_datetime,
   };
 });
 
@@ -104,7 +135,9 @@ async function _fetchProductivityDataUncached(
       d.undefined_active_duration_seconds, d.undefined_passive_duration_seconds,
       d.total_duration_seconds, d.active_duration_seconds,
       d.focused_duration_seconds, d.collaboration_duration_seconds,
-      d.break_duration_seconds, d.utilization_level
+      d.break_duration_seconds, d.utilization_level,
+      d.location, d.time_off_duration_seconds, d.time_off_type,
+      d.first_activity_datetime, d.last_activity_datetime
     FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.${DAILY_USER_SUMMARY_TABLE}\` d
     LEFT JOIN user_emails ue ON d.user_id = ue.userid AND ue.rn = 1
     WHERE d.local_date BETWEEN @startDate AND @endDate

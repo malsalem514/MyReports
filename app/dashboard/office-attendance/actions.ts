@@ -1,6 +1,4 @@
 'use server';
-
-import { sub } from 'date-fns';
 import { getAccessContext } from '@/lib/access';
 import { query } from '@/lib/oracle';
 import { fetchOfficeAttendanceData } from '@/lib/bigquery';
@@ -18,10 +16,11 @@ export interface EmployeeDiscrepancy {
   name: string;
   department: string;
   inBamboo: boolean;
-  activtrak: { office: number; remote: number; total: number };
-  oracle: { office: number; remote: number; total: number };
+  activtrak: { office: number; remote: number; unknown: number; total: number };
+  oracle: { office: number; remote: number; unknown: number; total: number };
   diff: number;
   locationMismatch: boolean;
+  totalMismatch: boolean;
 }
 
 export interface ValidationResult {
@@ -37,14 +36,20 @@ export interface ValidationResult {
   ghostEmployees: string[];
 }
 
-export async function validateAttendanceData(lookbackWeeks: number): Promise<ValidationResult> {
+export async function validateAttendanceData(
+  startDateParam: string,
+  endDateParam: string,
+): Promise<ValidationResult> {
   const access = await getAccessContext();
   if (!access.isHRAdmin) throw new Error('HR Admin access required');
 
-  const endDate = new Date();
-  const startDate = sub(endDate, { weeks: lookbackWeeks });
-  const rangeStart = startDate.toISOString().split('T')[0]!;
-  const rangeEnd = endDate.toISOString().split('T')[0]!;
+  const startDate = new Date(`${startDateParam}T00:00:00`);
+  const endDate = new Date(`${endDateParam}T23:59:59.999`);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    throw new Error('Invalid validation date range');
+  }
+  const rangeStart = startDateParam;
+  const rangeEnd = endDateParam;
 
   // --- Oracle: aggregated attendance per employee (deduped, Office wins) ---
   const oracleSQL = `
@@ -103,7 +108,7 @@ export async function validateAttendanceData(lookbackWeeks: number): Promise<Val
   }
 
   // --- Oracle: index by email ---
-  const oracleByEmail = new Map<string, { office: number; remote: number; total: number }>();
+  const oracleByEmail = new Map<string, { office: number; remote: number; unknown: number; total: number }>();
   let orTotalRecords = 0, orOffice = 0, orRemote = 0, orUnknown = 0;
   for (const r of oracleRows) {
     const email = r.EMAIL?.toLowerCase();
@@ -112,7 +117,7 @@ export async function validateAttendanceData(lookbackWeeks: number): Promise<Val
     const remote = r.REMOTE_DAYS || 0;
     const unknown = r.UNKNOWN_DAYS || 0;
     const total = r.TOTAL_RECORDS || 0;
-    oracleByEmail.set(email, { office, remote, total });
+    oracleByEmail.set(email, { office, remote, unknown, total });
     orTotalRecords += total;
     orOffice += office;
     orRemote += remote;
@@ -120,7 +125,7 @@ export async function validateAttendanceData(lookbackWeeks: number): Promise<Val
   }
 
   // --- ActivTrak: deduplicate and aggregate per employee (source has no dedup) ---
-  const activtrakByEmail = new Map<string, { office: number; remote: number; total: number }>();
+  const activtrakByEmail = new Map<string, { office: number; remote: number; unknown: number; total: number }>();
   const activtrakSeen = new Set<string>();
   let atOffice = 0, atRemote = 0, atUnknown = 0;
   for (const rec of sourceRecords) {
@@ -131,12 +136,12 @@ export async function validateAttendanceData(lookbackWeeks: number): Promise<Val
     if (activtrakSeen.has(key)) continue;
     activtrakSeen.add(key);
 
-    if (!activtrakByEmail.has(email)) activtrakByEmail.set(email, { office: 0, remote: 0, total: 0 });
+    if (!activtrakByEmail.has(email)) activtrakByEmail.set(email, { office: 0, remote: 0, unknown: 0, total: 0 });
     const entry = activtrakByEmail.get(email)!;
     entry.total++;
     if (rec.location === 'Office') { entry.office++; atOffice++; }
     else if (rec.location === 'Remote') { entry.remote++; atRemote++; }
-    else { atUnknown++; }
+    else { entry.unknown++; atUnknown++; }
 
     if (!nameMap.has(email) && rec.displayName) nameMap.set(email, rec.displayName);
   }
@@ -149,8 +154,8 @@ export async function validateAttendanceData(lookbackWeeks: number): Promise<Val
   const notInBamboo: string[] = [];
 
   for (const email of allEmails) {
-    const at = activtrakByEmail.get(email) || { office: 0, remote: 0, total: 0 };
-    const or = oracleByEmail.get(email) || { office: 0, remote: 0, total: 0 };
+    const at = activtrakByEmail.get(email) || { office: 0, remote: 0, unknown: 0, total: 0 };
+    const or = oracleByEmail.get(email) || { office: 0, remote: 0, unknown: 0, total: 0 };
     const inBamboo = bambooEmails.has(email);
 
     if (!inBamboo) notInBamboo.push(email);
@@ -158,9 +163,13 @@ export async function validateAttendanceData(lookbackWeeks: number): Promise<Val
     else if (or.total > 0 && at.total === 0) oracleOnlyEmails.push(email);
 
     const diff = or.total - at.total;
-    const locationMismatch = at.office !== or.office;
+    const locationMismatch =
+      at.office !== or.office ||
+      at.remote !== or.remote ||
+      at.unknown !== or.unknown;
+    const totalMismatch = at.total !== or.total;
 
-    if (diff !== 0 || locationMismatch) {
+    if (totalMismatch || locationMismatch) {
       discrepancies.push({
         email,
         name: nameMap.get(email) || email,
@@ -170,6 +179,7 @@ export async function validateAttendanceData(lookbackWeeks: number): Promise<Val
         oracle: or,
         diff,
         locationMismatch,
+        totalMismatch,
       });
     }
   }
