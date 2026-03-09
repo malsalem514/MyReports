@@ -307,6 +307,36 @@ export async function initializeSchema(): Promise<void> {
       )
     `);
 
+    // Report Builder tables
+    await safeExecuteDDL(conn, `
+      CREATE TABLE TL_SAVED_REPORTS (
+        REPORT_ID     VARCHAR2(36)  NOT NULL,
+        OWNER_EMAIL   VARCHAR2(255) NOT NULL,
+        NAME          VARCHAR2(255) NOT NULL,
+        DESCRIPTION   VARCHAR2(1000),
+        REPORT_SPEC   CLOB          NOT NULL,
+        CREATED_AT    TIMESTAMP DEFAULT SYSTIMESTAMP NOT NULL,
+        UPDATED_AT    TIMESTAMP DEFAULT SYSTIMESTAMP NOT NULL,
+        CONSTRAINT PK_SAVED_REPORTS PRIMARY KEY (REPORT_ID)
+      )
+    `);
+    await safeExecuteDDL(conn, `CREATE INDEX IDX_SAVED_REPORTS_OWNER ON TL_SAVED_REPORTS(LOWER(OWNER_EMAIL))`);
+
+    await safeExecuteDDL(conn, `
+      CREATE TABLE TL_DASHBOARDS (
+        DASHBOARD_ID  VARCHAR2(36)  NOT NULL,
+        OWNER_EMAIL   VARCHAR2(255) NOT NULL,
+        NAME          VARCHAR2(255) NOT NULL,
+        DESCRIPTION   VARCHAR2(1000),
+        DASHBOARD_SPEC CLOB         NOT NULL,
+        IS_SHARED     NUMBER(1)     DEFAULT 0,
+        CREATED_AT    TIMESTAMP DEFAULT SYSTIMESTAMP NOT NULL,
+        UPDATED_AT    TIMESTAMP DEFAULT SYSTIMESTAMP NOT NULL,
+        CONSTRAINT PK_DASHBOARDS PRIMARY KEY (DASHBOARD_ID)
+      )
+    `);
+    await safeExecuteDDL(conn, `CREATE INDEX IDX_DASHBOARDS_OWNER ON TL_DASHBOARDS(LOWER(OWNER_EMAIL))`);
+
     // Seed role defaults (MERGE = idempotent)
     const allTabs = ['office-attendance','timesheet-compare','working-hours'];
     const directorTabs = ['office-attendance','timesheet-compare','working-hours'];
@@ -348,6 +378,23 @@ export async function initializeSchema(): Promise<void> {
         WHEN NOT MATCHED THEN INSERT (ROLE_NAME, TAB_KEY, VISIBLE) VALUES ('employee', '${tab}', ${visible})
       `);
     }
+
+    // Seed report-builder tab visibility
+    for (const role of ['hr-admin', 'director', 'manager']) {
+      await safeExecuteDDL(conn, `
+        MERGE INTO TL_TAB_ROLES t
+        USING (SELECT '${role}' AS ROLE_NAME, 'report-builder' AS TAB_KEY FROM DUAL) s
+        ON (t.ROLE_NAME = s.ROLE_NAME AND t.TAB_KEY = s.TAB_KEY)
+        WHEN NOT MATCHED THEN INSERT (ROLE_NAME, TAB_KEY, VISIBLE) VALUES ('${role}', 'report-builder', 1)
+      `);
+    }
+    // Employee does NOT get report-builder
+    await safeExecuteDDL(conn, `
+      MERGE INTO TL_TAB_ROLES t
+      USING (SELECT 'employee' AS ROLE_NAME, 'report-builder' AS TAB_KEY FROM DUAL) s
+      ON (t.ROLE_NAME = s.ROLE_NAME AND t.TAB_KEY = s.TAB_KEY)
+      WHEN NOT MATCHED THEN INSERT (ROLE_NAME, TAB_KEY, VISIBLE) VALUES ('employee', 'report-builder', 0)
+    `);
 
     console.log('Oracle schema initialized successfully');
   } finally {
