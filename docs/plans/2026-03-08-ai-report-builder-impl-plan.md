@@ -6,7 +6,7 @@
 
 **Architecture:** Thin AI Layer — LLM translates natural language to a ReportSpec JSON via Vercel AI SDK tool calling. Deterministic dataset runners build parameterized Oracle queries. No AI-generated SQL.
 
-**Tech Stack:** Next.js 15 (App Router), TypeScript strict, Vercel AI SDK v6, GPT-4.1-mini, Recharts, shadcn/ui, Oracle DB (oracledb), Zod, ExcelJS.
+**Tech Stack:** Next.js 15 (App Router), TypeScript strict, Vercel AI SDK v6, GPT-4.1-mini, Recharts, shadcn/ui, Oracle 23ai Free (oracledb thin mode), Zod, ExcelJS, Playwright.
 
 **Design Doc:** `docs/plans/2026-03-08-ai-report-builder-design.md`
 
@@ -16,6 +16,192 @@
 - Existing API pattern: `app/api/admin/tabs/route.ts` — auth guard, dev bypass, `NextResponse.json()`
 - Existing report data: `lib/dashboard-data.ts` — Oracle SQL patterns, view usage
 - Tab config: `lib/tab-config.ts` — role-based visibility model
+
+---
+
+## Phase 0 — Local Environment Setup
+
+### Task 0: Oracle 23ai Free Docker + Playwright
+
+**Files:**
+- Create: `docker-compose.yml`
+- Create: `scripts/wait-for-oracle.sh`
+- Create: `playwright.config.ts`
+- Create: `e2e/fixtures.ts`
+- Modify: `package.json`
+- Modify: `.env.example`
+
+**Step 1: Create docker-compose.yml for Oracle 23ai Free**
+
+Create `docker-compose.yml` in project root:
+
+```yaml
+version: "3.8"
+services:
+  oracle:
+    image: gvenzl/oracle-free:23-slim
+    container_name: myreports-oracle
+    ports:
+      - "1521:1521"
+    environment:
+      ORACLE_PASSWORD: dev_password
+      APP_USER: timelogs
+      APP_USER_PASSWORD: timelogs
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  oracle-data:
+```
+
+> **Why 23ai Free over 21c XE**: Native `JSON` column type (no CLOB workaround), better performance, active LTS. The `gvenzl/oracle-free:23-slim` image is ~1.5GB and community-maintained by Gerald Venzl (Oracle DevRel). Thin mode `oracledb` driver works out of the box — no Instant Client needed.
+
+**Step 2: Create Oracle wait script**
+
+Create `scripts/wait-for-oracle.sh`:
+
+```bash
+#!/bin/bash
+echo "Waiting for Oracle to be ready..."
+for i in $(seq 1 60); do
+  if docker exec myreports-oracle healthcheck.sh &>/dev/null; then
+    echo "Oracle is ready!"
+    exit 0
+  fi
+  echo "Attempt $i/60 — waiting..."
+  sleep 5
+done
+echo "Oracle failed to start within 5 minutes"
+exit 1
+```
+
+```bash
+chmod +x scripts/wait-for-oracle.sh
+```
+
+**Step 3: Update .env.example with local Oracle settings**
+
+Add to `.env.example`:
+
+```
+# Local Oracle 23ai Free (docker-compose)
+ORACLE_USER=timelogs
+ORACLE_PASSWORD=timelogs
+ORACLE_CONNECT_STRING=localhost:1521/FREEPDB1
+```
+
+Copy the same values to your `.env` file.
+
+> **Key difference**: Local Oracle uses `FREEPDB1` as the pluggable DB name, not `suppops`. The `oracledb` thin mode driver connects directly — no `initOracleClient()` needed.
+
+**Step 4: Start Oracle and verify connection**
+
+```bash
+docker compose up -d oracle
+./scripts/wait-for-oracle.sh
+```
+
+Verify connection works:
+
+```bash
+npx tsx -e "
+import oracledb from 'oracledb';
+const conn = await oracledb.getConnection({
+  user: 'timelogs', password: 'timelogs',
+  connectString: 'localhost:1521/FREEPDB1'
+});
+const r = await conn.execute('SELECT 1 AS OK FROM DUAL');
+console.log('Connected:', r.rows);
+await conn.close();
+"
+```
+
+Expected: `Connected: [ [ 1 ] ]`
+
+**Step 5: Install Playwright**
+
+```bash
+npm install -D @playwright/test
+npx playwright install chromium
+```
+
+> **Why Chromium only**: V1 doesn't need cross-browser testing. Chromium covers the target audience (internal HR admins on Chrome). Add `firefox` and `webkit` later if needed.
+
+**Step 6: Create Playwright config**
+
+Create `playwright.config.ts`:
+
+```typescript
+import { defineConfig, devices } from '@playwright/test';
+
+export default defineConfig({
+  testDir: './e2e',
+  fullyParallel: true,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 2 : 0,
+  workers: process.env.CI ? 1 : undefined,
+  reporter: 'html',
+  use: {
+    baseURL: 'http://localhost:3000',
+    trace: 'on-first-retry',
+    screenshot: 'only-on-failure',
+  },
+  projects: [
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+    },
+  ],
+  webServer: {
+    command: 'npm run dev',
+    url: 'http://localhost:3000',
+    reuseExistingServer: !process.env.CI,
+    timeout: 120_000,
+  },
+});
+```
+
+**Step 7: Create shared test fixtures**
+
+Create `e2e/fixtures.ts`:
+
+```typescript
+import { test as base, expect } from '@playwright/test';
+
+// Auth fixture — login as HR admin for builder tests
+export const test = base.extend<{ adminPage: typeof base }>({
+  // Future: add authenticated page fixture here
+  // For now, use dev bypass auth (DEV_BYPASS_EMAIL env var)
+});
+
+export { expect };
+```
+
+**Step 8: Add npm scripts**
+
+Add to `package.json` scripts:
+
+```json
+{
+  "db:up": "docker compose up -d oracle && ./scripts/wait-for-oracle.sh",
+  "db:down": "docker compose down",
+  "db:reset": "docker compose down -v && docker compose up -d oracle && ./scripts/wait-for-oracle.sh",
+  "test:e2e": "playwright test",
+  "test:e2e:ui": "playwright test --ui"
+}
+```
+
+**Step 9: Commit**
+
+```bash
+git add docker-compose.yml scripts/wait-for-oracle.sh playwright.config.ts e2e/fixtures.ts package.json package-lock.json .env.example
+git commit -m "chore: add Oracle 23ai Free Docker + Playwright E2E infrastructure"
+```
 
 ---
 
@@ -563,7 +749,7 @@ Add to `initializeSchema()` in `lib/oracle.ts`, after the existing tab tables se
         TITLE            VARCHAR2(500)  NOT NULL,
         DESCRIPTION      VARCHAR2(2000),
         DATASET_KEY      VARCHAR2(50)   NOT NULL,
-        REPORT_SPEC      CLOB           NOT NULL,
+        REPORT_SPEC      JSON           NOT NULL,
         VISIBILITY_SCOPE VARCHAR2(30)   DEFAULT 'owner' NOT NULL,
         OWNER_EMAIL      VARCHAR2(255)  NOT NULL,
         IS_PUBLISHED     NUMBER(1)      DEFAULT 0 NOT NULL,
@@ -572,7 +758,6 @@ Add to `initializeSchema()` in `lib/oracle.ts`, after the existing tab tables se
         UPDATED_AT       TIMESTAMP WITH LOCAL TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
         ARCHIVED_AT      TIMESTAMP WITH LOCAL TIME ZONE,
         CONSTRAINT UQ_REPORT_SLUG UNIQUE (SLUG),
-        CONSTRAINT CHK_REPORT_SPEC_JSON CHECK (REPORT_SPEC IS JSON),
         CONSTRAINT CHK_VISIBILITY CHECK (VISIBILITY_SCOPE IN ('owner','hr_admin','directors_hr','managers_hr','all')),
         CONSTRAINT CHK_DATASET CHECK (DATASET_KEY IN ('office_attendance','working_hours','timesheet_compare','employee_directory'))
       )
@@ -586,14 +771,13 @@ Add to `initializeSchema()` in `lib/oracle.ts`, after the existing tab tables se
         ID              NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         REPORT_ID       NUMBER         NOT NULL,
         VERSION_NO      NUMBER         NOT NULL,
-        REPORT_SPEC     CLOB           NOT NULL,
+        REPORT_SPEC     JSON           NOT NULL,
         PROMPT_TEXT     CLOB,
         CHANGE_SUMMARY  VARCHAR2(1000),
         CREATED_BY      VARCHAR2(255)  NOT NULL,
         CREATED_AT      TIMESTAMP WITH LOCAL TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
         CONSTRAINT FK_REPORT_VER_DEF FOREIGN KEY (REPORT_ID) REFERENCES TL_REPORT_DEFINITIONS(ID),
-        CONSTRAINT UQ_REPORT_VERSION UNIQUE (REPORT_ID, VERSION_NO),
-        CONSTRAINT CHK_REPORT_VER_SPEC_JSON CHECK (REPORT_SPEC IS JSON)
+        CONSTRAINT UQ_REPORT_VERSION UNIQUE (REPORT_ID, VERSION_NO)
       )
     `);
     await safeExecuteDDL(conn, `CREATE INDEX IDX_REPORT_VER_REPORT ON TL_REPORT_VERSIONS(REPORT_ID, VERSION_NO DESC)`);
@@ -1073,6 +1257,12 @@ git commit -m "feat: add published reports consumption API routes with role-base
 
 ### Task 12: DynamicChart and KPICards components
 
+> **Playwright-friendly UI rule (applies to ALL Tasks 12-16):**
+> - Use accessible HTML: `role`, `aria-label`, semantic elements (`<table>`, `<button>`, `<nav>`)
+> - Prefer `getByRole()` / `getByLabel()` selectors in tests
+> - Add `data-testid` on key interactive/container elements as fallback selectors
+> - Every component that renders data must have a stable `data-testid` root
+
 **Files:**
 - Create: `app/dashboard/admin/report-builder/components/dynamic-chart.tsx`
 - Create: `app/dashboard/admin/report-builder/components/kpi-cards.tsx`
@@ -1082,13 +1272,19 @@ git commit -m "feat: add published reports consumption API routes with role-base
 
 Implement the config-driven Recharts renderer from the design doc. Use `ResponsiveContainer`, `BarChart`/`LineChart`, `XAxis`, `YAxis`, `Tooltip`, `Legend`, `CartesianGrid`. Handle `bar`, `stacked_bar`, `line`, and `table` visual types.
 
+Add `data-testid="dynamic-chart"` on the root container and `data-testid="chart-{type}"` on the active chart element.
+
 **Step 2: Build KPICards**
 
 Simple component: receives 1-4 measures with values, renders as large-number cards with labels. Use Tailwind for styling (match existing amber/green palette).
 
+Add `data-testid="kpi-cards"` on root, `data-testid="kpi-card-{measure}"` on each card.
+
 **Step 3: Build DataTable**
 
 Sortable table component: receives `columns` and `rows` from `DatasetResult`. Click a row's dimension value → fires `onDrillThrough(field, value)` callback. Pagination (50 per page).
+
+Use semantic `<table>` with `<thead>`/`<tbody>`, sortable `<th>` buttons. Add `data-testid="data-table"` on root, `data-testid="table-row-{index}"` on rows.
 
 **Step 4: Verify typecheck**
 
@@ -1355,36 +1551,236 @@ git commit -m "feat: integrate report builder tabs with existing visibility syst
 
 ---
 
-### Task 20: End-to-end testing
+### Task 20: Playwright E2E tests
 
 **Files:**
-- Manual testing checklist
+- Create: `e2e/report-builder/page-objects/builder-page.ts`
+- Create: `e2e/report-builder/page-objects/library-page.ts`
+- Create: `e2e/report-builder/page-objects/viewer-page.ts`
+- Create: `e2e/report-builder/builder-flow.spec.ts`
+- Create: `e2e/report-builder/library.spec.ts`
+- Create: `e2e/report-builder/access-control.spec.ts`
 
-**Step 1: Full flow test**
+> **Prerequisites**: Oracle 23ai running (`npm run db:up`), schema initialized, dev server running. Tests use `DEV_BYPASS_EMAIL` env var for auth bypass.
 
-1. Start dev server: `npm run dev`
-2. Login as HR admin
-3. Navigate to Report Builder
-4. Type: "Show office attendance by department for the last 4 weeks"
-5. Verify: AI streams response, generates spec, preview renders chart
-6. Tweak a filter in the sidebar → verify preview updates
-7. Click Save → verify report appears in library
-8. Open report from library → verify viewer renders correctly
-9. Click Export → verify Excel downloads
-10. Test as non-admin user → verify builder is hidden, published reports are visible based on visibility scope
-11. Test drill-through → click a department → verify report filters
+**Step 1: Create Page Object Models**
 
-**Step 2: Typecheck**
+Create `e2e/report-builder/page-objects/builder-page.ts`:
+
+```typescript
+import { type Page, type Locator, expect } from '@playwright/test';
+
+export class BuilderPage {
+  readonly page: Page;
+  readonly chatInput: Locator;
+  readonly sendButton: Locator;
+  readonly previewPanel: Locator;
+  readonly saveButton: Locator;
+  readonly chart: Locator;
+  readonly dataTable: Locator;
+  readonly editSidebar: Locator;
+
+  constructor(page: Page) {
+    this.page = page;
+    this.chatInput = page.getByRole('textbox', { name: /message/i });
+    this.sendButton = page.getByRole('button', { name: /send/i });
+    this.previewPanel = page.getByTestId('report-preview');
+    this.saveButton = page.getByRole('button', { name: /save/i });
+    this.chart = page.getByTestId('dynamic-chart');
+    this.dataTable = page.getByTestId('data-table');
+    this.editSidebar = page.getByTestId('edit-sidebar');
+  }
+
+  async goto() {
+    await this.page.goto('/dashboard/admin/report-builder');
+  }
+
+  async sendPrompt(text: string) {
+    await this.chatInput.fill(text);
+    await this.sendButton.click();
+  }
+
+  async waitForPreview() {
+    await expect(this.previewPanel).toBeVisible({ timeout: 30_000 });
+  }
+
+  async saveReport(title: string) {
+    await this.saveButton.click();
+    const dialog = this.page.getByRole('dialog');
+    await dialog.getByRole('textbox', { name: /title/i }).fill(title);
+    await dialog.getByRole('button', { name: /save/i }).click();
+  }
+}
+```
+
+Create `e2e/report-builder/page-objects/library-page.ts`:
+
+```typescript
+import { type Page, type Locator, expect } from '@playwright/test';
+
+export class LibraryPage {
+  readonly page: Page;
+  readonly reportList: Locator;
+
+  constructor(page: Page) {
+    this.page = page;
+    this.reportList = page.getByTestId('report-list');
+  }
+
+  async goto() {
+    await this.page.goto('/dashboard/admin/reports');
+  }
+
+  async openReport(title: string) {
+    await this.reportList.getByRole('link', { name: title }).click();
+  }
+
+  async expectReportVisible(title: string) {
+    await expect(this.reportList.getByRole('link', { name: title })).toBeVisible();
+  }
+}
+```
+
+Create `e2e/report-builder/page-objects/viewer-page.ts`:
+
+```typescript
+import { type Page, type Locator, expect } from '@playwright/test';
+
+export class ViewerPage {
+  readonly page: Page;
+  readonly chart: Locator;
+  readonly exportButton: Locator;
+  readonly title: Locator;
+
+  constructor(page: Page) {
+    this.page = page;
+    this.chart = page.getByTestId('dynamic-chart');
+    this.exportButton = page.getByRole('button', { name: /export/i });
+    this.title = page.getByRole('heading', { level: 1 });
+  }
+
+  async expectLoaded(reportTitle: string) {
+    await expect(this.title).toHaveText(reportTitle);
+    await expect(this.chart).toBeVisible();
+  }
+}
+```
+
+**Step 2: Write builder flow E2E test**
+
+Create `e2e/report-builder/builder-flow.spec.ts`:
+
+```typescript
+import { test, expect } from '@playwright/test';
+import { BuilderPage } from './page-objects/builder-page';
+import { LibraryPage } from './page-objects/library-page';
+
+test.describe('Report Builder — full flow', () => {
+  test('admin can create, preview, and save a report via chat', async ({ page }) => {
+    // Mock the SSE chat response to avoid needing a real LLM
+    await page.route('**/api/admin/report-builder/chat', async (route) => {
+      const encoder = new TextEncoder();
+      const body = encoder.encode(
+        'data: {"type":"tool_result","tool":"generate_report_spec","result":{"spec":{"version":1,"dataset":"office_attendance","title":"Test Report","timeRange":{"type":"lookback_weeks","weeks":4},"grain":"week","dimensions":["department"],"measures":["office_days"],"filters":[],"sort":[],"visuals":[{"id":"main","type":"bar","x":"department","y":["office_days"]}]}}}\n\n'
+      );
+      await route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+        body: Buffer.from(body),
+      });
+    });
+
+    const builder = new BuilderPage(page);
+    await builder.goto();
+    await builder.sendPrompt('Show office attendance by department');
+    await builder.waitForPreview();
+    await expect(builder.chart).toBeVisible();
+  });
+
+  test('admin can save and find report in library', async ({ page }) => {
+    const builder = new BuilderPage(page);
+    const library = new LibraryPage(page);
+
+    // ... setup mock, create report ...
+    await builder.goto();
+    // After creating a report, save it
+    await builder.saveReport('My Saved Report');
+
+    // Navigate to library and verify
+    await library.goto();
+    await library.expectReportVisible('My Saved Report');
+  });
+});
+```
+
+**Step 3: Write access control E2E test**
+
+Create `e2e/report-builder/access-control.spec.ts`:
+
+```typescript
+import { test, expect } from '@playwright/test';
+
+test.describe('Report Builder — access control', () => {
+  test('non-admin users cannot access builder page', async ({ page }) => {
+    // Set non-admin bypass email
+    await page.goto('/dashboard/admin/report-builder');
+    // Should redirect or show 403
+    await expect(page).not.toHaveURL(/report-builder/);
+  });
+
+  test('builder page loads for HR admin', async ({ page }) => {
+    await page.goto('/dashboard/admin/report-builder');
+    await expect(page.getByTestId('report-builder')).toBeVisible();
+  });
+});
+```
+
+**Step 4: Write report library E2E test**
+
+Create `e2e/report-builder/library.spec.ts`:
+
+```typescript
+import { test, expect } from '@playwright/test';
+import { LibraryPage } from './page-objects/library-page';
+
+test.describe('Report Library', () => {
+  test('shows empty state when no reports exist', async ({ page }) => {
+    const library = new LibraryPage(page);
+    await library.goto();
+    await expect(page.getByText(/no reports/i)).toBeVisible();
+  });
+
+  test('export downloads Excel file', async ({ page }) => {
+    // Navigate to a saved report viewer
+    await page.goto('/dashboard/reports/test-slug');
+
+    const downloadPromise = page.waitForEvent('download');
+    await page.getByRole('button', { name: /export/i }).click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toMatch(/\.xlsx$/);
+  });
+});
+```
+
+**Step 5: Run E2E tests**
+
+```bash
+npm run test:e2e
+```
+
+Expected: All tests pass (with SSE mocks for AI chat).
+
+**Step 6: Typecheck**
 
 ```bash
 npm run typecheck
 ```
 
-**Step 3: Final commit**
+**Step 7: Commit**
 
 ```bash
-git add -A
-git commit -m "chore: final polish and integration verification"
+git add e2e/ playwright.config.ts
+git commit -m "test: add Playwright E2E tests for report builder, library, and access control"
 ```
 
 ---
@@ -1392,8 +1788,11 @@ git commit -m "chore: final polish and integration verification"
 ## Task Dependency Graph
 
 ```
+Phase 0 (Environment):
+  Task 0 (Oracle Docker + Playwright)
+
 Phase 1 (Foundations):
-  Task 1 (deps) → Task 2 (types+spec) → Task 3 (registry) → Task 4 (compiler) → Task 5 (oracle) → Task 6 (CRUD) → Task 7 (runners)
+  Task 0 → Task 1 (deps) → Task 2 (types+spec) → Task 3 (registry) → Task 4 (compiler) → Task 5 (oracle) → Task 6 (CRUD) → Task 7 (runners)
 
 Phase 2 (AI Layer):
   Task 7 → Task 8 (AI tools) → Task 9 (chat route) → Task 10 (admin API) → Task 11 (consumption API)
@@ -1402,14 +1801,16 @@ Phase 3 (UI):
   Task 11 → Task 12 (charts) → Task 13 (sidebar) → Task 14 (builder page) → Task 15 (library) → Task 16 (viewer)
 
 Phase 4 (Polish):
-  Task 16 → Task 17 (export) → Task 18 (rate limit) → Task 19 (tabs) → Task 20 (E2E test)
+  Task 16 → Task 17 (export) → Task 18 (rate limit) → Task 19 (tabs) → Task 20 (Playwright E2E)
 ```
 
 ## Summary
 
-- **20 tasks**, strictly sequential with clear dependencies
-- **Phase 1** (Tasks 1-7): Foundation — types, contracts, compiler, schema, CRUD, runners
+- **21 tasks** (Task 0-20), strictly sequential with clear dependencies
+- **Phase 0** (Task 0): Environment — Oracle 23ai Free Docker, Playwright infrastructure
+- **Phase 1** (Tasks 1-7): Foundation — types, contracts, compiler, schema (native JSON columns), CRUD, runners
 - **Phase 2** (Tasks 8-11): AI Layer — tools, system prompt, chat API, CRUD routes, consumption routes
-- **Phase 3** (Tasks 12-16): UI — charts, sidebar, builder page, library, viewer
-- **Phase 4** (Tasks 17-20): Polish — export, rate limiting, tab integration, E2E test
+- **Phase 3** (Tasks 12-16): UI — charts, sidebar, builder page, library, viewer (all Playwright-friendly with data-testid + accessible selectors)
+- **Phase 4** (Tasks 17-20): Polish — export, rate limiting, tab integration, Playwright E2E tests
 - Each task ends with `npm run typecheck` + commit
+- **WebMCP**: Evaluated and skipped — premature (W3C draft, Chrome Canary only). Not related to Anthropic MCP. Future option: `@ai-sdk/mcp` or `@vercel/mcp-handler` for MCP integration if needed.
