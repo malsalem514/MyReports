@@ -1,0 +1,63 @@
+# lib/catalog/timesheet-compare.yaml
+dataset: timesheet_compare
+display_name: "Timesheet Comparison"
+description: "TBS reported hours vs ActivTrak tracked hours vs BambooHR expected 8h (from V_DAILY_EMPLOYEE_HOURS view)"
+base_table: V_DAILY_EMPLOYEE_HOURS
+
+measures:
+  - name: reported_hours
+    sql: "SUM({base}.REPORTED_HOURS)"
+    type: number
+    description: "TBS timesheet reported hours"
+  - name: active_hours
+    sql: "SUM({base}.ACTIVE_DURATION)"
+    type: number
+    description: "ActivTrak active hours"
+  - name: productive_hours
+    sql: "SUM({base}.PRODUCTIVE_ACTIVE_DURATION)"
+    type: number
+    description: "ActivTrak productive hours"
+  - name: discrepancy_hours
+    sql: "SUM({base}.TBS_BAMBOO_DISCREPANCY)"
+    type: number
+    description: "TBS minus BambooHR expected hours"
+  - name: avg_reported
+    sql: "ROUND(AVG({base}.REPORTED_HOURS), 1)"
+    type: number
+    description: "Average daily reported hours"
+  - name: employee_count
+    sql: "COUNT(DISTINCT {base}.EMAIL)"
+    type: number
+    description: "Number of employees"
+
+dimensions:
+  - name: employee_name
+    sql: "{base}.EMPLOYEE_NAME"
+    type: string
+    description: "Employee name"
+  - name: department
+    sql: "{base}.DEPARTMENT_BHR"
+    type: string
+    description: "Department"
+  - name: work_location
+    sql: "{base}.WORK_LOCATION"
+    type: string
+    description: "Work location (Office/Remote)"
+  - name: reporting_to
+    sql: "{base}.REPORTING_TO"
+    type: string
+    description: "Reports to (supervisor name)"
+  - name: date
+    sql: "{base}.TBS_ENTRY_DATE"
+    type: time
+    description: "Timesheet entry date"
+  - name: week
+    sql: "{base}.ACTIVITY_WEEK"
+    type: time
+    description: "Activity week"
+
+scoping:
+  manager:
+    sql: "{base}.DEPARTMENT_BHR = :scope_dept"
+  employee:
+    deny: true
