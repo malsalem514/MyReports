@@ -25,6 +25,7 @@ export interface AccessContext {
   userEmail: string;
   employeeId: string | null;
   employeeName: string | null;
+  department: string | null;
   isHRAdmin: boolean;
   isDirector: boolean;
   isManager: boolean;
@@ -72,6 +73,7 @@ export const getAccessContext = cache(async (): Promise<AccessContext> => {
       userEmail: '',
       employeeId: null,
       employeeName: null,
+      department: null,
       isHRAdmin: false,
       isDirector: false,
       isManager: false,
@@ -102,6 +104,7 @@ export async function getAccessContextByEmail(
         userEmail: normalizedEmail,
         employeeId: null,
         employeeName: 'HR Admin',
+        department: null,
         isHRAdmin: true,
         isDirector: true,
         isManager: true,
@@ -115,6 +118,7 @@ export async function getAccessContextByEmail(
         userEmail: normalizedEmail,
         employeeId: null,
         employeeName: 'HR Admin',
+        department: null,
         isHRAdmin: true,
         isDirector: true,
         isManager: true,
@@ -137,6 +141,7 @@ export async function getAccessContextByEmail(
         userEmail: normalizedEmail,
         employeeId: null,
         employeeName: null,
+        department: null,
         isHRAdmin: false,
         isDirector: false,
         isManager: false,
@@ -172,6 +177,7 @@ export async function getAccessContextByEmail(
       userEmail: normalizedEmail,
       employeeId: currentUser.id,
       employeeName: userName,
+      department: currentUser.department ?? null,
       isHRAdmin: false,
       isDirector: diagnostics.isDirector,
       isManager: reports.length > 0,
@@ -185,6 +191,7 @@ export async function getAccessContextByEmail(
       userEmail: normalizedEmail,
       employeeId: null,
       employeeName: null,
+      department: null,
       isHRAdmin: false,
       isDirector: false,
       isManager: false,
