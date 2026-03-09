@@ -173,10 +173,33 @@ Create `e2e/fixtures.ts`:
 ```typescript
 import { test as base, expect } from '@playwright/test';
 
-// Auth fixture — login as HR admin for builder tests
-export const test = base.extend<{ adminPage: typeof base }>({
-  // Future: add authenticated page fixture here
-  // For now, use dev bypass auth (DEV_BYPASS_EMAIL env var)
+// Per-request auth bypass via header — allows admin/non-admin tests in same suite.
+// The dev-bypass middleware reads X-Test-Bypass-Email when NODE_ENV=test.
+export const test = base.extend<{ asAdmin: void; asEmployee: void }>({
+  asAdmin: [async ({ page }, use) => {
+    // Set admin email on all requests from this page
+    await page.route('**/*', (route) => {
+      route.continue({
+        headers: {
+          ...route.request().headers(),
+          'x-test-bypass-email': 'malsalem@jestais.com',
+        },
+      });
+    });
+    await use();
+  }, { auto: false }],
+
+  asEmployee: [async ({ page }, use) => {
+    await page.route('**/*', (route) => {
+      route.continue({
+        headers: {
+          ...route.request().headers(),
+          'x-test-bypass-email': 'employee@jestais.com',
+        },
+      });
+    });
+    await use();
+  }, { auto: false }],
 });
 
 export { expect };
@@ -398,14 +421,19 @@ export const reportSpecSchema = z.object({
   dataset: z.enum(['office_attendance', 'working_hours', 'timesheet_compare', 'employee_directory']),
   title: z.string().min(1).max(200),
   description: z.string().max(1000).optional(),
-  timeRange: timeRangeSchema,
-  grain: z.enum(['week', 'day']),
-  dimensions: z.array(z.string()).min(1),
+  timeRange: timeRangeSchema.optional(), // optional for non-temporal datasets (employee_directory)
+  grain: z.enum(['week', 'day']).optional(), // optional for non-temporal datasets
+  dimensions: z.array(z.string()), // min(0) — KPI visuals may have no dimensions
   measures: z.array(z.string()).min(1),
   filters: z.array(filterSchema),
   sort: z.array(sortSchema),
   visuals: z.array(visualSchema),
 });
+
+// NOTE: compileSpec() enforces conditional requirements:
+// - temporal datasets (office_attendance, working_hours, timesheet_compare) REQUIRE timeRange + grain
+// - employee_directory does NOT require timeRange or grain
+// - KPI visuals allow 0 dimensions; other chart types require >= 1 dimension
 
 export type ReportSpec = z.infer<typeof reportSpecSchema>;
 export type Filter = z.infer<typeof filterSchema>;
@@ -599,6 +627,21 @@ export function compileSpec(
 
   if (!dataset) {
     return { ok: false, errors: [`Unknown dataset: ${spec.dataset}`] };
+  }
+
+  // 0. Conditional field requirements by dataset type
+  const temporalDatasets = ['office_attendance', 'working_hours', 'timesheet_compare'];
+  const isTemporal = temporalDatasets.includes(spec.dataset);
+
+  if (isTemporal) {
+    if (!spec.timeRange) errors.push(`Dataset "${spec.dataset}" requires a timeRange`);
+    if (!spec.grain) errors.push(`Dataset "${spec.dataset}" requires a grain`);
+  }
+
+  // KPI visuals allow 0 dimensions; other chart types require >= 1
+  const hasNonKpiVisual = spec.visuals.some((v) => v.type !== 'kpi');
+  if (hasNonKpiVisual && spec.dimensions.length === 0) {
+    errors.push('Non-KPI chart types require at least 1 dimension');
   }
 
   // 1. Validate dimensions exist in contract
@@ -832,7 +875,19 @@ Create `lib/report-builder/report-crud.ts` with these functions:
 - `toggleFavorite(reportId, email): Promise<boolean>` — MERGE or DELETE, returns new state
 - `isFavorite(reportId, email): Promise<boolean>`
 
-Use `getConnection()` for transactional operations (update), `query<T>()` for reads. Parse `REPORT_SPEC` from CLOB string with `JSON.parse()`. Use `RETURNING ID INTO :id` for inserts.
+Use `getConnection()` for transactional operations (update), `query<T>()` for reads. Use `RETURNING ID INTO :id` for inserts.
+
+> **Oracle 23ai native JSON binding**: With native `JSON` columns, `oracledb` returns JSON data as JavaScript objects automatically (no `JSON.parse()` needed on read). For writes, pass a JavaScript object and bind as `{ type: oracledb.DB_TYPE_JSON }`. Example:
+> ```typescript
+> // Write: bind JS object as JSON
+> await conn.execute(
+>   'INSERT INTO TL_REPORT_DEFINITIONS (..., REPORT_SPEC) VALUES (..., :spec)',
+>   { spec: { type: oracledb.DB_TYPE_JSON, val: specObject } },
+> );
+> // Read: oracledb returns JSON columns as JS objects automatically
+> const rows = await query<{ REPORT_SPEC: ReportSpec }>('SELECT REPORT_SPEC FROM ...');
+> // rows[0].REPORT_SPEC is already a JS object, no JSON.parse() needed
+> ```
 
 **Step 2: Verify typecheck**
 
@@ -868,14 +923,23 @@ import type { AccessContext } from '@/lib/access';
 import type { ReportSpec, Filter } from '@/lib/report-builder/report-spec';
 import type { DatasetContract } from '@/types/report-builder';
 
-/** Build WHERE clause from spec filters. Returns { clause, params }. */
-export function buildFilterClause(
+/**
+ * Build WHERE and HAVING clauses from spec filters.
+ * Dimension filters → WHERE (before aggregation).
+ * Measure filters → HAVING (after aggregation).
+ */
+export function buildFilterClauses(
   filters: Filter[],
   dataset: DatasetContract,
   paramPrefix: string = 'f',
-): { clause: string; params: Record<string, unknown> } {
-  const conditions: string[] = [];
-  const params: Record<string, unknown> = {};
+): {
+  whereClause: string; whereParams: Record<string, unknown>;
+  havingClause: string; havingParams: Record<string, unknown>;
+} {
+  const whereConds: string[] = [];
+  const havingConds: string[] = [];
+  const whereParams: Record<string, unknown> = {};
+  const havingParams: Record<string, unknown> = {};
 
   for (let i = 0; i < filters.length; i++) {
     const filter = filters[i]!;
@@ -884,6 +948,10 @@ export function buildFilterClause(
     const expr = dim?.oracleExpr ?? measure?.oracleExpr;
     if (!expr) continue;
 
+    // Measures are aggregated — their filters go into HAVING, not WHERE
+    const isDimensionFilter = !!dim;
+    const conditions = isDimensionFilter ? whereConds : havingConds;
+    const params = isDimensionFilter ? whereParams : havingParams;
     const paramKey = `${paramPrefix}${i}`;
 
     switch (filter.op) {
@@ -931,7 +999,12 @@ export function buildFilterClause(
     }
   }
 
-  return { clause: conditions.length > 0 ? conditions.join(' AND ') : '1=1', params };
+  return {
+    whereClause: whereConds.length > 0 ? whereConds.join(' AND ') : '1=1',
+    whereParams,
+    havingClause: havingConds.length > 0 ? havingConds.join(' AND ') : '',
+    havingParams,
+  };
 }
 
 /** Build access scope WHERE clause. Injected into innermost CTE. */
@@ -1188,6 +1261,7 @@ git commit -m "feat: add chat streaming API route for report builder"
 - Create: `app/api/admin/report-builder/reports/[id]/route.ts`
 - Create: `app/api/admin/report-builder/reports/[id]/versions/route.ts`
 - Create: `app/api/admin/report-builder/reports/[id]/duplicate/route.ts`
+- Create: `app/api/admin/report-builder/reports/[id]/publish/route.ts`
 
 **Step 1: Implement each route**
 
@@ -1206,6 +1280,8 @@ Key behaviors:
 - `DELETE /reports/[id]`: `deleteReport(id)` → return `{ ok: true }`
 - `GET /reports/[id]/versions`: `listVersions(id)` → return versions array
 - `POST /reports/[id]/duplicate`: `duplicateReport(id, title, email)` → return `{ id, slug }`
+- `POST /reports/[id]/publish`: set `IS_PUBLISHED = 1`, validate visibility scope doesn't leak HR-only fields → return `{ ok: true }`
+- `POST /reports/[id]/unpublish`: set `IS_PUBLISHED = 0` → return `{ ok: true }`. Only the report owner or any HR admin can publish/unpublish.
 
 **Step 2: Verify typecheck**
 
@@ -1561,7 +1637,9 @@ git commit -m "feat: integrate report builder tabs with existing visibility syst
 - Create: `e2e/report-builder/library.spec.ts`
 - Create: `e2e/report-builder/access-control.spec.ts`
 
-> **Prerequisites**: Oracle 23ai running (`npm run db:up`), schema initialized, dev server running. Tests use `DEV_BYPASS_EMAIL` env var for auth bypass.
+> **Prerequisites**: Oracle 23ai running (`npm run db:up`), schema initialized, dev server running.
+>
+> **Auth strategy**: Tests use a per-request `X-Test-Bypass-Email` header (or cookie) instead of the process-level `DEV_BYPASS_EMAIL` env var. This allows admin vs non-admin tests to run in the same dev server process. The test middleware reads this header when `NODE_ENV === 'test'` and overrides the auth context. Add a small middleware check in `lib/dev-bypass.ts` or the existing dev bypass mechanism.
 
 **Step 1: Create Page Object Models**
 

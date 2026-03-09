@@ -117,9 +117,11 @@ export async function runOfficeAttendance(
 
 Each dataset contract declares its `scopeKeys`. The runner injects the access predicate into the **innermost base-row CTE** before any aggregation:
 
-- `self` scope: `WHERE email = :viewer_email`
-- `team` scope: `WHERE department IN (:viewer_departments)` (manager's direct reports)
+- `self` scope: `WHERE LOWER(email) = :viewer_email`
+- `team` scope: `WHERE LOWER(email) IN (:allowed_emails)` (from `AccessContext.allowedEmails` — actual reporting tree, NOT department membership)
 - `all` scope: no additional filter (HR admins)
+
+> **Why `allowedEmails` not `department`**: The existing access model (`lib/access.ts`) builds `allowedEmails` from `fetchReportingStructure()` — the actual org tree. Department-based filtering would expose same-department employees outside the viewer's reporting chain.
 
 Contract tests verify identical enforcement across datasets for `self`, `team`, and `all` contexts.
 
@@ -331,13 +333,36 @@ await safeExecuteDDL(conn, `CREATE INDEX IDX_REPORT_DEF_OWNER ON ...`);
 ### Transactional Versioning
 
 ```typescript
+// CRITICAL: All operations on ONE connection with autoCommit OFF to prevent race conditions.
+// The global oracledb.autoCommit = true is overridden per-statement here.
 const conn = await getConnection();
 try {
-  await conn.execute('SELECT ID FROM TL_REPORT_DEFINITIONS WHERE ID = :id FOR UPDATE', { id });
-  const [{ MAX_VER }] = await query('SELECT NVL(MAX(VERSION_NO), 0) AS MAX_VER FROM TL_REPORT_VERSIONS WHERE REPORT_ID = :id', { id });
-  const nextVer = MAX_VER + 1;
-  await conn.execute('INSERT INTO TL_REPORT_VERSIONS (...) VALUES (...)', { reportId: id, versionNo: nextVer, ... });
-  await conn.execute('UPDATE TL_REPORT_DEFINITIONS SET REPORT_SPEC = :spec, UPDATED_AT = SYSTIMESTAMP WHERE ID = :id', { spec, id });
+  // Lock the report row — prevents concurrent version writes
+  await conn.execute(
+    'SELECT ID FROM TL_REPORT_DEFINITIONS WHERE ID = :id FOR UPDATE',
+    { id },
+    { autoCommit: false },
+  );
+  // Read max version on the SAME connection (not via query() which gets a new conn)
+  const result = await conn.execute<{ MAX_VER: number }>(
+    'SELECT NVL(MAX(VERSION_NO), 0) AS MAX_VER FROM TL_REPORT_VERSIONS WHERE REPORT_ID = :id',
+    { id },
+    { outFormat: oracledb.OUT_FORMAT_OBJECT, autoCommit: false },
+  );
+  const maxVer = result.rows?.[0]?.MAX_VER ?? 0;
+  const nextVer = maxVer + 1;
+  // Insert new version on same connection
+  await conn.execute(
+    'INSERT INTO TL_REPORT_VERSIONS (...) VALUES (...)',
+    { reportId: id, versionNo: nextVer, /* ... */ },
+    { autoCommit: false },
+  );
+  // Update the definition
+  await conn.execute(
+    'UPDATE TL_REPORT_DEFINITIONS SET REPORT_SPEC = :spec, UPDATED_AT = SYSTIMESTAMP WHERE ID = :id',
+    { spec, id },
+    { autoCommit: false },
+  );
   await conn.execute('COMMIT');
 } catch (e) {
   await conn.execute('ROLLBACK');
