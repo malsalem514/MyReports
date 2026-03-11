@@ -10,18 +10,29 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
-# Compile lib/ to CJS for instrumentation runtime imports
-# (webpackIgnore in instrumentation.ts skips bundling these; they must exist
-# at .next/server/lib/*.js for the dynamic import to resolve at runtime)
-RUN npx tsc --outDir .next/standalone/.next/server \
+# Compile the startup-only lib modules into the standalone bundle.
+# instrumentation.ts dynamically imports these files, so they must exist
+# under .next/server/lib at runtime even though webpack does not trace them.
+RUN npx tsc \
+    --outDir .next/standalone/.next/server \
     --rootDir . \
-    --module commonjs --target es2022 \
-    --esModuleInterop --skipLibCheck \
-    --declaration false --sourceMap false \
+    --module commonjs \
+    --target es2022 \
+    --esModuleInterop \
+    --skipLibCheck \
+    --declaration false \
+    --sourceMap false \
     --moduleResolution node \
-    lib/scheduler.ts && \
-    # Copy packages that the lib files require but standalone tracing missed
-    # (because webpackIgnore prevented webpack from tracing them)
+    lib/cache.ts \
+    lib/bamboohr.ts \
+    lib/bigquery.ts \
+    lib/oracle.ts \
+    lib/scheduler.ts \
+    lib/sync.ts && \
+    # Copy packages that the startup modules require but standalone tracing
+    # misses because the imports happen through instrumentation eval().
+    mkdir -p .next/standalone/node_modules/@google-cloud && \
+    cp -r node_modules/@google-cloud/bigquery .next/standalone/node_modules/@google-cloud/ && \
     cp -r node_modules/node-cron .next/standalone/node_modules/ && \
     cp -r node_modules/zod .next/standalone/node_modules/
 

@@ -1,9 +1,14 @@
 .git
 .claude
 .next
+.next*
+.playwright-cli
+output
 node_modules
 npm-debug.log*
 .env*
 README.md
 docs
 *.tar
+*.log
+tsconfig.tsbuildinfo
