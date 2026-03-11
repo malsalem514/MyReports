@@ -24,6 +24,14 @@ IT-HANDOFF.md                  ← This document
 The Docker image is built and published automatically via GitHub Actions whenever code is
 merged to `main`. You do not need to manually load any `.tar` file.
 
+Production hardening added on March 11, 2026:
+
+- the standalone container now includes the startup runtime modules needed by `instrumentation.ts`
+- startup imports were corrected so Oracle schema init and the scheduler load correctly in production
+- the current production container logs should show:
+  - `Oracle schema initialized successfully`
+  - `Scheduler initialized. Syncs once daily at 6 AM ET.`
+
 ---
 
 ## Step 1 — One-time GHCR login (enables auto-updates)
@@ -239,6 +247,14 @@ docker compose -f docker-compose.production.yml pull myreports
 docker compose -f docker-compose.production.yml up -d myreports
 ```
 
+If this app is hosted on the Windows VM at `172.16.30.77`, there is an additional host recovery layer:
+
+- scheduled task: `MyReports Ensure Docker`
+- recovery script: `C:\myreports\scripts\ensure-docker-and-app.ps1`
+- recovery log: `C:\myreports\logs\ensure-docker-and-app.log`
+
+That script starts Docker Desktop, waits for the Linux engine, and brings `myreports`, `nginx-ssl`, and `watchtower` back up after boot. This was reboot-verified on March 11, 2026 without any interactive login being required to keep the site up.
+
 ---
 
 ## Troubleshooting
@@ -254,6 +270,7 @@ docker compose -f docker-compose.production.yml up -d myreports
 | `oracle: false` in health check | Oracle host not reachable | Verify `ORACLE_DB_IP`; check `extra_hosts` in compose |
 | `bigQuery: false` in health check | Service account file missing or invalid | Verify `GOOGLE_SA_JSON_PATH` and file contents |
 | `bambooHR: false` in health check | Invalid or expired API key | Verify `BAMBOOHR_API_KEY` in `myreports.env` |
+| Windows VM is up but site stays down after reboot | Docker Desktop engine not yet ready | Check `C:\myreports\logs\ensure-docker-and-app.log` and wait for `Bootstrap complete` |
 
 ---
 

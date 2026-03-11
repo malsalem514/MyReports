@@ -53,6 +53,34 @@ Credential helpers are disabled for SSH sessions (`docker-credential-desktop.exe
 
 GHCR login already configured: `docker login ghcr.io -u malsalem514`
 
+### Windows Host Hardening
+
+The VM uses a scheduled task to recover Docker Desktop and the MyReports stack after boot:
+
+- Task name: `MyReports Ensure Docker`
+- Script path: `C:\myreports\scripts\ensure-docker-and-app.ps1`
+- Log path: `C:\myreports\logs\ensure-docker-and-app.log`
+
+What the script now does:
+
+- starts `com.docker.service`
+- launches Docker Desktop
+- waits for the `desktop-linux` engine to become ready
+- ensures `myreports`, `nginx-ssl`, and `watchtower` are running
+
+Important behavior:
+
+- `com.docker.service` may still show as `Manual` after Docker Desktop comes up
+- do not rely on Windows service startup mode alone for recovery
+- the real recovery mechanism is the scheduled task + script above
+
+Reboot proof completed on March 11, 2026:
+
+- VM boot changed to `March 11, 2026 12:29:21 AM`
+- task auto-ran at `12:29:33 AM`
+- public health recovered by about `12:30:50 AM`
+- no interactive desktop/session was required to bring the site back
+
 ## Directory Layout
 
 ```
@@ -139,6 +167,10 @@ sshpass -f /tmp/.sshpw ssh ... 'malsalem@jestais.com'@172.16.30.77 "docker resta
 
 # View MyReports logs
 sshpass -f /tmp/.sshpw ssh ... 'malsalem@jestais.com'@172.16.30.77 "docker logs myreports"
+
+# View Windows Docker/bootstrap recovery log
+sshpass -f /tmp/.sshpw ssh ... 'malsalem@jestais.com'@172.16.30.77 \
+  "powershell -NoProfile -Command \"Get-Content C:\myreports\logs\ensure-docker-and-app.log -Tail 100\""
 
 # ERPNext bench commands
 sshpass -f /tmp/.sshpw ssh ... 'malsalem@jestais.com'@172.16.30.77 \
