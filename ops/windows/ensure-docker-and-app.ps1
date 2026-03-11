@@ -25,6 +25,14 @@ if (-not (Test-Path $dockerCli)) {
   exit 1
 }
 
+try {
+  Set-Service -Name "com.docker.service" -StartupType Automatic
+  Start-Service -Name "com.docker.service"
+  Write-Log "Docker Desktop service started"
+} catch {
+  Write-Log "Docker Desktop service start returned: $($_.Exception.Message)"
+}
+
 if (Test-Path $dockerDesktopExe) {
   Write-Log "Launching Docker Desktop"
   Start-Process -FilePath $dockerDesktopExe | Out-Null
