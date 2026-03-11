@@ -495,6 +495,7 @@ export function AttendanceClient({
   const groupedRows = useMemo<GroupRow[]>(() => {
     const grouped = new Map<string, GroupRow>();
     const groupMembersByKey = new Map<string, Set<string>>();
+    const normalizeEmail = (email: string | null | undefined) => email?.toLowerCase().trim() || null;
 
     const addEmployeeToGroup = (group: GroupRow, row: AttendanceRow) => {
       const isQuebecEmployee = row.officeLocation === DEFAULT_EMPLOYEE_LOCATION;
@@ -575,25 +576,32 @@ export function AttendanceClient({
       addEmployeeToGroup(existing, row);
       grouped.set(key, existing);
       if (!groupMembersByKey.has(key)) groupMembersByKey.set(key, new Set());
-      groupMembersByKey.get(key)!.add(row.email);
+      const normalizedRowEmail = normalizeEmail(row.email);
+      if (normalizedRowEmail) {
+        groupMembersByKey.get(key)!.add(normalizedRowEmail);
+      }
     }
 
     if (isManagerView) {
       const employeeByEmail = new Map<string, AttendanceRow>();
-      for (const row of filtered) {
-        const normalizedEmail = row.email.toLowerCase();
+      for (const row of rows) {
+        const normalizedEmail = normalizeEmail(row.email);
+        if (!normalizedEmail) continue;
         if (!employeeByEmail.has(normalizedEmail)) {
           employeeByEmail.set(normalizedEmail, row);
         }
       }
       for (const [key, group] of grouped) {
-        const managerEmail = group.managerEmail?.toLowerCase() || null;
+        const managerEmail = normalizeEmail(group.managerEmail);
         const managerEmployee = managerEmail ? employeeByEmail.get(managerEmail) : null;
         if (!groupMembersByKey.has(key)) groupMembersByKey.set(key, new Set());
         if (managerEmployee) {
-          if (groupMembersByKey.get(key)!.has(managerEmployee.email)) continue;
+          const normalizedManagerEmail = normalizeEmail(managerEmployee.email);
+          if (normalizedManagerEmail && groupMembersByKey.get(key)!.has(normalizedManagerEmail)) continue;
           addEmployeeToGroup(group, managerEmployee);
-          groupMembersByKey.get(key)!.add(managerEmployee.email);
+          if (normalizedManagerEmail) {
+            groupMembersByKey.get(key)!.add(normalizedManagerEmail);
+          }
         } else if (managerEmail) {
           group.employeeCount += 1;
           group.remoteEmployeeCount += 1;
@@ -658,7 +666,7 @@ export function AttendanceClient({
         trend,
       };
     });
-  }, [filtered, isManagerView, scoredWeeks, weeks]);
+  }, [filtered, isManagerView, rows, scoredWeeks, weeks]);
 
   const displayRows = useMemo<DisplayRow[]>(() => {
     const employeeRows: DisplayRow[] = filtered.map((row) => ({
