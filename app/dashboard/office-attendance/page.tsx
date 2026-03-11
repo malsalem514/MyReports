@@ -1,8 +1,9 @@
 import { Suspense } from 'react';
-import { sub } from 'date-fns';
-import { getAccessContext } from '@/lib/access';
+import { getAccessContext, getScopedReportEmails } from '@/lib/access';
+import { requireVisibleTab } from '@/lib/tab-config';
 import { getAttendanceReport } from '@/lib/dashboard-data';
 import { OFFICE_DAYS_REQUIRED, DEFAULT_LOOKBACK_WEEKS, LOOKBACK_OPTIONS } from '@/lib/constants';
+import { getOfficeAttendanceDefaultRange, toDateParam } from '@/lib/report-date-defaults';
 import { AttendanceClient } from './attendance-client';
 
 function parseDateInput(
@@ -28,13 +29,6 @@ function parseDateInput(
   return parsed;
 }
 
-function toDateParam(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
 async function AttendanceData({
   lookbackWeeks,
   startDate,
@@ -49,10 +43,11 @@ async function AttendanceData({
   endDateLabel: string;
 }) {
   const access = await getAccessContext();
-  const allowedEmails = access.isHRAdmin ? undefined : access.allowedEmails;
+  await requireVisibleTab(access.userEmail, access, 'office-attendance');
+  const allowedEmails = getScopedReportEmails(access);
 
   try {
-    const { rows, weeks, dataWeeks, currentWeek, departments, locations, summary } = await getAttendanceReport(
+    const { rows, remoteWorkRequests, weeks, dataWeeks, currentWeek, departments, locations, summary } = await getAttendanceReport(
       startDate,
       endDate,
       OFFICE_DAYS_REQUIRED,
@@ -62,6 +57,7 @@ async function AttendanceData({
     return (
       <AttendanceClient
         rows={rows}
+        remoteWorkRequests={remoteWorkRequests}
         weeks={weeks}
         dataWeeks={dataWeeks}
         currentWeek={currentWeek}
@@ -83,6 +79,7 @@ async function AttendanceData({
         </div>
         <AttendanceClient
           rows={[]}
+          remoteWorkRequests={[]}
           weeks={[]}
           dataWeeks={[]}
           departments={[]}
@@ -126,10 +123,7 @@ export default async function OfficeAttendancePage({
   const lookbackWeeks = LOOKBACK_OPTIONS.includes(Number(params.lookbackWeeks) as any)
     ? (Number(params.lookbackWeeks) as (typeof LOOKBACK_OPTIONS)[number])
     : DEFAULT_LOOKBACK_WEEKS;
-  const fallbackEndDate = new Date();
-  fallbackEndDate.setHours(23, 59, 59, 999);
-  const fallbackStartDate = sub(fallbackEndDate, { weeks: lookbackWeeks });
-  fallbackStartDate.setHours(0, 0, 0, 0);
+  const { startDate: fallbackStartDate, endDate: fallbackEndDate } = getOfficeAttendanceDefaultRange(lookbackWeeks);
 
   let startDate = parseDateInput(params.startDate, fallbackStartDate, false);
   let endDate = parseDateInput(params.endDate, fallbackEndDate, true);

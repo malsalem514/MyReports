@@ -1,5 +1,5 @@
 import { query } from './oracle';
-import type { AttendanceRow, WeekCell, AttendanceSummary } from '@/app/dashboard/office-attendance/attendance-client';
+import type { AttendanceRemoteWorkRequest, AttendanceRow, AttendanceSummary, WeekCell } from './types/attendance';
 
 // ============================================================================
 // Types
@@ -46,6 +46,24 @@ export interface TimeOffRecord {
   unit: string;
 }
 
+export interface BambooNotInActivTrakEmployee {
+  employeeId: string;
+  email: string;
+  displayName: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  jobTitle: string | null;
+  department: string | null;
+  division: string | null;
+  location: string | null;
+  supervisorEmail: string | null;
+  hireDate: Date | null;
+  status: string | null;
+  tbsEmployeeNo: number | null;
+  tbsEmployeeName: string | null;
+  tbsDepartment: string | null;
+}
+
 // ============================================================================
 // Employee Queries
 // ============================================================================
@@ -89,6 +107,48 @@ export async function getEmployees(options?: {
     supervisorId: r.SUPERVISOR_ID, supervisorEmail: r.SUPERVISOR_EMAIL,
     hireDate: r.HIRE_DATE, status: r.STATUS,
     remoteWorkdayPolicyAssigned: r.REMOTE_WORKDAY_POLICY_ASSIGNED === 1,
+  }));
+}
+
+export async function getBambooNotInActivTrakEmployees(): Promise<BambooNotInActivTrakEmployee[]> {
+  const rows = await query<{
+    EMPLOYEE_ID: string;
+    EMAIL: string;
+    DISPLAY_NAME: string;
+    FIRST_NAME: string;
+    LAST_NAME: string;
+    JOB_TITLE: string;
+    DEPARTMENT: string;
+    DIVISION: string;
+    LOCATION: string;
+    SUPERVISOR_EMAIL: string;
+    HIRE_DATE: Date;
+    STATUS: string;
+    TBS_EMPLOYEE_NO: number | null;
+    TBS_EMPLOYEE_NAME: string | null;
+    TBS_DEPARTMENT: string | null;
+  }>(`
+    SELECT *
+    FROM V_BAMBOO_NOT_IN_ACTIVTRAK
+    ORDER BY DISPLAY_NAME, EMAIL
+  `);
+
+  return rows.map((r) => ({
+    employeeId: r.EMPLOYEE_ID,
+    email: r.EMAIL,
+    displayName: r.DISPLAY_NAME,
+    firstName: r.FIRST_NAME,
+    lastName: r.LAST_NAME,
+    jobTitle: r.JOB_TITLE,
+    department: r.DEPARTMENT,
+    division: r.DIVISION,
+    location: r.LOCATION,
+    supervisorEmail: r.SUPERVISOR_EMAIL,
+    hireDate: r.HIRE_DATE,
+    status: r.STATUS,
+    tbsEmployeeNo: r.TBS_EMPLOYEE_NO,
+    tbsEmployeeName: r.TBS_EMPLOYEE_NAME,
+    tbsDepartment: r.TBS_DEPARTMENT,
   }));
 }
 
@@ -214,6 +274,7 @@ export async function getTimeOff(
 
 export interface AttendanceReportResult {
   rows: AttendanceRow[];
+  remoteWorkRequests: AttendanceRemoteWorkRequest[];
   weeks: string[];
   /** Completed weeks that have actual attendance data — used for avg/compliance in client */
   dataWeeks: string[];
@@ -247,7 +308,7 @@ export async function getAttendanceReport(
     emails.forEach((email, i) => { empParams[`em${i}`] = email.toLowerCase(); });
   }
 
-  const [attRows, empRows, dailyRows, ptoDailyRows] = await Promise.all([
+  const [attRows, empRows, dailyRows, ptoDailyRows, remoteWorkRows] = await Promise.all([
     query<{
       EMAIL: string; DISPLAY_NAME: string; DEPARTMENT: string;
       OFFICE_LOCATION: string; WEEK_START: Date;
@@ -257,10 +318,24 @@ export async function getAttendanceReport(
       params,
     ),
     query<{
-      EMAIL: string; DISPLAY_NAME: string; DEPARTMENT: string; LOCATION: string;
-      REMOTE_WORKDAY_POLICY_ASSIGNED: number | null;
+      EMAIL: string;
+      DISPLAY_NAME: string;
+      DEPARTMENT: string;
+      LOCATION: string;
+      MANAGER_NAME: string;
+      MANAGER_EMAIL: string | null;
     }>(
-      `SELECT LOWER(EMAIL) AS EMAIL, NVL(DISPLAY_NAME, EMAIL) AS DISPLAY_NAME, NVL(DEPARTMENT, 'Unknown') AS DEPARTMENT, NVL(LOCATION, 'Unknown') AS LOCATION, NVL(REMOTE_WORKDAY_POLICY_ASSIGNED, 0) AS REMOTE_WORKDAY_POLICY_ASSIGNED FROM TL_EMPLOYEES WHERE EMAIL IS NOT NULL AND (STATUS IS NULL OR UPPER(STATUS) != 'INACTIVE') AND DEPARTMENT NOT IN ('Executive', 'Administration')${empEmailFilter}`,
+      `SELECT
+         LOWER(EMAIL) AS EMAIL,
+         NVL(DISPLAY_NAME, EMAIL) AS DISPLAY_NAME,
+         NVL(DEPARTMENT, 'Unknown') AS DEPARTMENT,
+         NVL(LOCATION, 'Unknown') AS LOCATION,
+         NVL(SUPERVISOR_NAME, 'Unassigned') AS MANAGER_NAME,
+         LOWER(SUPERVISOR_EMAIL) AS MANAGER_EMAIL
+       FROM TL_EMPLOYEES
+       WHERE EMAIL IS NOT NULL
+         AND (STATUS IS NULL OR UPPER(STATUS) != 'INACTIVE')
+         AND DEPARTMENT NOT IN ('Executive', 'Administration')${empEmailFilter}`,
       empParams,
     ),
     // Daily detail (deduped, Office wins, weekdays only) — includes PTO flag from ActivTrak
@@ -297,45 +372,177 @@ export async function getAttendanceReport(
           : {}),
       },
     ),
+    query<{
+      BAMBOO_ROW_ID: number;
+      EMPLOYEE_ID: string;
+      EMAIL: string | null;
+      EMPLOYEE_NAME: string | null;
+      DEPARTMENT: string | null;
+      OFFICE_LOCATION: string | null;
+      REQUEST_DATE: Date | null;
+      REMOTE_WORK_START_DATE: Date;
+      REMOTE_WORK_END_DATE: Date | null;
+      REMOTE_WORK_TYPE: string | null;
+      REASON: string | null;
+      SUPPORTING_DOCUMENTATION_SUBMITTED: string | null;
+      ALTERNATE_IN_OFFICE_WORK_DATE: string | null;
+      MANAGER_APPROVAL_RECEIVED: string | null;
+      MANAGER_NAME: string | null;
+    }>(
+      `SELECT
+         r.BAMBOO_ROW_ID,
+         r.EMPLOYEE_ID,
+         LOWER(r.EMAIL) AS EMAIL,
+         r.EMPLOYEE_NAME,
+         r.DEPARTMENT,
+         NVL(e.LOCATION, 'Unknown') AS OFFICE_LOCATION,
+         r.REQUEST_DATE,
+         r.REMOTE_WORK_START_DATE,
+         r.REMOTE_WORK_END_DATE,
+         r.REMOTE_WORK_TYPE,
+         r.REASON,
+         r.SUPPORTING_DOCUMENTATION_SUBMITTED,
+         r.ALTERNATE_IN_OFFICE_WORK_DATE,
+         r.MANAGER_APPROVAL_RECEIVED,
+         r.MANAGER_NAME
+       FROM TL_REMOTE_WORK_REQUESTS r
+       LEFT JOIN TL_EMPLOYEES e
+         ON LOWER(e.EMAIL) = LOWER(r.EMAIL)
+       WHERE r.REMOTE_WORK_START_DATE <= :ed
+         AND NVL(r.REMOTE_WORK_END_DATE, DATE '2999-12-31') >= :sd
+         AND UPPER(NVL(r.MANAGER_APPROVAL_RECEIVED, 'NO')) IN ('YES', 'APPROVED')${emails && emails.length > 0
+           ? ` AND LOWER(r.EMAIL) IN (${emails.map((_, i) => `:re${i}`).join(',')})`
+           : ''}
+       ORDER BY r.REMOTE_WORK_START_DATE DESC, LOWER(r.EMAIL), r.BAMBOO_ROW_ID DESC`,
+      {
+        sd: startDate,
+        ed: endDate,
+        ...(emails && emails.length > 0
+          ? Object.fromEntries(emails.map((email, i) => [`re${i}`, email.toLowerCase()]))
+          : {}),
+      },
+    ),
   ]);
+
+  const officeEmployeeEmails = [...new Set(
+    empRows
+      .map((employee) => employee.EMAIL?.toLowerCase())
+      .filter((email): email is string => !!email),
+  )];
+
+  const [productivityDailyRows, tbsMapRows] = officeEmployeeEmails.length > 0
+    ? await Promise.all([
+        query<{ EMAIL: string; RECORD_DATE: Date; TOTAL_TIME: number | null }>(
+          `SELECT LOWER(p.EMAIL) AS EMAIL, p.RECORD_DATE, p.TOTAL_TIME
+           FROM TL_PRODUCTIVITY p
+           WHERE p.RECORD_DATE BETWEEN :sd AND :ed
+             AND LOWER(p.EMAIL) IN (${officeEmployeeEmails.map((_, i) => `:pa${i}`).join(',')})`,
+          {
+            sd: startDate,
+            ed: endDate,
+            ...Object.fromEntries(officeEmployeeEmails.map((email, i) => [`pa${i}`, email])),
+          },
+        ),
+        query<{ EMAIL: string; TBS_EMPLOYEE_NO: number }>(
+          `SELECT LOWER(EMAIL) AS EMAIL, TBS_EMPLOYEE_NO
+           FROM TL_TBS_EMPLOYEE_MAP
+           WHERE LOWER(EMAIL) IN (${officeEmployeeEmails.map((_, i) => `:tm${i}`).join(',')})`,
+          Object.fromEntries(officeEmployeeEmails.map((email, i) => [`tm${i}`, email])),
+        ),
+      ])
+    : [[], []];
+
+  const tbsEmployeeNos = [...new Set(
+    tbsMapRows
+      .map((row) => row.TBS_EMPLOYEE_NO)
+      .filter((employeeNo): employeeNo is number => typeof employeeNo === 'number'),
+  )];
+
+  const tbsDailyRows = tbsEmployeeNos.length > 0
+    ? await query<{
+        EMPLOYEE_NO: number;
+        ENTRY_DATE: Date;
+        WORK_CODE: string | null;
+        WORK_DESCRIPTION: string | null;
+        TIME_HOURS: number | null;
+        ENTRY_TYPE: string | null;
+      }>(
+        `SELECT EMPLOYEE_NO, ENTRY_DATE, WORK_CODE, WORK_DESCRIPTION, TIME_HOURS, ENTRY_TYPE
+         FROM TBS_ALL_TIME_ENTRIES_V@TBS_LINK
+         WHERE EMPLOYEE_NO IN (${tbsEmployeeNos.map((_, i) => `:tn${i}`).join(',')})
+           AND ENTRY_DATE BETWEEN :sd AND :ed`,
+        {
+          sd: startDate,
+          ed: endDate,
+          ...Object.fromEntries(tbsEmployeeNos.map((employeeNo, i) => [`tn${i}`, employeeNo])),
+        },
+      )
+    : [];
 
   // --- Index PTO by email|week ---
   const ptoMap = new Map<string, number>();
   const ptoWeekDates = new Map<string, Set<string>>();
   const approvedRemoteWorkEmails = new Set<string>();
+  const approvedRemoteWorkTypesByEmail = new Map<string, Set<string>>();
+  const remoteWorkRequests: AttendanceRemoteWorkRequest[] = [];
 
   // --- Index daily detail by email|week → DayDetail[] ---
   const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const dailyMap = new Map<string, Array<{ date: string; dayLabel: string; location: string; ptoType: string | null }>>();
+  type AttendanceDayAccumulator = {
+    date: string;
+    dayLabel: string;
+    location: string;
+    ptoType: string | null;
+    tbsReportedHours: number;
+    activeHours: number;
+  };
+  const dailyMap = new Map<string, AttendanceDayAccumulator[]>();
+  const tbsToEmail = new Map(tbsMapRows.map((row) => [row.TBS_EMPLOYEE_NO, row.EMAIL.toLowerCase()]));
+  const tbsAbsenceCodes = new Set([
+    'VACATION', 'ILLNESS', 'MISC. ABS./APPTS', 'ALTERNATE DAY',
+    'SICK', 'PERSONAL', 'BEREAVEMENT', 'JURY DUTY',
+  ]);
+
+  const ensureDailyEntry = (email: string, dateInput: Date | string) => {
+    const date = dateInput instanceof Date ? new Date(dateInput) : parseLocalDate(dateInput);
+    const dateStr = toDateStr(date);
+    const dayOfWeek = date.getDay();
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monday = new Date(date);
+    monday.setDate(monday.getDate() + mondayOffset);
+    const wk = toDateStr(monday);
+    const key = `${email}|${wk}`;
+
+    if (!dailyMap.has(key)) dailyMap.set(key, []);
+
+    let entry = dailyMap.get(key)!.find((day) => day.date === dateStr);
+    if (!entry) {
+      entry = {
+        date: dateStr,
+        dayLabel: DAY_LABELS[date.getDay()] || '',
+        location: 'Unknown',
+        ptoType: null,
+        tbsReportedHours: 0,
+        activeHours: 0,
+      };
+      dailyMap.get(key)!.push(entry);
+    }
+
+    return entry;
+  };
+
   for (const r of dailyRows) {
     const email = r.EMAIL?.toLowerCase();
     if (!email) continue;
     const d = r.RECORD_DATE instanceof Date ? r.RECORD_DATE : new Date(r.RECORD_DATE);
-    const dateStr = toDateStr(d);
-    // Compute ISO week start (Monday) using local time (Oracle dates are local)
-    const dayOfWeek = d.getDay(); // 0=Sun, local timezone
-    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-    const monday = new Date(d);
-    monday.setDate(monday.getDate() + mondayOffset);
-    const wk = toDateStr(monday);
-    const key = `${email}|${wk}`;
-    if (!dailyMap.has(key)) dailyMap.set(key, []);
-    // If IS_PTO=1, show as PTO regardless of location
-    const location = r.IS_PTO === 1 ? 'PTO' : (r.LOCATION || 'Unknown');
-    dailyMap.get(key)!.push({
-      date: dateStr,
-      dayLabel: DAY_LABELS[d.getDay()] || '',
-      location,
-      ptoType: r.IS_PTO === 1 ? r.PTO_TYPE : null,
-    });
+    const entry = ensureDailyEntry(email, d);
+    entry.location = r.IS_PTO === 1 ? 'PTO' : (r.LOCATION || 'Unknown');
+    entry.ptoType = r.IS_PTO === 1 ? r.PTO_TYPE : null;
   }
 
   for (const r of ptoDailyRows) {
     const email = r.EMAIL?.toLowerCase();
     if (!email) continue;
-    if ((r.TYPE || '').trim().toLowerCase() === 'alternative work') {
-      approvedRemoteWorkEmails.add(email);
-    }
     const d = r.PTO_DATE instanceof Date ? r.PTO_DATE : new Date(r.PTO_DATE);
     const dateStr = toDateStr(d);
     const dayOfWeek = d.getDay();
@@ -344,22 +551,61 @@ export async function getAttendanceReport(
     monday.setDate(monday.getDate() + mondayOffset);
     const wk = toDateStr(monday);
     const key = `${email}|${wk}`;
-    if (!dailyMap.has(key)) dailyMap.set(key, []);
     if (!ptoWeekDates.has(key)) ptoWeekDates.set(key, new Set());
     ptoWeekDates.get(key)!.add(dateStr);
 
-    const existing = dailyMap.get(key)!.find((day) => day.date === dateStr);
-    if (existing) {
-      existing.location = 'PTO';
-      existing.ptoType = r.TYPE || null;
-    } else {
-      dailyMap.get(key)!.push({
-        date: dateStr,
-        dayLabel: DAY_LABELS[d.getDay()] || '',
-        location: 'PTO',
-        ptoType: r.TYPE || null,
-      });
+    const entry = ensureDailyEntry(email, d);
+    entry.location = 'PTO';
+    entry.ptoType = r.TYPE || null;
+  }
+
+  for (const record of productivityDailyRows) {
+    const email = record.EMAIL?.toLowerCase();
+    if (!email) continue;
+    const entry = ensureDailyEntry(email, record.RECORD_DATE);
+    entry.activeHours = roundHours(Math.max(0, record.TOTAL_TIME || 0));
+  }
+
+  for (const entry of tbsDailyRows) {
+    const email = tbsToEmail.get(entry.EMPLOYEE_NO);
+    if (!email) continue;
+    const desc = (entry.WORK_DESCRIPTION || entry.WORK_CODE || '').toUpperCase().trim();
+    const isAbsence = tbsAbsenceCodes.has(desc) || entry.ENTRY_TYPE === 'C';
+    if (isAbsence) continue;
+
+    const dayEntry = ensureDailyEntry(email, entry.ENTRY_DATE);
+    dayEntry.tbsReportedHours = roundToTenth(dayEntry.tbsReportedHours + Math.max(0, entry.TIME_HOURS || 0));
+  }
+
+  for (const row of remoteWorkRows) {
+    const email = row.EMAIL?.toLowerCase();
+    if (email) {
+      approvedRemoteWorkEmails.add(email);
     }
+    const type = row.REMOTE_WORK_TYPE?.trim();
+    if (email && type) {
+      if (!approvedRemoteWorkTypesByEmail.has(email)) {
+        approvedRemoteWorkTypesByEmail.set(email, new Set());
+      }
+      approvedRemoteWorkTypesByEmail.get(email)!.add(type);
+    }
+    remoteWorkRequests.push({
+      bambooRowId: row.BAMBOO_ROW_ID,
+      employeeId: row.EMPLOYEE_ID,
+      email: email || '',
+      employeeName: row.EMPLOYEE_NAME || email || 'Unknown',
+      department: row.DEPARTMENT || 'Unknown',
+      officeLocation: row.OFFICE_LOCATION || 'Unknown',
+      requestDate: row.REQUEST_DATE ? toDateStr(row.REQUEST_DATE) : null,
+      remoteWorkStartDate: toDateStr(row.REMOTE_WORK_START_DATE),
+      remoteWorkEndDate: row.REMOTE_WORK_END_DATE ? toDateStr(row.REMOTE_WORK_END_DATE) : null,
+      remoteWorkType: row.REMOTE_WORK_TYPE || null,
+      reason: row.REASON || null,
+      supportingDocumentationSubmitted: row.SUPPORTING_DOCUMENTATION_SUBMITTED || null,
+      alternateInOfficeWorkDate: row.ALTERNATE_IN_OFFICE_WORK_DATE || null,
+      managerApprovalReceived: row.MANAGER_APPROVAL_RECEIVED || null,
+      managerName: row.MANAGER_NAME || null,
+    });
   }
 
   for (const [key, days] of ptoWeekDates) {
@@ -371,11 +617,19 @@ export async function getAttendanceReport(
     days.sort((a, b) => a.date.localeCompare(b.date));
   }
 
+  function getRemoteWorkStatusLabel(email: string): string {
+    const types = approvedRemoteWorkTypesByEmail.get(email);
+    if (!types || types.size === 0) {
+      return approvedRemoteWorkEmails.has(email) ? 'Approved Remote Work' : 'Standard Policy';
+    }
+    return `Approved (${[...types].sort((a, b) => a.localeCompare(b)).join(', ')})`;
+  }
+
   // --- Index attendance by employee ---
   const empWeeks = new Map<string, {
-    name: string; department: string; officeLocation: string;
+    name: string; department: string; managerName: string; managerEmail: string | null; officeLocation: string;
     approvedRemoteWorkRequest: boolean;
-    remoteWorkdayPolicyAssigned: boolean;
+    remoteWorkStatusLabel: string;
     weeks: Record<string, WeekCell>;
   }>();
   const employeeMetaByEmail = new Map(
@@ -386,14 +640,17 @@ export async function getAttendanceReport(
     const email = r.EMAIL?.toLowerCase();
     if (!email) continue;
     const wk = toDateStr(r.WEEK_START);
+    const employeeMeta = employeeMetaByEmail.get(email);
 
     if (!empWeeks.has(email)) {
       empWeeks.set(email, {
         name: r.DISPLAY_NAME || email,
-        department: r.DEPARTMENT || 'Unknown',
-        officeLocation: r.OFFICE_LOCATION || 'Unknown',
+        department: employeeMeta?.DEPARTMENT || r.DEPARTMENT || 'Unknown',
+        managerName: employeeMeta?.MANAGER_NAME || 'Unassigned',
+        managerEmail: employeeMeta?.MANAGER_EMAIL || null,
+        officeLocation: employeeMeta?.LOCATION || r.OFFICE_LOCATION || 'Unknown',
         approvedRemoteWorkRequest: approvedRemoteWorkEmails.has(email),
-        remoteWorkdayPolicyAssigned: employeeMetaByEmail.get(email)?.REMOTE_WORKDAY_POLICY_ASSIGNED === 1,
+        remoteWorkStatusLabel: getRemoteWorkStatusLabel(email),
         weeks: {},
       });
     }
@@ -407,6 +664,8 @@ export async function getAttendanceReport(
         dayLabel: dd.dayLabel,
         location: dd.location as 'Office' | 'Remote' | 'PTO' | 'Unknown',
         ptoType: dd.ptoType,
+        tbsReportedHours: dd.tbsReportedHours,
+        activeHours: dd.activeHours,
       })),
     };
   }
@@ -420,9 +679,11 @@ export async function getAttendanceReport(
       empWeeks.set(email, {
         name: employee?.DISPLAY_NAME || email,
         department: employee?.DEPARTMENT || 'Unknown',
+        managerName: employee?.MANAGER_NAME || 'Unassigned',
+        managerEmail: employee?.MANAGER_EMAIL || null,
         officeLocation: employee?.LOCATION || 'Unknown',
         approvedRemoteWorkRequest: approvedRemoteWorkEmails.has(email),
-        remoteWorkdayPolicyAssigned: employee?.REMOTE_WORKDAY_POLICY_ASSIGNED === 1,
+        remoteWorkStatusLabel: getRemoteWorkStatusLabel(email),
         weeks: {},
       });
     }
@@ -438,6 +699,8 @@ export async function getAttendanceReport(
         dayLabel: dd.dayLabel,
         location: dd.location as 'Office' | 'Remote' | 'PTO' | 'Unknown',
         ptoType: dd.ptoType,
+        tbsReportedHours: dd.tbsReportedHours,
+        activeHours: dd.activeHours,
       })),
     };
   }
@@ -449,9 +712,11 @@ export async function getAttendanceReport(
     empWeeks.set(email, {
       name: emp.DISPLAY_NAME || email,
       department: emp.DEPARTMENT || 'Unknown',
+      managerName: emp.MANAGER_NAME || 'Unassigned',
+      managerEmail: emp.MANAGER_EMAIL || null,
       officeLocation: emp.LOCATION || 'Unknown',
       approvedRemoteWorkRequest: approvedRemoteWorkEmails.has(email),
-      remoteWorkdayPolicyAssigned: emp.REMOTE_WORKDAY_POLICY_ASSIGNED === 1,
+      remoteWorkStatusLabel: getRemoteWorkStatusLabel(email),
       weeks: {},
     });
   }
@@ -540,9 +805,11 @@ export async function getAttendanceReport(
       email,
       name: data.name,
       department: data.department,
+      managerName: data.managerName,
+      managerEmail: data.managerEmail,
       officeLocation: data.officeLocation,
       approvedRemoteWorkRequest: data.approvedRemoteWorkRequest,
-      remoteWorkdayPolicyAssigned: data.remoteWorkdayPolicyAssigned,
+      remoteWorkStatusLabel: data.remoteWorkStatusLabel,
       weeks: data.weeks,
       total,
       avgPerWeek: numCompletedWeeks > 0 ? Math.round((completedTotal / numCompletedWeeks) * 10) / 10 : 0,
@@ -568,6 +835,7 @@ export async function getAttendanceReport(
 
   return {
     rows,
+    remoteWorkRequests,
     weeks,
     dataWeeks: completedDataWeeks,
     currentWeek: isCurrentWeekInRange ? currentWeekStr : null,
@@ -632,6 +900,7 @@ export interface TbsComparisonResult {
 export interface WorkingHoursDayRow {
   date: string;
   dayLabel: string;
+  hasActivTrakData: boolean;
   tbsReportedHours: number;
   tbsAbsenceHours: number;
   activeHours: number;
@@ -679,6 +948,7 @@ export interface WorkingHoursEmployeeWeekRow {
   group: string;
   tbsEmployeeNo: number | null;
   weekStart: string;
+  hasActivTrakData: boolean;
   tbsReportedHours: number;
   tbsAbsenceHours: number;
   activeHours: number;
@@ -731,6 +1001,7 @@ interface WorkingHoursEmployeeAccumulator extends WorkingHoursMetricAccumulator 
   group: string;
   tbsEmployeeNo: number | null;
   weekStart: string;
+  hasActivTrakData: boolean;
   days: Map<string, WorkingHoursDayRow>;
 }
 
@@ -1227,6 +1498,7 @@ export async function getWorkingHoursReport(
     weekSet.add(weekStart);
     if (tbsEmployeeNo !== null) employeeNoSet.add(tbsEmployeeNo);
 
+    row.hasActivTrakData = true;
     row.activeSeconds += Math.max(0, record.TOTAL_TIME || 0);
     row.productiveActiveSeconds += Math.max(0, record.PRODUCTIVE_ACTIVE_TIME || 0);
     row.productivePassiveSeconds += Math.max(0, record.PRODUCTIVE_PASSIVE_TIME || 0);
@@ -1234,6 +1506,7 @@ export async function getWorkingHoursReport(
     row.undefinedPassiveSeconds += Math.max(0, record.UNDEFINED_PASSIVE_TIME || 0);
     row.unproductiveActiveSeconds += Math.max(0, record.UNPRODUCTIVE_ACTIVE_TIME || 0);
 
+    day.hasActivTrakData = true;
     day.activeHours = roundHours(Math.max(0, record.TOTAL_TIME || 0));
     day.activeInputHours = roundHours(Math.max(0, record.ACTIVE_TIME || 0));
     day.productiveActiveHours = roundHours(Math.max(0, record.PRODUCTIVE_ACTIVE_TIME || 0));
@@ -1317,6 +1590,7 @@ export async function getWorkingHoursReport(
       group: employee.group,
       tbsEmployeeNo: employee.tbsEmployeeNo,
       weekStart: employee.weekStart,
+      hasActivTrakData: employee.hasActivTrakData,
       tbsReportedHours: roundHours(employee.tbsReportedSeconds),
       tbsAbsenceHours: roundHours(employee.tbsAbsenceSeconds),
       activeHours: roundHours(employee.activeSeconds),
@@ -1440,6 +1714,7 @@ function getOrCreateWorkingHoursEmployee(
       group: seed.group,
       tbsEmployeeNo: seed.tbsEmployeeNo,
       weekStart: seed.weekStart,
+      hasActivTrakData: false,
       tbsReportedSeconds: 0,
       tbsAbsenceSeconds: 0,
       activeSeconds: 0,
@@ -1465,6 +1740,7 @@ function getOrCreateWorkingHoursDay(
     day = {
       date: dateStr,
       dayLabel: getDayLabel(dateStr),
+      hasActivTrakData: false,
       tbsReportedHours: 0,
       tbsAbsenceHours: 0,
       activeHours: 0,
@@ -1518,6 +1794,11 @@ function toDateStr(d: Date | string): string {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+function parseLocalDate(dateStr: string): Date {
+  const [year, month, day] = dateStr.slice(0, 10).split('-').map(Number);
+  return new Date(year, (month || 1) - 1, day || 1);
 }
 
 function formatOracleTimestamp(value: Date | string | null): string | null {

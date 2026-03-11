@@ -1,4 +1,5 @@
 .next
+.next*/
 node_modules
 npm-debug.log*
 yarn-debug.log*
@@ -16,3 +17,5 @@ coverage
 *.tsbuildinfo
 *.tar
 .claude/
+.playwright-cli/
+output/

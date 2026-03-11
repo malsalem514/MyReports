@@ -1,3 +1,4 @@
+import { redirect } from 'next/navigation';
 import { query, execute } from './oracle';
 import type { AccessContext } from './access';
 
@@ -9,7 +10,7 @@ export const TAB_KEYS = [
   'office-attendance',
   'timesheet-compare',
   'working-hours',
-  'report-builder',
+  'bamboo-not-in-activtrak',
 ] as const;
 
 export type TabKey = (typeof TAB_KEYS)[number];
@@ -19,6 +20,7 @@ export type TabKey = (typeof TAB_KEYS)[number];
 // ============================================================================
 
 export function resolveRole(access: AccessContext): string {
+  if (access.isRootAdmin) return 'root-admin';
   if (access.isHRAdmin) return 'hr-admin';
   if (access.isDirector) return 'director';
   if (access.isManager) return 'manager';
@@ -44,8 +46,9 @@ interface TabOverrideRow {
 // Hardcoded fallbacks when tables don't exist yet (before first sync/schema init)
 const FALLBACK_ROLES: Record<string, TabKey[]> = {
   'hr-admin': [...TAB_KEYS],
-  'director': ['office-attendance', 'timesheet-compare', 'working-hours', 'report-builder'],
-  'manager': ['office-attendance', 'timesheet-compare', 'working-hours', 'report-builder'],
+  'root-admin': [...TAB_KEYS],
+  'director': ['office-attendance', 'timesheet-compare', 'working-hours'],
+  'manager': ['office-attendance', 'timesheet-compare', 'working-hours'],
   'employee': ['office-attendance'],
 };
 
@@ -61,6 +64,10 @@ export async function getVisibleTabs(
 ): Promise<TabKey[]> {
   const role = resolveRole(access);
   const normalizedEmail = email.toLowerCase().trim();
+
+  if (access.isRootAdmin) {
+    return [...TAB_KEYS];
+  }
 
   let roleDefaults: TabRoleRow[];
   let overrides: TabOverrideRow[];
@@ -108,6 +115,21 @@ export async function getVisibleTabs(
 
   // Return only visible tabs, preserving TAB_KEYS order
   return TAB_KEYS.filter((key) => visibility.get(key) === true);
+}
+
+export async function requireVisibleTab(
+  email: string,
+  access: AccessContext,
+  tabKey: TabKey,
+): Promise<void> {
+  if (access.isRootAdmin) {
+    return;
+  }
+
+  const visibleTabs = await getVisibleTabs(email, access);
+  if (!visibleTabs.includes(tabKey)) {
+    redirect('/dashboard');
+  }
 }
 
 /** All role×tab rows (for admin UI) */

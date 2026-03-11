@@ -1,24 +1,10 @@
 import { getAccessContext } from '@/lib/access';
-import { getVisibleTabs, type TabKey } from '@/lib/tab-config';
+import { getVisibleTabs } from '@/lib/tab-config';
+import { buildDashboardNavItems, DASHBOARD_TAB_ROUTES } from '@/lib/dashboard-nav-config';
 import { DashboardNav } from './dashboard-nav';
 import { redirect } from 'next/navigation';
 import { headers } from 'next/headers';
 import type { ReactNode } from 'react';
-
-// Tab key → route path mapping
-const TAB_ROUTES: Record<TabKey, string> = {
-  'office-attendance': '/dashboard/office-attendance',
-  'timesheet-compare': '/dashboard/timesheet-compare',
-  'working-hours': '/dashboard/working-hours',
-  'report-builder': '/dashboard/report-builder',
-};
-
-const TAB_LABELS: Record<TabKey, string> = {
-  'office-attendance': 'Office Attendance',
-  'timesheet-compare': 'TBS Compare',
-  'working-hours': 'Working Hours',
-  'report-builder': 'Report Builder',
-};
 
 export default async function DashboardLayout({ children }: { children: ReactNode }) {
   const access = await getAccessContext();
@@ -27,28 +13,19 @@ export default async function DashboardLayout({ children }: { children: ReactNod
   }
 
   const visibleTabs = await getVisibleTabs(access.userEmail, access);
-
-  const navItems: Array<{ key: string; path: string; label: string }> = visibleTabs.map((key) => ({
-    key,
-    path: TAB_ROUTES[key],
-    label: TAB_LABELS[key],
-  }));
-
-  // Add Admin link for HR admins (hardcoded, not configurable)
-  if (access.isHRAdmin) {
-    navItems.push({ key: 'admin', path: '/dashboard/admin', label: 'Admin' });
-  }
-
-  // Employee search is available to all authenticated users.
-  navItems.push({ key: 'search', path: '/dashboard/search', label: 'Employee Search' });
+  const navItems = buildDashboardNavItems(visibleTabs, { isHRAdmin: access.isRootAdmin || access.isHRAdmin });
 
   // Protect hidden routes: redirect if current path is not in visible tabs
   const headersList = await headers();
-  const fullUrl = headersList.get('x-url') || headersList.get('x-invoke-path') || '';
+  const fullUrl =
+    headersList.get('next-url') ||
+    headersList.get('x-url') ||
+    headersList.get('x-invoke-path') ||
+    '';
   const pathname = fullUrl ? new URL(fullUrl, 'http://localhost').pathname : '';
 
   if (pathname && pathname !== '/dashboard/admin') {
-    const allowedPaths = new Set(visibleTabs.map((k) => TAB_ROUTES[k]));
+    const allowedPaths = new Set(visibleTabs.map((k) => DASHBOARD_TAB_ROUTES[k]));
     // Also allow sub-paths like /dashboard/employee/[email]
     const isAllowed =
       allowedPaths.has(pathname) ||

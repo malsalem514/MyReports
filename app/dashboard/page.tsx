@@ -1,13 +1,7 @@
 import { redirect } from 'next/navigation';
 import { getAccessContext } from '@/lib/access';
-import { getVisibleTabs, type TabKey } from '@/lib/tab-config';
-
-const TAB_ROUTES: Record<TabKey, string> = {
-  'office-attendance': '/dashboard/office-attendance',
-  'timesheet-compare': '/dashboard/timesheet-compare',
-  'working-hours': '/dashboard/working-hours',
-  'report-builder': '/dashboard/report-builder',
-};
+import { getVisibleTabs } from '@/lib/tab-config';
+import { DASHBOARD_TAB_ROUTES } from '@/lib/dashboard-nav-config';
 
 export default async function DashboardPage() {
   const access = await getAccessContext();
@@ -18,7 +12,7 @@ export default async function DashboardPage() {
   const visibleTabs = await getVisibleTabs(access.userEmail, access);
   const firstTab = visibleTabs[0];
   if (firstTab) {
-    redirect(TAB_ROUTES[firstTab]);
+    redirect(DASHBOARD_TAB_ROUTES[firstTab]);
   }
 
   redirect('/dashboard/search');

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@/auth';
+import { isAdminEmail } from '@/lib/admin';
 import { query as oracleQuery } from '@/lib/oracle';
 import { getBigQueryClient } from '@/lib/bigquery';
 
@@ -85,10 +86,14 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  // Deep diagnostic exposes internal error messages — require an authenticated session.
+  // Deep diagnostic exposes internal error messages — restrict to admins.
   const session = await auth();
-  if (!session?.user?.email) {
+  const email = session?.user?.email?.toLowerCase() || '';
+  if (!email) {
     return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+  }
+  if (!isAdminEmail(email)) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
   const [oracleResult, bigQueryResult, bambooResult] = await Promise.all([

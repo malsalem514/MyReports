@@ -1,21 +1,12 @@
 import { cache } from 'react';
 import { auth } from '@/auth';
 import { getDevBypassEmail } from './dev-bypass';
+import { isAdminEmail, isRootAdminEmail } from './admin';
 import {
   fetchEmployeeDirectory,
   fetchReportingStructure,
   type BambooHREmployee,
 } from './bamboohr';
-
-// ============================================================================
-// Configuration
-// ============================================================================
-
-const HR_ADMIN_EMAILS = [
-  'hr@jestais.com',
-  'malsalem@jestais.com',
-  'iferber@jestais.com',
-];
 
 // ============================================================================
 // Types
@@ -26,6 +17,7 @@ export interface AccessContext {
   employeeId: string | null;
   employeeName: string | null;
   department: string | null;
+  isRootAdmin: boolean;
   isHRAdmin: boolean;
   isDirector: boolean;
   isManager: boolean;
@@ -74,6 +66,7 @@ export const getAccessContext = cache(async (): Promise<AccessContext> => {
       employeeId: null,
       employeeName: null,
       department: null,
+      isRootAdmin: false,
       isHRAdmin: false,
       isDirector: false,
       isManager: false,
@@ -89,12 +82,11 @@ export async function getAccessContextByEmail(
   userEmail: string,
 ): Promise<AccessContext> {
   const normalizedEmail = userEmail.toLowerCase().trim();
-  const isHRAdmin = HR_ADMIN_EMAILS.some(
-    (admin) => admin.toLowerCase() === normalizedEmail,
-  );
+  const isRootAdmin = isRootAdminEmail(normalizedEmail);
+  const hasAdminAccess = isAdminEmail(normalizedEmail);
 
-  // HR-admin access must not depend on external directory availability.
-  if (isHRAdmin) {
+  // Root and HR-admin access must not depend on external directory availability.
+  if (hasAdminAccess) {
     try {
       const allEmployees = await fetchEmployeeDirectory();
       const allEmails = allEmployees
@@ -103,8 +95,9 @@ export async function getAccessContextByEmail(
       return {
         userEmail: normalizedEmail,
         employeeId: null,
-        employeeName: 'HR Admin',
+        employeeName: isRootAdmin ? 'Root Admin' : 'HR Admin',
         department: null,
+        isRootAdmin,
         isHRAdmin: true,
         isDirector: true,
         isManager: true,
@@ -117,8 +110,9 @@ export async function getAccessContextByEmail(
       return {
         userEmail: normalizedEmail,
         employeeId: null,
-        employeeName: 'HR Admin',
+        employeeName: isRootAdmin ? 'Root Admin' : 'HR Admin',
         department: null,
+        isRootAdmin,
         isHRAdmin: true,
         isDirector: true,
         isManager: true,
@@ -142,6 +136,7 @@ export async function getAccessContextByEmail(
         employeeId: null,
         employeeName: null,
         department: null,
+        isRootAdmin: false,
         isHRAdmin: false,
         isDirector: false,
         isManager: false,
@@ -178,6 +173,7 @@ export async function getAccessContextByEmail(
       employeeId: currentUser.id,
       employeeName: userName,
       department: currentUser.department ?? null,
+      isRootAdmin: false,
       isHRAdmin: false,
       isDirector: diagnostics.isDirector,
       isManager: reports.length > 0,
@@ -192,6 +188,7 @@ export async function getAccessContextByEmail(
       employeeId: null,
       employeeName: null,
       department: null,
+      isRootAdmin: false,
       isHRAdmin: false,
       isDirector: false,
       isManager: false,
@@ -207,23 +204,24 @@ export async function getAccessContextByEmail(
 // ============================================================================
 
 export function getAccessLevel(context: AccessContext): AccessLevel {
-  if (context.isHRAdmin) return 'all';
+  if (context.isRootAdmin || context.isHRAdmin) return 'all';
   if ((context.isDirector || context.isManager) && context.totalReportCount > 0) return 'team';
   if (context.employeeId) return 'self';
   return 'none';
 }
 
 export function canAccessEmployee(context: AccessContext, targetEmail: string): boolean {
-  if (context.isHRAdmin) return true;
+  if (context.isRootAdmin || context.isHRAdmin) return true;
   return context.allowedEmails.includes(targetEmail.toLowerCase());
 }
 
-export function filterAccessibleEmails(context: AccessContext, emails: string[]): string[] {
-  if (context.isHRAdmin) return emails;
-  const allowedSet = new Set(context.allowedEmails);
-  return emails.filter((email) => allowedSet.has(email.toLowerCase()));
+export function getScopedReportEmails(context: AccessContext): string[] | undefined {
+  if (context.isRootAdmin || context.isHRAdmin) return undefined;
+  return context.allowedEmails;
 }
 
-export function isHRAdminEmail(email: string): boolean {
-  return HR_ADMIN_EMAILS.some((admin) => admin.toLowerCase() === email.toLowerCase().trim());
+export function filterAccessibleEmails(context: AccessContext, emails: string[]): string[] {
+  if (context.isRootAdmin || context.isHRAdmin) return emails;
+  const allowedSet = new Set(context.allowedEmails);
+  return emails.filter((email) => allowedSet.has(email.toLowerCase()));
 }

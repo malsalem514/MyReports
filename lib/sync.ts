@@ -1,4 +1,4 @@
-import { fetchActiveEmployees, fetchTimeOffRequests } from './bamboohr';
+import { fetchActiveEmployees, fetchRemoteWorkRequests, fetchTimeOffRequests } from './bamboohr';
 import { fetchOfficeAttendanceData, fetchProductivityData } from './bigquery';
 import { execute, executeMany, initializeSchema } from './oracle';
 
@@ -10,6 +10,7 @@ export interface SyncSummary {
   attendanceSynced: number;
   productivitySynced: number;
   timeOffSynced: number;
+  remoteWorkRequestsSynced: number;
   tbsMapped: number;
   errors: string[];
 }
@@ -90,6 +91,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
   let attendanceSynced = 0;
   let productivitySynced = 0;
   let timeOffSynced = 0;
+  let remoteWorkRequestsSynced = 0;
   let tbsMapped = 0;
 
   try {
@@ -107,6 +109,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
         DIVISION: emp.division || null,
         LOCATION: emp.location || null,
         SUPERVISOR_ID: emp.supervisorId || emp.supervisorEId || null,
+        SUPERVISOR_NAME: emp.supervisor || null,
         SUPERVISOR_EMAIL: emp.supervisorEmail?.toLowerCase() || null,
         HIRE_DATE: emp.hireDate ? parseDateOnly(emp.hireDate) : null,
         STATUS: emp.status || emp.employmentStatus || null,
@@ -128,6 +131,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
            :DIVISION AS DIVISION,
            :LOCATION AS LOCATION,
            :SUPERVISOR_ID AS SUPERVISOR_ID,
+           :SUPERVISOR_NAME AS SUPERVISOR_NAME,
            :SUPERVISOR_EMAIL AS SUPERVISOR_EMAIL,
            :HIRE_DATE AS HIRE_DATE,
            :STATUS AS STATUS,
@@ -145,6 +149,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
            t.DIVISION = s.DIVISION,
            t.LOCATION = s.LOCATION,
            t.SUPERVISOR_ID = s.SUPERVISOR_ID,
+           t.SUPERVISOR_NAME = s.SUPERVISOR_NAME,
            t.SUPERVISOR_EMAIL = s.SUPERVISOR_EMAIL,
            t.HIRE_DATE = s.HIRE_DATE,
            t.STATUS = s.STATUS,
@@ -153,11 +158,11 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
            t.UPDATED_AT = CURRENT_TIMESTAMP
          WHEN NOT MATCHED THEN INSERT (
            ID, EMAIL, DISPLAY_NAME, FIRST_NAME, LAST_NAME, JOB_TITLE,
-           DEPARTMENT, DIVISION, LOCATION, SUPERVISOR_ID, SUPERVISOR_EMAIL,
+           DEPARTMENT, DIVISION, LOCATION, SUPERVISOR_ID, SUPERVISOR_NAME, SUPERVISOR_EMAIL,
            HIRE_DATE, STATUS, PHOTO_URL, REMOTE_WORKDAY_POLICY_ASSIGNED
          ) VALUES (
            s.ID, s.EMAIL, s.DISPLAY_NAME, s.FIRST_NAME, s.LAST_NAME, s.JOB_TITLE,
-           s.DEPARTMENT, s.DIVISION, s.LOCATION, s.SUPERVISOR_ID, s.SUPERVISOR_EMAIL,
+           s.DEPARTMENT, s.DIVISION, s.LOCATION, s.SUPERVISOR_ID, s.SUPERVISOR_NAME, s.SUPERVISOR_EMAIL,
            s.HIRE_DATE, s.STATUS, s.PHOTO_URL, s.REMOTE_WORKDAY_POLICY_ASSIGNED
          )`,
         employeeBinds,
@@ -383,6 +388,82 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     errors.push(`Time-off sync failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  try {
+    const remoteWorkRequests = await fetchRemoteWorkRequests();
+    const remoteWorkBinds = remoteWorkRequests
+      .filter((row) => row.rowId && row.employeeId && row.remoteWorkStartDate)
+      .map((row) => ({
+        BAMBOO_ROW_ID: Number(row.rowId),
+        EMPLOYEE_ID: row.employeeId,
+        EMAIL: row.employeeEmail?.toLowerCase() || null,
+        EMPLOYEE_NAME: row.employeeName || null,
+        DEPARTMENT: row.department || null,
+        REQUEST_DATE: row.requestDate ? parseDateOnly(row.requestDate) : null,
+        REMOTE_WORK_START_DATE: parseDateOnly(row.remoteWorkStartDate),
+        REMOTE_WORK_END_DATE: row.remoteWorkEndDate ? parseDateOnly(row.remoteWorkEndDate) : null,
+        REMOTE_WORK_TYPE: row.remoteWorkType || null,
+        REASON: row.reason || null,
+        SUPPORTING_DOCUMENTATION_SUBMITTED: row.supportingDocumentationSubmitted || null,
+        ALTERNATE_IN_OFFICE_WORK_DATE: row.alternateInOfficeWorkDate || null,
+        MANAGER_APPROVAL_RECEIVED: row.managerApprovalReceived || null,
+        MANAGER_NAME: row.managerName || null,
+      }));
+
+    if (remoteWorkBinds.length > 0) {
+      await executeMany(
+        `MERGE INTO TL_REMOTE_WORK_REQUESTS t
+         USING (SELECT
+           :BAMBOO_ROW_ID AS BAMBOO_ROW_ID,
+           :EMPLOYEE_ID AS EMPLOYEE_ID,
+           :EMAIL AS EMAIL,
+           :EMPLOYEE_NAME AS EMPLOYEE_NAME,
+           :DEPARTMENT AS DEPARTMENT,
+           :REQUEST_DATE AS REQUEST_DATE,
+           :REMOTE_WORK_START_DATE AS REMOTE_WORK_START_DATE,
+           :REMOTE_WORK_END_DATE AS REMOTE_WORK_END_DATE,
+           :REMOTE_WORK_TYPE AS REMOTE_WORK_TYPE,
+           :REASON AS REASON,
+           :SUPPORTING_DOCUMENTATION_SUBMITTED AS SUPPORTING_DOCUMENTATION_SUBMITTED,
+           :ALTERNATE_IN_OFFICE_WORK_DATE AS ALTERNATE_IN_OFFICE_WORK_DATE,
+           :MANAGER_APPROVAL_RECEIVED AS MANAGER_APPROVAL_RECEIVED,
+           :MANAGER_NAME AS MANAGER_NAME
+         FROM DUAL) s
+         ON (t.BAMBOO_ROW_ID = s.BAMBOO_ROW_ID)
+         WHEN MATCHED THEN UPDATE SET
+           t.EMPLOYEE_ID = s.EMPLOYEE_ID,
+           t.EMAIL = s.EMAIL,
+           t.EMPLOYEE_NAME = s.EMPLOYEE_NAME,
+           t.DEPARTMENT = s.DEPARTMENT,
+           t.REQUEST_DATE = s.REQUEST_DATE,
+           t.REMOTE_WORK_START_DATE = s.REMOTE_WORK_START_DATE,
+           t.REMOTE_WORK_END_DATE = s.REMOTE_WORK_END_DATE,
+           t.REMOTE_WORK_TYPE = s.REMOTE_WORK_TYPE,
+           t.REASON = s.REASON,
+           t.SUPPORTING_DOCUMENTATION_SUBMITTED = s.SUPPORTING_DOCUMENTATION_SUBMITTED,
+           t.ALTERNATE_IN_OFFICE_WORK_DATE = s.ALTERNATE_IN_OFFICE_WORK_DATE,
+           t.MANAGER_APPROVAL_RECEIVED = s.MANAGER_APPROVAL_RECEIVED,
+           t.MANAGER_NAME = s.MANAGER_NAME,
+           t.UPDATED_AT = CURRENT_TIMESTAMP
+         WHEN NOT MATCHED THEN INSERT (
+           BAMBOO_ROW_ID, EMPLOYEE_ID, EMAIL, EMPLOYEE_NAME, DEPARTMENT,
+           REQUEST_DATE, REMOTE_WORK_START_DATE, REMOTE_WORK_END_DATE, REMOTE_WORK_TYPE,
+           REASON, SUPPORTING_DOCUMENTATION_SUBMITTED, ALTERNATE_IN_OFFICE_WORK_DATE,
+           MANAGER_APPROVAL_RECEIVED, MANAGER_NAME
+         ) VALUES (
+           s.BAMBOO_ROW_ID, s.EMPLOYEE_ID, s.EMAIL, s.EMPLOYEE_NAME, s.DEPARTMENT,
+           s.REQUEST_DATE, s.REMOTE_WORK_START_DATE, s.REMOTE_WORK_END_DATE, s.REMOTE_WORK_TYPE,
+           s.REASON, s.SUPPORTING_DOCUMENTATION_SUBMITTED, s.ALTERNATE_IN_OFFICE_WORK_DATE,
+           s.MANAGER_APPROVAL_RECEIVED, s.MANAGER_NAME
+         )`,
+        remoteWorkBinds,
+      );
+    }
+
+    remoteWorkRequestsSynced = remoteWorkBinds.length;
+  } catch (error) {
+    errors.push(`Remote work request sync failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   // Step 4: Auto-map BambooHR employees to TBS employee numbers
   try {
     tbsMapped = await syncTbsEmployeeMap();
@@ -396,6 +477,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     attendanceSynced +
     productivitySynced +
     timeOffSynced +
+    remoteWorkRequestsSynced +
     tbsMapped;
 
   try {
@@ -429,6 +511,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     attendanceSynced,
     productivitySynced,
     timeOffSynced,
+    remoteWorkRequestsSynced,
     tbsMapped,
     errors,
   };

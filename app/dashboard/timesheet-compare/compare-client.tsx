@@ -322,9 +322,9 @@ export function CompareClient({ rows, weeks, departments, summary, unmappedEmail
 
       {/* Table */}
       <div className="rounded-xl border border-gray-200 bg-white">
-        <div className="overflow-x-auto">
+        <div className="max-h-[70vh] overflow-auto">
           <table className="w-full border-collapse">
-            <thead>
+            <thead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:bg-white/95 [&_th]:backdrop-blur">
               <tr className="border-b border-gray-100">
                 <th
                   className="sticky left-0 z-10 cursor-pointer select-none whitespace-nowrap bg-white px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900"

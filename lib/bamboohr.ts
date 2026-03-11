@@ -92,6 +92,39 @@ export interface PTORecord {
   unit: string;
 }
 
+export const RemoteWorkRequestSchema = z.object({
+  id: z.union([z.string(), z.number()]).transform((value) => String(value)),
+  employeeId: z.union([z.string(), z.number()]).transform((value) => String(value)),
+  customRemoteWorkStartDate: z.string().optional().nullable(),
+  customRemoteWorkEndDate: z.string().optional().nullable(),
+  customReason1: z.string().optional().nullable(),
+  customAlternateInOfficeWorkDate: z.string().optional().nullable(),
+  customManagerApprovalReceived: z.string().optional().nullable(),
+  customManagerName: z.string().optional().nullable(),
+  customRequestDate1: z.string().optional().nullable(),
+  customRemoteWorkType: z.string().optional().nullable(),
+  customSupportingDocumentationSubmitted: z.string().optional().nullable(),
+});
+
+export type RemoteWorkRequest = z.infer<typeof RemoteWorkRequestSchema>;
+
+export interface RemoteWorkRequestRecord {
+  rowId: string;
+  employeeId: string;
+  employeeEmail: string;
+  employeeName: string;
+  department: string;
+  requestDate: string | null;
+  remoteWorkStartDate: string;
+  remoteWorkEndDate: string | null;
+  remoteWorkType: string | null;
+  reason: string | null;
+  supportingDocumentationSubmitted: string | null;
+  alternateInOfficeWorkDate: string | null;
+  managerApprovalReceived: string | null;
+  managerName: string | null;
+}
+
 // ============================================================================
 // API Client
 // ============================================================================
@@ -315,6 +348,69 @@ export async function fetchPTOByEmployee(
     map.set(record.employeeEmail, existing);
   }
   return map;
+}
+
+// ============================================================================
+// Remote Work Requests
+// ============================================================================
+
+const REMOTE_WORK_REQUESTS_TABLE =
+  'customRemoteWorkRequestonScheduledOfficeDayApprovalRequired';
+
+async function _fetchRemoteWorkRequestsUncached(): Promise<RemoteWorkRequestRecord[]> {
+  const data = await bambooFetch<unknown[]>(
+    `/employees/all/tables/${REMOTE_WORK_REQUESTS_TABLE}`,
+  );
+
+  const employees = await fetchEmployeeDirectory();
+  const employeeMap = new Map(employees.map((employee) => [employee.id, employee]));
+  const records: RemoteWorkRequestRecord[] = [];
+
+  for (const item of data || []) {
+    try {
+      const request = RemoteWorkRequestSchema.parse(item);
+      if (!request.customRemoteWorkStartDate) continue;
+      const employee = employeeMap.get(request.employeeId);
+      records.push({
+        rowId: request.id,
+        employeeId: request.employeeId,
+        employeeEmail: employee?.workEmail?.toLowerCase() || '',
+        employeeName:
+          employee?.displayName ||
+          `${employee?.firstName || ''} ${employee?.lastName || ''}`.trim() ||
+          '',
+        department: employee?.department || 'Unknown',
+        requestDate: request.customRequestDate1 || null,
+        remoteWorkStartDate: request.customRemoteWorkStartDate,
+        remoteWorkEndDate: request.customRemoteWorkEndDate || null,
+        remoteWorkType: request.customRemoteWorkType || null,
+        reason: request.customReason1 || null,
+        supportingDocumentationSubmitted:
+          request.customSupportingDocumentationSubmitted || null,
+        alternateInOfficeWorkDate: request.customAlternateInOfficeWorkDate || null,
+        managerApprovalReceived: request.customManagerApprovalReceived || null,
+        managerName: request.customManagerName || null,
+      });
+    } catch (error) {
+      console.warn('Invalid remote work request:', item, error);
+    }
+  }
+
+  return records;
+}
+
+export async function fetchRemoteWorkRequests(): Promise<RemoteWorkRequestRecord[]> {
+  try {
+    return await cachified({
+      key: 'bamboohr:remote-work-requests',
+      ttl: 1000 * 60 * 5,
+      staleWhileRevalidate: 1000 * 60 * 15,
+      getFreshValue: _fetchRemoteWorkRequestsUncached,
+    });
+  } catch (error) {
+    console.error('Failed to fetch remote work requests:', error);
+    return [];
+  }
 }
 
 // ============================================================================

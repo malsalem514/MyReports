@@ -41,7 +41,7 @@ export async function validateAttendanceData(
   endDateParam: string,
 ): Promise<ValidationResult> {
   const access = await getAccessContext();
-  if (!access.isHRAdmin) throw new Error('HR Admin access required');
+  if (!access.isRootAdmin && !access.isHRAdmin) throw new Error('Admin access required');
 
   const startDate = new Date(`${startDateParam}T00:00:00`);
   const endDate = new Date(`${endDateParam}T23:59:59.999`);

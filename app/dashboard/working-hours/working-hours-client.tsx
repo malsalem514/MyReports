@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   WorkingHoursDayRow,
   WorkingHoursEmployeeWeekRow,
@@ -178,6 +178,62 @@ function workedVsColor(value: number | null): string {
   return 'text-amber-700';
 }
 
+function getVarianceCellStyle(value: number | null): {
+  className: string;
+  style?: CSSProperties;
+} {
+  if (value === null) {
+    return { className: 'text-gray-400 bg-transparent' };
+  }
+
+  const clamped = Math.max(-100, Math.min(100, value));
+  const normalized = (clamped + 100) / 200;
+  const hue = normalized * 120;
+
+  return {
+    className: `rounded-md ${workedVsColor(value)}`,
+    style: {
+      backgroundColor: `hsl(${hue} 72% 88%)`,
+    },
+  };
+}
+
+function getAbsenceCellStyle(value: number): {
+  className: string;
+} {
+  if (value <= 0) {
+    return { className: 'text-gray-700 bg-transparent' };
+  }
+
+  return {
+    className: 'rounded-md bg-sky-100 text-sky-800',
+  };
+}
+
+function getReportedCellStyle(value: number): {
+  className: string;
+} {
+  if (value <= 0) {
+    return { className: 'text-gray-700 bg-transparent' };
+  }
+
+  return {
+    className: 'rounded-md bg-emerald-100 text-emerald-800',
+  };
+}
+
+function getApprovedLeaveCellStyle(value: string): {
+  className: string;
+} {
+  if (!value || value === '—') {
+    return { className: 'text-gray-700 bg-transparent' };
+  }
+
+  return {
+    className: 'rounded-md bg-violet-100 text-violet-800',
+  };
+}
+
 function formatWeekLabel(weekStart: string): string {
   const start = new Date(`${weekStart}T00:00:00`);
   const end = new Date(start);
@@ -251,6 +307,7 @@ export function WorkingHoursClient({
   const [selectedEmployeeNo, setSelectedEmployeeNo] = useState('all');
   const [selectedUser, setSelectedUser] = useState('all');
   const [selectedWeek, setSelectedWeek] = useState('all');
+  const [includeNonActivTrak, setIncludeNonActivTrak] = useState(false);
   const [search, setSearch] = useState('');
   const [expandedWeeks, setExpandedWeeks] = useState<ExpandedWeeks>({});
   const [detail, setDetail] = useState<DetailState | null>(null);
@@ -275,6 +332,7 @@ export function WorkingHoursClient({
             if (selectedGroup !== 'all' && employee.group !== selectedGroup) return false;
             if (selectedUser !== 'all' && employee.name !== selectedUser) return false;
             if (selectedEmployeeNo !== 'all' && String(employee.tbsEmployeeNo ?? '') !== selectedEmployeeNo) return false;
+            if (!includeNonActivTrak && !employee.hasActivTrakData) return false;
             if (!query) return true;
             return (
               employee.name.toLowerCase().includes(query) ||
@@ -318,7 +376,7 @@ export function WorkingHoursClient({
         };
       })
       .filter((week): week is WeekWithMeta => week !== null);
-  }, [weeks, selectedEmployeeNo, selectedGroup, selectedUser, selectedWeek, search]);
+  }, [includeNonActivTrak, weeks, selectedEmployeeNo, selectedGroup, selectedUser, selectedWeek, search]);
 
   const flatEmployees = useMemo(
     () => filteredWeeks.flatMap((week) => week.employees.map((employee) => ({ week: week.weekStart, employee }))),
@@ -351,7 +409,8 @@ export function WorkingHoursClient({
     selectedGroup !== 'all' ||
     selectedEmployeeNo !== 'all' ||
     selectedUser !== 'all' ||
-    selectedWeek !== 'all';
+    selectedWeek !== 'all' ||
+    includeNonActivTrak;
 
   const toggleWeek = (weekStart: string) => {
     setExpandedWeeks((current) => ({ ...current, [weekStart]: !current[weekStart] }));
@@ -363,6 +422,7 @@ export function WorkingHoursClient({
     setSelectedEmployeeNo('all');
     setSelectedUser('all');
     setSelectedWeek('all');
+    setIncludeNonActivTrak(false);
   };
 
   useEffect(() => {
@@ -797,7 +857,7 @@ export function WorkingHoursClient({
         </div>
       </div>
 
-      <div className="grid gap-3 rounded-xl border border-gray-200 bg-white p-4 lg:grid-cols-6">
+      <div className="grid gap-3 rounded-xl border border-gray-200 bg-white p-4 lg:grid-cols-7">
         <div className="lg:col-span-2">
           <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Search</label>
           <input
@@ -859,6 +919,17 @@ export function WorkingHoursClient({
             ))}
           </select>
         </div>
+        <div>
+          <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">ActivTrak Coverage</label>
+          <select
+            value={includeNonActivTrak ? 'include' : 'exclude'}
+            onChange={(event) => setIncludeNonActivTrak(event.target.value === 'include')}
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] focus:border-gray-300 focus:outline-none"
+          >
+            <option value="exclude">Exclude Non-ActivTrak</option>
+            <option value="include">Include Non-ActivTrak</option>
+          </select>
+        </div>
       </div>
 
       {hasFilters && (
@@ -874,9 +945,9 @@ export function WorkingHoursClient({
       )}
 
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
-        <div className="overflow-x-auto">
+        <div className="max-h-[70vh] overflow-auto">
           <table className="min-w-full border-collapse">
-            <thead className="sticky top-0 z-20 bg-gray-50/95 backdrop-blur">
+            <thead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:bg-gray-50/95 [&_th]:backdrop-blur">
               <tr className="border-b border-gray-200">
                 <th className="sticky left-0 z-30 bg-gray-50/95 px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">
                   Activity Week
@@ -1204,10 +1275,10 @@ function DetailPanel({
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
               <DayInfo label="Scope" value={scopeSummary.scopeLabel} />
-              <DayInfo label="TBS Reported" value={formatHours(scopeSummary.tbsReportedHours)} />
-              <DayInfo label="TBS Absence" value={formatHours(scopeSummary.tbsAbsenceHours)} />
+              <ReportedInfo label="TBS Reported" value={scopeSummary.tbsReportedHours} />
+              <AbsenceInfo label="TBS Absence" value={scopeSummary.tbsAbsenceHours} />
               <DayInfo label="Active Hrs" value={formatHours(scopeSummary.activeHours)} />
-              <DayInfo label="Variance vs TBS" value={formatPct(scopeSummary.workedVsReportedPct) || '—'} />
+              <VarianceInfo label="Variance vs TBS" value={scopeSummary.workedVsReportedPct} />
             </div>
           </div>
 
@@ -1381,6 +1452,12 @@ function DayRow({
   selected: boolean;
   onToggle: () => void;
 }) {
+  const approvedLeaveText = formatApprovedLeave(day);
+  const reportedStyle = getReportedCellStyle(day.tbsReportedHours);
+  const absenceStyle = getAbsenceCellStyle(day.tbsAbsenceHours);
+  const approvedLeaveStyle = getApprovedLeaveCellStyle(approvedLeaveText);
+  const varianceStyle = getVarianceCellStyle(day.workedVsReportedPct);
+
   return (
     <tr
       className={selected ? 'bg-sky-50/80' : 'bg-white hover:bg-gray-50/80'}
@@ -1409,14 +1486,17 @@ function DayRow({
           {day.dayLabel}
         </button>
       </td>
-      <td className="whitespace-nowrap px-3 py-2.5 text-right text-[11px] tabular-nums text-gray-700">{formatHours(day.tbsReportedHours)}</td>
-      <td className="whitespace-nowrap px-3 py-2.5 text-right text-[11px] tabular-nums text-gray-700">{formatHours(day.tbsAbsenceHours)}</td>
+      <td className={`whitespace-nowrap px-3 py-2.5 text-right text-[11px] tabular-nums ${reportedStyle.className}`}>{formatHours(day.tbsReportedHours)}</td>
+      <td className={`whitespace-nowrap px-3 py-2.5 text-right text-[11px] tabular-nums ${absenceStyle.className}`}>{formatHours(day.tbsAbsenceHours)}</td>
       <td className="whitespace-nowrap px-3 py-2.5 text-right text-[11px] font-medium tabular-nums text-gray-900">{formatHours(day.activeHours)}</td>
-      <td className={`whitespace-nowrap px-3 py-2.5 text-right text-[11px] font-medium tabular-nums ${workedVsColor(day.workedVsReportedPct)}`}>
+      <td
+        className={`whitespace-nowrap px-3 py-2.5 text-right text-[11px] font-medium tabular-nums ${varianceStyle.className}`}
+        style={varianceStyle.style}
+      >
         {formatPct(day.workedVsReportedPct)}
       </td>
-      <td className="max-w-[240px] truncate px-3 py-2.5 text-[11px] text-gray-700" title={formatApprovedLeave(day)}>
-        {formatApprovedLeave(day)}
+      <td className={`max-w-[240px] truncate px-3 py-2.5 text-[11px] ${approvedLeaveStyle.className}`} title={approvedLeaveText}>
+        {approvedLeaveText}
       </td>
       <td className="whitespace-nowrap px-3 py-2.5 text-right text-[11px] tabular-nums text-gray-700">{day.tbsLineEntries.length}</td>
     </tr>
@@ -1460,6 +1540,42 @@ function DayInfo({ label, value }: { label: string; value: string }) {
   );
 }
 
+function ReportedInfo({ label, value }: { label: string; value: number }) {
+  const reportedStyle = getReportedCellStyle(value);
+
+  return (
+    <div className={`rounded-lg border border-gray-200 px-3 py-2 ${reportedStyle.className}`}>
+      <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">{label}</p>
+      <p className="mt-1 text-[13px] font-medium">{formatHours(value)}</p>
+    </div>
+  );
+}
+
+function AbsenceInfo({ label, value }: { label: string; value: number }) {
+  const absenceStyle = getAbsenceCellStyle(value);
+
+  return (
+    <div className={`rounded-lg border border-gray-200 px-3 py-2 ${absenceStyle.className}`}>
+      <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">{label}</p>
+      <p className="mt-1 text-[13px] font-medium">{formatHours(value)}</p>
+    </div>
+  );
+}
+
+function VarianceInfo({ label, value }: { label: string; value: number | null }) {
+  const varianceStyle = getVarianceCellStyle(value);
+
+  return (
+    <div
+      className={`rounded-lg border border-gray-200 px-3 py-2 ${varianceStyle.className}`}
+      style={varianceStyle.style}
+    >
+      <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">{label}</p>
+      <p className="mt-1 text-[13px] font-medium">{formatPct(value) || '—'}</p>
+    </div>
+  );
+}
+
 function MetricCells({
   row,
 }: {
@@ -1476,12 +1592,19 @@ function MetricCells({
     | 'unproductiveActiveHours'
   >;
 }) {
+  const reportedStyle = getReportedCellStyle(row.tbsReportedHours);
+  const absenceStyle = getAbsenceCellStyle(row.tbsAbsenceHours);
+  const varianceStyle = getVarianceCellStyle(row.workedVsReportedPct);
+
   return (
     <>
-      <td className="whitespace-nowrap px-3 py-2 text-right text-[11px] tabular-nums text-gray-700">{formatHours(row.tbsReportedHours)}</td>
-      <td className="whitespace-nowrap px-3 py-2 text-right text-[11px] tabular-nums text-gray-700">{formatHours(row.tbsAbsenceHours)}</td>
+      <td className={`whitespace-nowrap px-3 py-2 text-right text-[11px] tabular-nums ${reportedStyle.className}`}>{formatHours(row.tbsReportedHours)}</td>
+      <td className={`whitespace-nowrap px-3 py-2 text-right text-[11px] tabular-nums ${absenceStyle.className}`}>{formatHours(row.tbsAbsenceHours)}</td>
       <td className="whitespace-nowrap px-3 py-2 text-right text-[11px] font-medium tabular-nums text-gray-900">{formatHours(row.activeHours)}</td>
-      <td className={`whitespace-nowrap px-3 py-2 text-right text-[11px] font-medium tabular-nums ${workedVsColor(row.workedVsReportedPct)}`}>
+      <td
+        className={`whitespace-nowrap px-3 py-2 text-right text-[11px] font-medium tabular-nums ${varianceStyle.className}`}
+        style={varianceStyle.style}
+      >
         {formatPct(row.workedVsReportedPct)}
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-right text-[11px] tabular-nums text-gray-700">{formatHours(row.productiveActiveHours)}</td>

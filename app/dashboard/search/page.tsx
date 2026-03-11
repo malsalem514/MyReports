@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { getAccessContext } from '@/lib/access';
+import { getAccessContext, getScopedReportEmails } from '@/lib/access';
 import { getEmployees } from '@/lib/dashboard-data';
 
 interface SearchParams {
@@ -22,10 +22,11 @@ export default async function EmployeeSearchPage({
     new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0] || '';
 
   const access = await getAccessContext();
+  const scopedEmails = getScopedReportEmails(access);
   let employees = [] as Awaited<ReturnType<typeof getEmployees>>;
   let dataError: string | null = null;
   try {
-    employees = await getEmployees({ activeOnly: true });
+    employees = await getEmployees({ activeOnly: true, emails: scopedEmails });
   } catch (error) {
     dataError =
       error instanceof Error
@@ -33,10 +34,7 @@ export default async function EmployeeSearchPage({
         : 'Employee data source is currently unavailable.';
   }
 
-  const allowedSet = new Set(access.allowedEmails.map((e) => e.toLowerCase()));
-  let visible = access.isHRAdmin
-    ? employees
-    : employees.filter((emp) => allowedSet.has((emp.email || '').toLowerCase()));
+  let visible = employees;
 
   if (q) {
     visible = visible.filter((emp) => {

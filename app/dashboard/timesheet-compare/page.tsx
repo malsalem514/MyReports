@@ -1,6 +1,7 @@
 import { Suspense } from 'react';
 import { sub } from 'date-fns';
-import { getAccessContext } from '@/lib/access';
+import { getAccessContext, getScopedReportEmails } from '@/lib/access';
+import { requireVisibleTab } from '@/lib/tab-config';
 import { getTbsComparisonReport } from '@/lib/dashboard-data';
 import { DEFAULT_LOOKBACK_WEEKS, LOOKBACK_OPTIONS } from '@/lib/constants';
 import { CompareClient } from './compare-client';
@@ -12,7 +13,8 @@ async function CompareData({ lookbackWeeks }: { lookbackWeeks: number }) {
   startDate.setHours(0, 0, 0, 0);
 
   const access = await getAccessContext();
-  const allowedEmails = access.isHRAdmin ? undefined : access.allowedEmails;
+  await requireVisibleTab(access.userEmail, access, 'timesheet-compare');
+  const allowedEmails = getScopedReportEmails(access);
 
   try {
     const { rows, weeks, departments, summary, unmappedEmails } = await getTbsComparisonReport(

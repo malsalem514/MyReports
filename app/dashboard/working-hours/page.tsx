@@ -1,6 +1,7 @@
 import { Suspense } from 'react';
 import { sub } from 'date-fns';
-import { getAccessContext } from '@/lib/access';
+import { getAccessContext, getScopedReportEmails } from '@/lib/access';
+import { requireVisibleTab } from '@/lib/tab-config';
 import { getWorkingHoursReport } from '@/lib/dashboard-data';
 import { WorkingHoursClient } from './working-hours-client';
 
@@ -46,7 +47,8 @@ async function WorkingHoursData({
   endDateLabel: string;
 }) {
   const access = await getAccessContext();
-  const allowedEmails = access.isHRAdmin ? undefined : access.allowedEmails;
+  await requireVisibleTab(access.userEmail, access, 'working-hours');
+  const allowedEmails = getScopedReportEmails(access);
 
   try {
     const { weeks, groups, employeeNumbers, users, weekOptions, lastSyncedAt } = await getWorkingHoursReport(

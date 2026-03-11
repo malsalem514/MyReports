@@ -36,7 +36,12 @@ function formatRoleLabel(role: string): string {
   return role.charAt(0).toUpperCase() + role.slice(1);
 }
 
-export function AdminClient({ roles, tabs, roleMap: initialRoleMap, directorUsers }: AdminClientProps) {
+export function AdminClient({
+  roles,
+  tabs,
+  roleMap: initialRoleMap,
+  directorUsers,
+}: AdminClientProps) {
   const [roleMap, setRoleMap] = useState(initialRoleMap);
   const [saving, setSaving] = useState(false);
 

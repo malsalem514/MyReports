@@ -4,14 +4,29 @@ import oracledb from 'oracledb';
 // Configuration
 // ============================================================================
 
-const oracleConfig = {
-  user: process.env.ORACLE_USER || 'timelogs',
-  password: process.env.ORACLE_PASSWORD || 'timelogs',
-  connectString: process.env.ORACLE_CONNECT_STRING || 'srv-db-100/suppops',
-  poolMin: 2,
-  poolMax: 10,
-  poolIncrement: 1,
-};
+function getOracleConfig(): Record<string, unknown> {
+  const user = process.env.ORACLE_USER?.trim();
+  const password = process.env.ORACLE_PASSWORD?.trim();
+  const connectString = process.env.ORACLE_CONNECT_STRING?.trim();
+  const missing = [
+    !user ? 'ORACLE_USER' : null,
+    !password ? 'ORACLE_PASSWORD' : null,
+    !connectString ? 'ORACLE_CONNECT_STRING' : null,
+  ].filter(Boolean);
+
+  if (missing.length > 0) {
+    throw new Error(`Missing required Oracle configuration: ${missing.join(', ')}`);
+  }
+
+  return {
+    user,
+    password,
+    connectString,
+    poolMin: 2,
+    poolMax: 10,
+    poolIncrement: 1,
+  };
+}
 
 // ============================================================================
 // Connection Pool
@@ -29,7 +44,7 @@ async function createPool(): Promise<oracledb.Pool> {
   oracledb.outFormat = oracledb.OUT_FORMAT_OBJECT;
   oracledb.autoCommit = true;
 
-  const pool = await oracledb.createPool(oracleConfig);
+  const pool = await oracledb.createPool(getOracleConfig());
   console.log('Oracle connection pool created');
   return pool;
 }
@@ -117,6 +132,7 @@ export async function initializeSchema(): Promise<void> {
         DIVISION VARCHAR2(255),
         LOCATION VARCHAR2(255),
         SUPERVISOR_ID VARCHAR2(50),
+        SUPERVISOR_NAME VARCHAR2(255),
         SUPERVISOR_EMAIL VARCHAR2(255),
         HIRE_DATE DATE,
         STATUS VARCHAR2(50),
@@ -126,6 +142,7 @@ export async function initializeSchema(): Promise<void> {
         UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_EMPLOYEES ADD SUPERVISOR_NAME VARCHAR2(255)`);
     await safeExecuteDDL(conn, `ALTER TABLE TL_EMPLOYEES ADD REMOTE_WORKDAY_POLICY_ASSIGNED NUMBER(1) DEFAULT 0`);
     await safeExecuteDDL(conn, `
       CREATE TABLE TL_ATTENDANCE (
@@ -190,6 +207,26 @@ export async function initializeSchema(): Promise<void> {
       )
     `);
     await safeExecuteDDL(conn, `
+      CREATE TABLE TL_REMOTE_WORK_REQUESTS (
+        BAMBOO_ROW_ID NUMBER PRIMARY KEY,
+        EMPLOYEE_ID VARCHAR2(50) NOT NULL,
+        EMAIL VARCHAR2(255),
+        EMPLOYEE_NAME VARCHAR2(255),
+        DEPARTMENT VARCHAR2(255),
+        REQUEST_DATE DATE,
+        REMOTE_WORK_START_DATE DATE NOT NULL,
+        REMOTE_WORK_END_DATE DATE,
+        REMOTE_WORK_TYPE VARCHAR2(100),
+        REASON VARCHAR2(4000),
+        SUPPORTING_DOCUMENTATION_SUBMITTED VARCHAR2(100),
+        ALTERNATE_IN_OFFICE_WORK_DATE VARCHAR2(100),
+        MANAGER_APPROVAL_RECEIVED VARCHAR2(100),
+        MANAGER_NAME VARCHAR2(255),
+        CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await safeExecuteDDL(conn, `
       CREATE TABLE TL_SYNC_LOG (
         ID NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         SYNC_TYPE VARCHAR2(50) NOT NULL,
@@ -217,6 +254,8 @@ export async function initializeSchema(): Promise<void> {
     await safeExecuteDDL(conn, `CREATE INDEX TL_PROD_DATE_IDX ON TL_PRODUCTIVITY(RECORD_DATE)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_PROD_EMAIL_IDX ON TL_PRODUCTIVITY(EMAIL)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_PTO_DATE_IDX ON TL_TIME_OFF(START_DATE, END_DATE)`);
+    await safeExecuteDDL(conn, `CREATE INDEX TL_RWR_EMAIL_IDX ON TL_REMOTE_WORK_REQUESTS(EMAIL)`);
+    await safeExecuteDDL(conn, `CREATE INDEX TL_RWR_DATE_IDX ON TL_REMOTE_WORK_REQUESTS(REMOTE_WORK_START_DATE, REMOTE_WORK_END_DATE)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_EMP_DEPT_IDX ON TL_EMPLOYEES(DEPARTMENT)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_EMP_STATUS_IDX ON TL_EMPLOYEES(STATUS)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_TBS_MAP_EMAIL_IDX ON TL_TBS_EMPLOYEE_MAP(EMAIL)`);
@@ -285,6 +324,49 @@ export async function initializeSchema(): Promise<void> {
       GROUP BY LOWER(EMAIL), TRUNC(PTO_DATE, 'IW')
     `);
 
+    await safeExecuteDDL(conn, `
+      CREATE OR REPLACE VIEW V_BAMBOO_NOT_IN_ACTIVTRAK AS
+      SELECT
+        e.ID AS EMPLOYEE_ID,
+        LOWER(e.EMAIL) AS EMAIL,
+        NVL(
+          e.DISPLAY_NAME,
+          TRIM(NVL(e.FIRST_NAME, '') || ' ' || NVL(e.LAST_NAME, ''))
+        ) AS DISPLAY_NAME,
+        e.FIRST_NAME,
+        e.LAST_NAME,
+        e.JOB_TITLE,
+        NVL(e.DEPARTMENT, 'Unknown') AS DEPARTMENT,
+        NVL(e.DIVISION, 'Unknown') AS DIVISION,
+        NVL(e.LOCATION, 'Unknown') AS LOCATION,
+        e.SUPERVISOR_EMAIL,
+        e.HIRE_DATE,
+        e.STATUS,
+        m.TBS_EMPLOYEE_NO,
+        CASE
+          WHEN t.EMPLOYEE_NO IS NULL THEN NULL
+          ELSE TRIM(NVL(t.EMPLOYEE_FIRST_NAME, '') || ' ' || NVL(t.EMPLOYEE_LAST_NAME, ''))
+        END AS TBS_EMPLOYEE_NAME,
+        TRIM(t.EMPLOYEE_DEPT) AS TBS_DEPARTMENT
+      FROM TL_EMPLOYEES e
+      LEFT JOIN TL_TBS_EMPLOYEE_MAP m
+        ON LOWER(m.EMAIL) = LOWER(e.EMAIL)
+      LEFT JOIN TBS_EMPLOYEES@TBS_LINK t
+        ON t.EMPLOYEE_NO = m.TBS_EMPLOYEE_NO
+      WHERE e.EMAIL IS NOT NULL
+        AND (e.STATUS IS NULL OR UPPER(e.STATUS) != 'INACTIVE')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM TL_ATTENDANCE a
+          WHERE LOWER(a.EMAIL) = LOWER(e.EMAIL)
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM TL_PRODUCTIVITY p
+          WHERE LOWER(p.EMAIL) = LOWER(e.EMAIL)
+        )
+    `);
+
     // Tab visibility — role defaults
     await safeExecuteDDL(conn, `
       CREATE TABLE TL_TAB_ROLES (
@@ -338,63 +420,27 @@ export async function initializeSchema(): Promise<void> {
     await safeExecuteDDL(conn, `CREATE INDEX IDX_DASHBOARDS_OWNER ON TL_DASHBOARDS(LOWER(OWNER_EMAIL))`);
 
     // Seed role defaults (MERGE = idempotent)
-    const allTabs = ['office-attendance','timesheet-compare','working-hours'];
-    const directorTabs = ['office-attendance','timesheet-compare','working-hours'];
-    const managerTabs = ['office-attendance','timesheet-compare','working-hours'];
-    const employeeTabs = ['office-attendance'];
+    const allTabs = ['office-attendance', 'timesheet-compare', 'working-hours', 'bamboo-not-in-activtrak'];
+    const roleDefaults = [
+      { roleName: 'root-admin', visibleTabs: allTabs },
+      { roleName: 'hr-admin', visibleTabs: allTabs },
+      { roleName: 'director', visibleTabs: ['office-attendance', 'timesheet-compare', 'working-hours'] },
+      { roleName: 'manager', visibleTabs: ['office-attendance', 'timesheet-compare', 'working-hours'] },
+      { roleName: 'employee', visibleTabs: ['office-attendance'] },
+    ];
 
-    for (const tab of allTabs) {
-      await safeExecuteDDL(conn, `
-        MERGE INTO TL_TAB_ROLES t
-        USING (SELECT 'hr-admin' AS ROLE_NAME, '${tab}' AS TAB_KEY FROM DUAL) s
-        ON (t.ROLE_NAME = s.ROLE_NAME AND t.TAB_KEY = s.TAB_KEY)
-        WHEN NOT MATCHED THEN INSERT (ROLE_NAME, TAB_KEY, VISIBLE) VALUES ('hr-admin', '${tab}', 1)
-      `);
+    for (const { roleName, visibleTabs } of roleDefaults) {
+      for (const tab of allTabs) {
+        const visible = visibleTabs.includes(tab) ? 1 : 0;
+        await safeExecuteDDL(conn, `
+          MERGE INTO TL_TAB_ROLES t
+          USING (SELECT '${roleName}' AS ROLE_NAME, '${tab}' AS TAB_KEY FROM DUAL) s
+          ON (t.ROLE_NAME = s.ROLE_NAME AND t.TAB_KEY = s.TAB_KEY)
+          WHEN MATCHED THEN UPDATE SET t.VISIBLE = ${visible}
+          WHEN NOT MATCHED THEN INSERT (ROLE_NAME, TAB_KEY, VISIBLE) VALUES ('${roleName}', '${tab}', ${visible})
+        `);
+      }
     }
-    for (const tab of allTabs) {
-      const visible = directorTabs.includes(tab) ? 1 : 0;
-      await safeExecuteDDL(conn, `
-        MERGE INTO TL_TAB_ROLES t
-        USING (SELECT 'director' AS ROLE_NAME, '${tab}' AS TAB_KEY FROM DUAL) s
-        ON (t.ROLE_NAME = s.ROLE_NAME AND t.TAB_KEY = s.TAB_KEY)
-        WHEN NOT MATCHED THEN INSERT (ROLE_NAME, TAB_KEY, VISIBLE) VALUES ('director', '${tab}', ${visible})
-      `);
-    }
-    for (const tab of allTabs) {
-      const visible = managerTabs.includes(tab) ? 1 : 0;
-      await safeExecuteDDL(conn, `
-        MERGE INTO TL_TAB_ROLES t
-        USING (SELECT 'manager' AS ROLE_NAME, '${tab}' AS TAB_KEY FROM DUAL) s
-        ON (t.ROLE_NAME = s.ROLE_NAME AND t.TAB_KEY = s.TAB_KEY)
-        WHEN NOT MATCHED THEN INSERT (ROLE_NAME, TAB_KEY, VISIBLE) VALUES ('manager', '${tab}', ${visible})
-      `);
-    }
-    for (const tab of allTabs) {
-      const visible = employeeTabs.includes(tab) ? 1 : 0;
-      await safeExecuteDDL(conn, `
-        MERGE INTO TL_TAB_ROLES t
-        USING (SELECT 'employee' AS ROLE_NAME, '${tab}' AS TAB_KEY FROM DUAL) s
-        ON (t.ROLE_NAME = s.ROLE_NAME AND t.TAB_KEY = s.TAB_KEY)
-        WHEN NOT MATCHED THEN INSERT (ROLE_NAME, TAB_KEY, VISIBLE) VALUES ('employee', '${tab}', ${visible})
-      `);
-    }
-
-    // Seed report-builder tab visibility
-    for (const role of ['hr-admin', 'director', 'manager']) {
-      await safeExecuteDDL(conn, `
-        MERGE INTO TL_TAB_ROLES t
-        USING (SELECT '${role}' AS ROLE_NAME, 'report-builder' AS TAB_KEY FROM DUAL) s
-        ON (t.ROLE_NAME = s.ROLE_NAME AND t.TAB_KEY = s.TAB_KEY)
-        WHEN NOT MATCHED THEN INSERT (ROLE_NAME, TAB_KEY, VISIBLE) VALUES ('${role}', 'report-builder', 1)
-      `);
-    }
-    // Employee does NOT get report-builder
-    await safeExecuteDDL(conn, `
-      MERGE INTO TL_TAB_ROLES t
-      USING (SELECT 'employee' AS ROLE_NAME, 'report-builder' AS TAB_KEY FROM DUAL) s
-      ON (t.ROLE_NAME = s.ROLE_NAME AND t.TAB_KEY = s.TAB_KEY)
-      WHEN NOT MATCHED THEN INSERT (ROLE_NAME, TAB_KEY, VISIBLE) VALUES ('employee', 'report-builder', 0)
-    `);
 
     console.log('Oracle schema initialized successfully');
   } finally {

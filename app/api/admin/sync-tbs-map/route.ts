@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { auth } from '@/auth';
-import { isHRAdminEmail } from '@/lib/access';
+import { isAdminEmail } from '@/lib/admin';
 import { getDevBypassEmail } from '@/lib/dev-bypass';
 import { initializeSchema } from '@/lib/oracle';
 import { syncTbsEmployeeMap } from '@/lib/sync';
@@ -9,7 +9,7 @@ export async function POST() {
   const bypassEmail = getDevBypassEmail('api-admin-sync-tbs-map');
   const session = bypassEmail ? null : await auth();
   const adminEmail = (bypassEmail || session?.user?.email || '').toLowerCase();
-  if (!adminEmail || !isHRAdminEmail(adminEmail)) {
+  if (!adminEmail || !isAdminEmail(adminEmail)) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
