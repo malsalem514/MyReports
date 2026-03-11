@@ -2,7 +2,7 @@
 
 import { ChevronRight, Menu, X } from 'lucide-react';
 import Link from 'next/link';
-import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { usePathname, useSearchParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
@@ -11,19 +11,6 @@ import { getDashboardDefaultDateRange } from '@/lib/report-date-defaults';
 import { cn } from '@/lib/utils';
 import type { DashboardNavChild, DashboardNavItem } from '@/lib/dashboard-nav-config';
 import type { ReactNode } from 'react';
-
-function getWeekRange() {
-  const now = new Date();
-  const dayOfWeek = now.getDay();
-  const startDate = new Date(now);
-  startDate.setDate(now.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1));
-  const endDate = new Date(startDate);
-  endDate.setDate(startDate.getDate() + 6);
-  return {
-    startDate: startDate.toISOString().split('T')[0] ?? '',
-    endDate: endDate.toISOString().split('T')[0] ?? '',
-  };
-}
 
 function buildHref(
   path: string,
@@ -55,16 +42,11 @@ function matchesChild(
 
 export function DashboardNav({ navItems, children }: { navItems: DashboardNavItem[]; children: ReactNode }) {
   const pathname = usePathname();
-  const router = useRouter();
   const searchParams = useSearchParams();
 
   const startDateParam = searchParams.get('startDate');
   const endDateParam = searchParams.get('endDate');
-  const defaults = getDashboardDefaultDateRange(pathname);
-  const startDate = startDateParam || defaults.startDate;
-  const endDate = endDateParam || defaults.endDate;
   const currentView = searchParams.get('view');
-  const currentRangeKey = getRangePresetKey(startDate, endDate);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
@@ -101,32 +83,6 @@ export function DashboardNav({ navItems, children }: { navItems: DashboardNavIte
     };
   }, [mobileNavOpen]);
 
-  const handleDateChange = (newStart: string, newEnd: string) => {
-    const params = new URLSearchParams(searchParams);
-    params.set('startDate', newStart);
-    params.set('endDate', newEnd);
-    router.push(`${pathname}?${params.toString()}`);
-  };
-
-  const handlePreset = (preset: 'week' | '30days' | 'thisweek') => {
-    const end = new Date();
-    const start = new Date();
-    switch (preset) {
-      case 'thisweek': {
-        const wr = getWeekRange();
-        handleDateChange(wr.startDate, wr.endDate);
-        return;
-      }
-      case 'week':
-        start.setDate(end.getDate() - 7);
-        break;
-      case '30days':
-        start.setDate(end.getDate() - 30);
-        break;
-    }
-    handleDateChange(start.toISOString().split('T')[0] ?? '', end.toISOString().split('T')[0] ?? '');
-  };
-
   const getDateRangeForPath = (targetPath: string) => {
     if (startDateParam && endDateParam) {
       return {
@@ -141,7 +97,7 @@ export function DashboardNav({ navItems, children }: { navItems: DashboardNavIte
     <div className="min-h-screen bg-[#f3f4f6]">
       <header className="sticky top-0 z-50 border-b border-gray-200 bg-[#fcfcfb]/95 backdrop-blur">
         <div className="mx-auto max-w-[1600px] px-4 lg:px-6">
-          <div className="flex min-h-16 flex-col gap-3 py-3 lg:flex-row lg:items-center lg:justify-between lg:py-0">
+          <div className="flex min-h-16 items-center justify-between py-3 lg:py-0">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h1 className="text-[15px] font-semibold tracking-tight text-gray-900">MyReports</h1>
@@ -157,45 +113,6 @@ export function DashboardNav({ navItems, children }: { navItems: DashboardNavIte
               >
                 <Menu className="size-4" />
               </Button>
-            </div>
-
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-              <div className="grid grid-cols-3 rounded-md border border-gray-200 bg-white shadow-sm">
-                {([
-                  { label: 'This Week', preset: 'thisweek' as const },
-                  { label: 'Last 7 Days', preset: 'week' as const },
-                  { label: '30 Days', preset: '30days' as const },
-                ]).map(({ label, preset }) => (
-                  <Button
-                    key={label}
-                    onClick={() => handlePreset(preset)}
-                    variant={currentRangeKey === preset ? 'default' : 'ghost'}
-                    size="sm"
-                    className={`rounded-none border-0 px-2 py-1.5 text-[11px] font-medium shadow-none first:rounded-l-md last:rounded-r-md sm:px-3 sm:text-[12px] ${
-                      currentRangeKey === preset
-                        ? 'bg-slate-800 text-white hover:bg-slate-800 hover:text-white'
-                        : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
-                    }`}
-                  >
-                    {label}
-                  </Button>
-                ))}
-              </div>
-              <div className="grid grid-cols-[1fr,auto,1fr] items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1 shadow-sm">
-                <input
-                  type="date"
-                  value={startDate}
-                  onChange={(e) => handleDateChange(e.target.value || startDate, endDate)}
-                  className="min-w-0 border-0 bg-transparent text-[12px] text-gray-600 focus:outline-none"
-                />
-                <span className="text-[12px] text-gray-400">–</span>
-                <input
-                  type="date"
-                  value={endDate}
-                  onChange={(e) => handleDateChange(startDate, e.target.value || endDate)}
-                  className="min-w-0 border-0 bg-transparent text-[12px] text-gray-600 focus:outline-none"
-                />
-              </div>
             </div>
           </div>
         </div>
@@ -258,34 +175,6 @@ export function DashboardNav({ navItems, children }: { navItems: DashboardNavIte
   );
 }
 
-function getRangePresetKey(
-  startDate: string,
-  endDate: string,
-): 'thisweek' | 'week' | '30days' | null {
-  const today = new Date();
-  const expectedEnd = today.toISOString().split('T')[0] ?? '';
-  if (endDate !== expectedEnd) return null;
-
-  const last7 = new Date(today);
-  last7.setDate(today.getDate() - 7);
-  if (startDate === (last7.toISOString().split('T')[0] ?? '')) {
-    return 'week';
-  }
-
-  const last30 = new Date(today);
-  last30.setDate(today.getDate() - 30);
-  if (startDate === (last30.toISOString().split('T')[0] ?? '')) {
-    return '30days';
-  }
-
-  const weekRange = getWeekRange();
-  if (startDate === weekRange.startDate && endDate === weekRange.endDate) {
-    return 'thisweek';
-  }
-
-  return null;
-}
-
 function DashboardNavMenu({
   navItems,
   pathname,
@@ -304,7 +193,7 @@ function DashboardNavMenu({
   className?: string;
 }) {
   const reportItems = navItems.filter((item) => item.section === 'reports');
-  const utilityItems = navItems.filter((item) => item.section === 'tools');
+  const adminItems = navItems.filter((item) => item.section === 'admin');
 
   return (
     <nav className={cn('flex h-full flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm', className)}>
@@ -397,13 +286,13 @@ function DashboardNavMenu({
           </div>
         </div>
 
-        {utilityItems.length > 0 ? (
+        {adminItems.length > 0 ? (
           <>
             <Separator className="my-4" />
             <div>
-              <p className="px-2 pb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-gray-400">Tools</p>
+              <p className="px-2 pb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-gray-400">Admin</p>
               <div className="space-y-1">
-                {utilityItems.map((item) => {
+                {adminItems.map((item) => {
                   const itemRange = getDateRangeForPath(item.path);
                   return (
                   <Link

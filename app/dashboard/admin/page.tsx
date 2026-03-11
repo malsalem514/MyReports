@@ -1,6 +1,7 @@
 import { getAccessContext, getRoleDiagnostics } from '@/lib/access';
 import { fetchActiveEmployees } from '@/lib/bamboohr';
-import { getRoleDefaults, TAB_KEYS } from '@/lib/tab-config';
+import { normalizeEmail } from '@/lib/email';
+import { getRoleDefaults, TAB_KEYS, TAB_ROLES } from '@/lib/tab-config';
 import { redirect } from 'next/navigation';
 import { AdminClient } from './admin-client';
 
@@ -41,7 +42,7 @@ export default async function AdminPage() {
         .filter(({ diagnostics }) => diagnostics.isDirector)
         .map(({ employee, diagnostics }) => ({
           name: employee.displayName || `${employee.firstName || ''} ${employee.lastName || ''}`.trim() || employee.workEmail || '',
-          email: employee.workEmail?.toLowerCase() || '',
+          email: employee.workEmail ? normalizeEmail(employee.workEmail) : '',
           department: employee.department || '',
           jobTitle: employee.jobTitle || '',
           reason: diagnostics.reason || 'Matched director rule',
@@ -55,7 +56,7 @@ export default async function AdminPage() {
   }
 
   // Build role→tab→visible map
-  const roles = ['hr-admin', 'director', 'manager', 'employee'] as const;
+  const roles = TAB_ROLES;
   const roleMap: Record<string, Record<string, boolean>> = {};
   for (const role of roles) {
     roleMap[role] = {};

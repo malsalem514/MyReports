@@ -30,13 +30,11 @@ function parseDateInput(
 }
 
 async function AttendanceData({
-  lookbackWeeks,
   startDate,
   endDate,
   startDateLabel,
   endDateLabel,
 }: {
-  lookbackWeeks: number;
   startDate: Date;
   endDate: Date;
   startDateLabel: string;
@@ -64,7 +62,6 @@ async function AttendanceData({
         departments={departments}
         locations={locations}
         summary={summary}
-        lookbackWeeks={lookbackWeeks}
         startDate={startDateLabel}
         endDate={endDateLabel}
       />
@@ -85,7 +82,6 @@ async function AttendanceData({
           departments={[]}
           locations={[]}
           summary={{ totalEmployees: 0, avgOfficeDays: 0, complianceRate: 0, zeroOfficeDaysCount: 0 }}
-          lookbackWeeks={lookbackWeeks}
           startDate={startDateLabel}
           endDate={endDateLabel}
         />
@@ -142,7 +138,6 @@ export default async function OfficeAttendancePage({
   return (
     <Suspense fallback={<AttendanceSkeleton />}>
       <AttendanceData
-        lookbackWeeks={lookbackWeeks}
         startDate={startDate}
         endDate={endDate}
         startDateLabel={startDateLabel}

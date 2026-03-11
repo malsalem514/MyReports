@@ -1,0 +1,74 @@
+-- ============================================================================
+-- V_USER_MAPPINGS
+-- Active BambooHR employees in Timelogs with their TBS mapping and latest
+-- ActivTrak user footprint where available.
+-- Excludes Bamboo departments: Administration, Executive.
+-- ============================================================================
+
+CREATE OR REPLACE VIEW V_USER_MAPPINGS AS
+SELECT
+  e.ID AS EMPLOYEE_ID,
+  LOWER(e.EMAIL) AS EMAIL,
+  NVL(
+    e.DISPLAY_NAME,
+    TRIM(NVL(e.FIRST_NAME, '') || ' ' || NVL(e.LAST_NAME, ''))
+  ) AS DISPLAY_NAME,
+  e.FIRST_NAME,
+  e.LAST_NAME,
+  e.JOB_TITLE,
+  NVL(e.DEPARTMENT, 'Unknown') AS DEPARTMENT,
+  NVL(e.DIVISION, 'Unknown') AS DIVISION,
+  NVL(e.LOCATION, 'Unknown') AS LOCATION,
+  e.SUPERVISOR_EMAIL,
+  e.HIRE_DATE,
+  e.STATUS,
+  m.TBS_EMPLOYEE_NO,
+  CASE
+    WHEN t.EMPLOYEE_NO IS NULL THEN NULL
+    ELSE TRIM(NVL(t.EMPLOYEE_FIRST_NAME, '') || ' ' || NVL(t.EMPLOYEE_LAST_NAME, ''))
+  END AS TBS_EMPLOYEE_NAME,
+  CASE
+    WHEN at.HAS_ACTIVTRAK_USER = 1 THEN NVL(act.EMPLOYEE_NAME, NVL(at.ACTIVTRAK_USER, LOWER(e.EMAIL)))
+    ELSE NULL
+  END AS ACTIVTRAK_USER,
+  act.ACTRK_ID,
+  CASE
+    WHEN act.ACTRK_ID IS NULL THEN 0
+    ELSE 1
+  END AS HAS_ACTIVTRAK_MAPPING,
+  NVL(at.HAS_ACTIVTRAK_USER, 0) AS HAS_ACTIVTRAK_USER
+FROM TL_EMPLOYEES e
+LEFT JOIN TL_TBS_EMPLOYEE_MAP m
+  ON LOWER(m.EMAIL) = LOWER(e.EMAIL)
+LEFT JOIN TBS_EMPLOYEES@TBS_LINK t
+  ON t.EMPLOYEE_NO = m.TBS_EMPLOYEE_NO
+LEFT JOIN ACTRK_TBS_IDS act
+  ON act.EMPLOYEE_NO = m.TBS_EMPLOYEE_NO
+LEFT JOIN (
+  SELECT
+    activity.EMAIL,
+    MAX(activity.DISPLAY_NAME) KEEP (DENSE_RANK LAST ORDER BY activity.LAST_SEEN) AS ACTIVTRAK_USER,
+    1 AS HAS_ACTIVTRAK_USER
+  FROM (
+    SELECT
+      LOWER(a.EMAIL) AS EMAIL,
+      NULLIF(TRIM(a.DISPLAY_NAME), '') AS DISPLAY_NAME,
+      MAX(a.RECORD_DATE) AS LAST_SEEN
+    FROM TL_ATTENDANCE a
+    GROUP BY LOWER(a.EMAIL), NULLIF(TRIM(a.DISPLAY_NAME), '')
+
+    UNION ALL
+
+    SELECT
+      LOWER(p.EMAIL) AS EMAIL,
+      NULL AS DISPLAY_NAME,
+      MAX(p.RECORD_DATE) AS LAST_SEEN
+    FROM TL_PRODUCTIVITY p
+    GROUP BY LOWER(p.EMAIL)
+  ) activity
+  GROUP BY activity.EMAIL
+) at
+  ON at.EMAIL = LOWER(e.EMAIL)
+WHERE e.EMAIL IS NOT NULL
+  AND (e.STATUS IS NULL OR UPPER(e.STATUS) != 'INACTIVE')
+  AND e.DEPARTMENT NOT IN ('Executive', 'Administration');

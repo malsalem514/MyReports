@@ -13,7 +13,8 @@ interface Props {
   departments: string[];
   summary: TbsComparisonSummary;
   unmappedEmails: string[];
-  lookbackWeeks: number;
+  startDate: string;
+  endDate: string;
 }
 
 type SortKey = 'name' | 'department' | 'discrepancyCount' | 'totalBambooPto' | 'totalTbsPto' | string;
@@ -35,9 +36,33 @@ function getCellColor(cell: { bambooPtoDays: number; tbsPtoDays: number; hasDisc
   return '';
 }
 
-export function CompareClient({ rows, weeks, departments, summary, unmappedEmails, lookbackWeeks }: Props) {
+export function CompareClient({
+  rows,
+  weeks,
+  departments,
+  summary,
+  unmappedEmails,
+  startDate,
+  endDate,
+}: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const activeQuickRange = useMemo(() => {
+    const today = new Date();
+    const expectedEnd = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    if (endDate !== expectedEnd) return null;
+
+    for (const weeksBack of LOOKBACK_OPTIONS) {
+      const start = new Date(today);
+      start.setDate(start.getDate() - (weeksBack * 7));
+      const startLabel = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`;
+      if (startDate === startLabel) {
+        return weeksBack;
+      }
+    }
+
+    return null;
+  }, [startDate, endDate]);
 
   const [search, setSearch] = useState('');
   const [selectedDepts, setSelectedDepts] = useState<string[]>([]);
@@ -70,8 +95,23 @@ export function CompareClient({ rows, weeks, departments, summary, unmappedEmail
   };
 
   const changeLookback = (val: string) => {
+    if (val === 'custom') return;
+    const weeksBack = Number(val);
+    const end = new Date();
+    const start = new Date(end);
+    start.setDate(start.getDate() - (weeksBack * 7));
     const params = new URLSearchParams(searchParams.toString());
     params.set('lookbackWeeks', val);
+    params.set('startDate', `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`);
+    params.set('endDate', `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, '0')}-${String(end.getDate()).padStart(2, '0')}`);
+    router.push(`/dashboard/timesheet-compare?${params.toString()}`);
+  };
+
+  const changeDates = (nextStart: string, nextEnd: string) => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete('lookbackWeeks');
+    params.set('startDate', nextStart);
+    params.set('endDate', nextEnd);
     router.push(`/dashboard/timesheet-compare?${params.toString()}`);
   };
 
@@ -145,7 +185,7 @@ export function CompareClient({ rows, weeks, departments, summary, unmappedEmail
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = `tbs-compare-${lookbackWeeks}w.csv`; a.click();
+    a.href = url; a.download = `tbs-compare-${startDate}-${endDate}.csv`; a.click();
     URL.revokeObjectURL(url);
   };
 
@@ -177,24 +217,52 @@ export function CompareClient({ rows, weeks, departments, summary, unmappedEmail
         <div>
           <h2 className="text-[15px] font-semibold text-gray-900">TBS vs BambooHR Comparison</h2>
           <p className="mt-0.5 text-[12px] text-gray-500">
-            Last {lookbackWeeks} weeks — compares PTO entries between BambooHR and TBS timesheet system
+            Compares PTO entries between BambooHR and TBS timesheet system.
+          </p>
+          <p className="mt-1 text-[11px] text-gray-400">
+            Applied: {activeQuickRange ? `Quick range (${activeQuickRange} weeks)` : 'Custom dates'} · {startDate} to {endDate}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <select
-            value={lookbackWeeks}
-            onChange={(e) => changeLookback(e.target.value)}
-            className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-[12px] text-gray-600 focus:border-gray-300 focus:outline-none"
-          >
-            {LOOKBACK_OPTIONS.map((w) => (
-              <option key={w} value={w}>{w} weeks</option>
-            ))}
-          </select>
           <button onClick={exportCSV}
             className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-[12px] font-medium text-gray-700 hover:bg-gray-50">
             CSV
           </button>
         </div>
+      </div>
+
+      <div className="grid gap-3 rounded-xl border border-gray-200 bg-white p-4 md:grid-cols-[minmax(0,220px),minmax(0,180px),minmax(0,180px),1fr] md:items-end">
+        <div>
+          <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Quick Range</label>
+          <select
+            value={activeQuickRange ? String(activeQuickRange) : 'custom'}
+            onChange={(e) => changeLookback(e.target.value)}
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+          >
+            <option value="custom">Custom dates</option>
+            {LOOKBACK_OPTIONS.map((w) => (
+              <option key={w} value={w}>{w} weeks</option>
+            ))}
+          </select>
+        </div>
+        <label>
+          <span className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Start</span>
+          <input
+            type="date"
+            value={startDate}
+            onChange={(e) => changeDates(e.target.value || startDate, endDate)}
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+          />
+        </label>
+        <label>
+          <span className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">End</span>
+          <input
+            type="date"
+            value={endDate}
+            onChange={(e) => changeDates(startDate, e.target.value || endDate)}
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+          />
+        </label>
       </div>
 
       {/* Summary */}

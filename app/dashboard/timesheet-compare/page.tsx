@@ -6,11 +6,17 @@ import { getTbsComparisonReport } from '@/lib/dashboard-data';
 import { DEFAULT_LOOKBACK_WEEKS, LOOKBACK_OPTIONS } from '@/lib/constants';
 import { CompareClient } from './compare-client';
 
-async function CompareData({ lookbackWeeks }: { lookbackWeeks: number }) {
-  const endDate = new Date();
-  endDate.setHours(23, 59, 59, 999);
-  const startDate = sub(endDate, { weeks: lookbackWeeks });
-  startDate.setHours(0, 0, 0, 0);
+async function CompareData({
+  startDate,
+  endDate,
+  startDateLabel,
+  endDateLabel,
+}: {
+  startDate: Date;
+  endDate: Date;
+  startDateLabel: string;
+  endDateLabel: string;
+}) {
 
   const access = await getAccessContext();
   await requireVisibleTab(access.userEmail, access, 'timesheet-compare');
@@ -30,7 +36,8 @@ async function CompareData({ lookbackWeeks }: { lookbackWeeks: number }) {
         departments={departments}
         summary={summary}
         unmappedEmails={unmappedEmails}
-        lookbackWeeks={lookbackWeeks}
+        startDate={startDateLabel}
+        endDate={endDateLabel}
       />
     );
   } catch (error) {
@@ -54,7 +61,8 @@ async function CompareData({ lookbackWeeks }: { lookbackWeeks: number }) {
             tbsPtoNotInBamboo: 0,
           }}
           unmappedEmails={[]}
-          lookbackWeeks={lookbackWeeks}
+          startDate={startDateLabel}
+          endDate={endDateLabel}
         />
       </div>
     );
@@ -84,16 +92,47 @@ function CompareSkeleton() {
 export default async function TimesheetComparePage({
   searchParams,
 }: {
-  searchParams: Promise<{ lookbackWeeks?: string }>;
+  searchParams: Promise<{ lookbackWeeks?: string; startDate?: string; endDate?: string }>;
 }) {
   const params = await searchParams;
   const lookbackWeeks = LOOKBACK_OPTIONS.includes(Number(params.lookbackWeeks) as any)
     ? (Number(params.lookbackWeeks) as (typeof LOOKBACK_OPTIONS)[number])
     : DEFAULT_LOOKBACK_WEEKS;
 
+  const defaultEndDate = new Date();
+  defaultEndDate.setHours(23, 59, 59, 999);
+  const defaultStartDate = sub(defaultEndDate, { weeks: lookbackWeeks });
+  defaultStartDate.setHours(0, 0, 0, 0);
+
+  let startDate = params.startDate ? new Date(`${params.startDate}T00:00:00`) : new Date(defaultStartDate);
+  let endDate = params.endDate ? new Date(`${params.endDate}T23:59:59.999`) : new Date(defaultEndDate);
+
+  if (Number.isNaN(startDate.getTime())) startDate = new Date(defaultStartDate);
+  if (Number.isNaN(endDate.getTime())) endDate = new Date(defaultEndDate);
+  if (startDate > endDate) {
+    const nextStart = new Date(endDate);
+    nextStart.setHours(0, 0, 0, 0);
+    const nextEnd = new Date(startDate);
+    nextEnd.setHours(23, 59, 59, 999);
+    startDate = nextStart;
+    endDate = nextEnd;
+  }
+
+  const toDateParam = (date: Date) => {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+
   return (
     <Suspense fallback={<CompareSkeleton />}>
-      <CompareData lookbackWeeks={lookbackWeeks} />
+      <CompareData
+        startDate={startDate}
+        endDate={endDate}
+        startDateLabel={toDateParam(startDate)}
+        endDateLabel={toDateParam(endDate)}
+      />
     </Suspense>
   );
 }

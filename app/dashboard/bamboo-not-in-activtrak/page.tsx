@@ -23,7 +23,7 @@ export default async function BambooNotInActivTrakPage() {
     return (
       <div className="space-y-3">
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-[12px] text-amber-800">
-          Bamboo/ActivTrak mismatch report is currently unavailable. {message}
+          Users mappings report is currently unavailable. {message}
         </div>
         <BambooNotInActivTrakClient rows={[]} />
       </div>

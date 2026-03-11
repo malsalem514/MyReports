@@ -1,4 +1,5 @@
 import oracledb from 'oracledb';
+import { EMAIL_ALIAS_TO_CANONICAL } from './email';
 
 // ============================================================================
 // Configuration
@@ -308,8 +309,8 @@ export async function initializeSchema(): Promise<void> {
     await safeExecuteDDL(conn, `
       CREATE OR REPLACE VIEW V_PTO_WEEKLY AS
       SELECT
-        LOWER(EMAIL) AS EMAIL,
-        TRUNC(PTO_DATE, 'IW') AS WEEK_START,
+        LOWER(t.EMAIL) AS EMAIL,
+        TRUNC(t.PTO_DATE, 'IW') AS WEEK_START,
         COUNT(*) AS PTO_DAYS
       FROM (
         SELECT
@@ -319,13 +320,18 @@ export async function initializeSchema(): Promise<void> {
         CONNECT BY LEVEL <= (TRUNC(t.END_DATE) - TRUNC(t.START_DATE) + 1)
           AND PRIOR t.ROWID = t.ROWID
           AND PRIOR SYS_GUID() IS NOT NULL
-      )
-      WHERE TO_CHAR(PTO_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')
-      GROUP BY LOWER(EMAIL), TRUNC(PTO_DATE, 'IW')
+      ) t
+      JOIN TL_EMPLOYEES e
+        ON LOWER(e.EMAIL) = LOWER(t.EMAIL)
+      WHERE TO_CHAR(t.PTO_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')
+        AND e.EMAIL IS NOT NULL
+        AND (e.STATUS IS NULL OR UPPER(e.STATUS) != 'INACTIVE')
+        AND e.DEPARTMENT NOT IN ('Executive', 'Administration')
+      GROUP BY LOWER(t.EMAIL), TRUNC(t.PTO_DATE, 'IW')
     `);
 
     await safeExecuteDDL(conn, `
-      CREATE OR REPLACE VIEW V_BAMBOO_NOT_IN_ACTIVTRAK AS
+      CREATE OR REPLACE VIEW V_USER_MAPPINGS AS
       SELECT
         e.ID AS EMPLOYEE_ID,
         LOWER(e.EMAIL) AS EMAIL,
@@ -347,24 +353,58 @@ export async function initializeSchema(): Promise<void> {
           WHEN t.EMPLOYEE_NO IS NULL THEN NULL
           ELSE TRIM(NVL(t.EMPLOYEE_FIRST_NAME, '') || ' ' || NVL(t.EMPLOYEE_LAST_NAME, ''))
         END AS TBS_EMPLOYEE_NAME,
-        TRIM(t.EMPLOYEE_DEPT) AS TBS_DEPARTMENT
+        CASE
+          WHEN at.HAS_ACTIVTRAK_USER = 1 THEN NVL(act.EMPLOYEE_NAME, NVL(at.ACTIVTRAK_USER, LOWER(e.EMAIL)))
+          ELSE NULL
+        END AS ACTIVTRAK_USER,
+        act.ACTRK_ID,
+        CASE
+          WHEN act.ACTRK_ID IS NULL THEN 0
+          ELSE 1
+        END AS HAS_ACTIVTRAK_MAPPING,
+        NVL(at.HAS_ACTIVTRAK_USER, 0) AS HAS_ACTIVTRAK_USER
       FROM TL_EMPLOYEES e
       LEFT JOIN TL_TBS_EMPLOYEE_MAP m
         ON LOWER(m.EMAIL) = LOWER(e.EMAIL)
       LEFT JOIN TBS_EMPLOYEES@TBS_LINK t
         ON t.EMPLOYEE_NO = m.TBS_EMPLOYEE_NO
+      LEFT JOIN ACTRK_TBS_IDS act
+        ON act.EMPLOYEE_NO = m.TBS_EMPLOYEE_NO
+      LEFT JOIN (
+        SELECT
+          activity.EMAIL,
+          MAX(activity.DISPLAY_NAME) KEEP (DENSE_RANK LAST ORDER BY activity.LAST_SEEN) AS ACTIVTRAK_USER,
+          1 AS HAS_ACTIVTRAK_USER
+        FROM (
+          SELECT
+            LOWER(a.EMAIL) AS EMAIL,
+            NULLIF(TRIM(a.DISPLAY_NAME), '') AS DISPLAY_NAME,
+            MAX(a.RECORD_DATE) AS LAST_SEEN
+          FROM TL_ATTENDANCE a
+          GROUP BY LOWER(a.EMAIL), NULLIF(TRIM(a.DISPLAY_NAME), '')
+
+          UNION ALL
+
+          SELECT
+            LOWER(p.EMAIL) AS EMAIL,
+            NULL AS DISPLAY_NAME,
+            MAX(p.RECORD_DATE) AS LAST_SEEN
+          FROM TL_PRODUCTIVITY p
+          GROUP BY LOWER(p.EMAIL)
+        ) activity
+        GROUP BY activity.EMAIL
+      ) at
+        ON at.EMAIL = LOWER(e.EMAIL)
       WHERE e.EMAIL IS NOT NULL
         AND (e.STATUS IS NULL OR UPPER(e.STATUS) != 'INACTIVE')
-        AND NOT EXISTS (
-          SELECT 1
-          FROM TL_ATTENDANCE a
-          WHERE LOWER(a.EMAIL) = LOWER(e.EMAIL)
-        )
-        AND NOT EXISTS (
-          SELECT 1
-          FROM TL_PRODUCTIVITY p
-          WHERE LOWER(p.EMAIL) = LOWER(e.EMAIL)
-        )
+        AND e.DEPARTMENT NOT IN ('Executive', 'Administration')
+    `);
+
+    await safeExecuteDDL(conn, `
+      CREATE OR REPLACE VIEW V_BAMBOO_NOT_IN_ACTIVTRAK AS
+      SELECT *
+      FROM V_USER_MAPPINGS
+      WHERE HAS_ACTIVTRAK_USER = 0
     `);
 
     // Tab visibility — role defaults
@@ -436,10 +476,116 @@ export async function initializeSchema(): Promise<void> {
           MERGE INTO TL_TAB_ROLES t
           USING (SELECT '${roleName}' AS ROLE_NAME, '${tab}' AS TAB_KEY FROM DUAL) s
           ON (t.ROLE_NAME = s.ROLE_NAME AND t.TAB_KEY = s.TAB_KEY)
-          WHEN MATCHED THEN UPDATE SET t.VISIBLE = ${visible}
           WHEN NOT MATCHED THEN INSERT (ROLE_NAME, TAB_KEY, VISIBLE) VALUES ('${roleName}', '${tab}', ${visible})
         `);
       }
+    }
+
+    await conn.execute(`
+      UPDATE TL_TAB_ROLES
+         SET VISIBLE = 1
+       WHERE ROLE_NAME = 'root-admin'
+         AND TAB_KEY IN (${allTabs.map((tab) => `'${tab}'`).join(', ')})
+    `);
+
+    const roleList = `'root-admin', 'hr-admin', 'director', 'manager', 'employee'`;
+    const tabList = allTabs.map((tab) => `'${tab}'`).join(', ');
+    await conn.execute(`
+      DELETE FROM TL_TAB_ROLES
+       WHERE ROLE_NAME NOT IN (${roleList})
+          OR TAB_KEY NOT IN (${tabList})
+    `);
+    await conn.execute(`
+      DELETE FROM TL_TAB_OVERRIDES
+       WHERE TAB_KEY NOT IN (${tabList})
+    `);
+
+    for (const [sourceEmail, canonicalEmail] of Object.entries(EMAIL_ALIAS_TO_CANONICAL)) {
+      if (sourceEmail === canonicalEmail) continue;
+
+      await conn.execute(
+        `DELETE FROM TL_ATTENDANCE
+          WHERE LOWER(EMAIL) = :sourceEmail
+            AND EXISTS (
+              SELECT 1
+                FROM TL_ATTENDANCE existing
+               WHERE existing.RECORD_DATE = TL_ATTENDANCE.RECORD_DATE
+                 AND LOWER(existing.EMAIL) = :canonicalEmail
+            )`,
+        { sourceEmail, canonicalEmail },
+      );
+      await conn.execute(
+        `UPDATE TL_ATTENDANCE
+            SET EMAIL = :canonicalEmail
+          WHERE LOWER(EMAIL) = :sourceEmail`,
+        { sourceEmail, canonicalEmail },
+      );
+
+      await conn.execute(
+        `DELETE FROM TL_PRODUCTIVITY
+          WHERE LOWER(EMAIL) = :sourceEmail
+            AND EXISTS (
+              SELECT 1
+                FROM TL_PRODUCTIVITY existing
+               WHERE existing.RECORD_DATE = TL_PRODUCTIVITY.RECORD_DATE
+                 AND LOWER(existing.EMAIL) = :canonicalEmail
+            )`,
+        { sourceEmail, canonicalEmail },
+      );
+      await conn.execute(
+        `UPDATE TL_PRODUCTIVITY
+            SET EMAIL = :canonicalEmail
+          WHERE LOWER(EMAIL) = :sourceEmail`,
+        { sourceEmail, canonicalEmail },
+      );
+
+      await conn.execute(
+        `UPDATE TL_EMPLOYEES
+            SET EMAIL = :canonicalEmail
+          WHERE LOWER(EMAIL) = :sourceEmail`,
+        { sourceEmail, canonicalEmail },
+      );
+      await conn.execute(
+        `UPDATE TL_EMPLOYEES
+            SET SUPERVISOR_EMAIL = :canonicalEmail
+          WHERE LOWER(SUPERVISOR_EMAIL) = :sourceEmail`,
+        { sourceEmail, canonicalEmail },
+      );
+      await conn.execute(
+        `UPDATE TL_TIME_OFF
+            SET EMAIL = :canonicalEmail
+          WHERE LOWER(EMAIL) = :sourceEmail`,
+        { sourceEmail, canonicalEmail },
+      );
+      await conn.execute(
+        `UPDATE TL_REMOTE_WORK_REQUESTS
+            SET EMAIL = :canonicalEmail
+          WHERE LOWER(EMAIL) = :sourceEmail`,
+        { sourceEmail, canonicalEmail },
+      );
+      await conn.execute(
+        `UPDATE TL_TBS_EMPLOYEE_MAP
+            SET EMAIL = :canonicalEmail
+          WHERE LOWER(EMAIL) = :sourceEmail`,
+        { sourceEmail, canonicalEmail },
+      );
+      await conn.execute(
+        `DELETE FROM TL_TAB_OVERRIDES
+          WHERE LOWER(EMAIL) = :sourceEmail
+            AND EXISTS (
+              SELECT 1
+                FROM TL_TAB_OVERRIDES existing
+               WHERE existing.TAB_KEY = TL_TAB_OVERRIDES.TAB_KEY
+                 AND LOWER(existing.EMAIL) = :canonicalEmail
+            )`,
+        { sourceEmail, canonicalEmail },
+      );
+      await conn.execute(
+        `UPDATE TL_TAB_OVERRIDES
+            SET EMAIL = :canonicalEmail
+          WHERE LOWER(EMAIL) = :sourceEmail`,
+        { sourceEmail, canonicalEmail },
+      );
     }
 
     console.log('Oracle schema initialized successfully');

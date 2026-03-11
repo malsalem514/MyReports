@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { cachified } from './cache';
+import { normalizeEmail, normalizeEmailNullable } from './email';
 
 // ============================================================================
 // Helpers
@@ -243,7 +244,7 @@ export async function buildSupervisorMap(): Promise<
   const emailById = new Map<string, string>();
 
   for (const emp of employees) {
-    if (emp.workEmail) emailById.set(emp.id, emp.workEmail);
+    if (emp.workEmail) emailById.set(emp.id, normalizeEmail(emp.workEmail));
   }
 
   for (const emp of employees) {
@@ -261,15 +262,15 @@ export async function buildSupervisorMap(): Promise<
 export function transformEmployee(emp: BambooHREmployee) {
   return {
     bamboohrId: emp.id,
-    email: emp.workEmail || `${emp.firstName}.${emp.lastName}@unknown.com`,
+    email: normalizeEmailNullable(emp.workEmail) || `${emp.firstName}.${emp.lastName}@unknown.com`,
     firstName: emp.firstName || 'Unknown',
     lastName: emp.lastName || 'Unknown',
     jobTitle: emp.jobTitle || null,
     department: emp.department || null,
     division: emp.division || null,
     location: emp.location || null,
-    workEmail: emp.workEmail || null,
-    supervisorEmail: emp.supervisorEmail || null,
+    workEmail: normalizeEmailNullable(emp.workEmail),
+    supervisorEmail: normalizeEmailNullable(emp.supervisorEmail),
     hireDate: emp.hireDate ? new Date(emp.hireDate) : null,
     employmentStatus: emp.employmentStatus || emp.status || null,
     isActive: emp.status?.toLowerCase() !== 'inactive',
@@ -299,7 +300,7 @@ async function _fetchTimeOffRequestsUncached(
       const emp = employeeMap.get(request.employeeId);
       ptoRecords.push({
         employeeId: request.employeeId,
-        employeeEmail: emp?.workEmail?.toLowerCase() || '',
+        employeeEmail: normalizeEmailNullable(emp?.workEmail) || '',
         employeeName: emp?.displayName || request.name || 'Unknown',
         department: emp?.department || 'Unknown',
         startDate: request.start,
@@ -374,7 +375,7 @@ async function _fetchRemoteWorkRequestsUncached(): Promise<RemoteWorkRequestReco
       records.push({
         rowId: request.id,
         employeeId: request.employeeId,
-        employeeEmail: employee?.workEmail?.toLowerCase() || '',
+        employeeEmail: normalizeEmailNullable(employee?.workEmail) || '',
         employeeName:
           employee?.displayName ||
           `${employee?.firstName || ''} ${employee?.lastName || ''}`.trim() ||

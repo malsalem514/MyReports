@@ -1,6 +1,7 @@
 import { fetchActiveEmployees, fetchRemoteWorkRequests, fetchTimeOffRequests } from './bamboohr';
 import { fetchOfficeAttendanceData, fetchProductivityData } from './bigquery';
 import { execute, executeMany, initializeSchema } from './oracle';
+import { normalizeEmailNullable } from './email';
 
 export interface SyncSummary {
   startedAt: string;
@@ -100,7 +101,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
       .filter((emp) => emp.workEmail)
       .map((emp) => ({
         ID: emp.id,
-        EMAIL: emp.workEmail?.toLowerCase() || null,
+        EMAIL: normalizeEmailNullable(emp.workEmail),
         DISPLAY_NAME: emp.displayName || null,
         FIRST_NAME: emp.firstName || null,
         LAST_NAME: emp.lastName || null,
@@ -110,7 +111,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
         LOCATION: emp.location || null,
         SUPERVISOR_ID: emp.supervisorId || emp.supervisorEId || null,
         SUPERVISOR_NAME: emp.supervisor || null,
-        SUPERVISOR_EMAIL: emp.supervisorEmail?.toLowerCase() || null,
+        SUPERVISOR_EMAIL: normalizeEmailNullable(emp.supervisorEmail),
         HIRE_DATE: emp.hireDate ? parseDateOnly(emp.hireDate) : null,
         STATUS: emp.status || emp.employmentStatus || null,
         PHOTO_URL: emp.photoUrl || null,
@@ -180,7 +181,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
       .filter((row) => row.email)
       .map((row) => ({
         RECORD_DATE: row.date,
-        EMAIL: row.email.toLowerCase(),
+        EMAIL: normalizeEmailNullable(row.email),
         DISPLAY_NAME: row.displayName || null,
         LOCATION: row.location || 'Unknown',
         TOTAL_HOURS: row.totalHours || 0,
@@ -230,7 +231,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
       .filter((row) => row.email)
       .map((row) => ({
         RECORD_DATE: row.date,
-        EMAIL: row.email.toLowerCase(),
+        EMAIL: normalizeEmailNullable(row.email),
         PRODUCTIVE_TIME: row.productive_time || 0,
         UNPRODUCTIVE_TIME: row.unproductive_time || 0,
         NEUTRAL_TIME: row.neutral_time || 0,
@@ -333,7 +334,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
       .filter((row) => row.employeeId)
       .map((row) => ({
         EMPLOYEE_ID: row.employeeId,
-        EMAIL: row.employeeEmail?.toLowerCase() || null,
+        EMAIL: normalizeEmailNullable(row.employeeEmail),
         EMPLOYEE_NAME: row.employeeName || null,
         DEPARTMENT: row.department || null,
         START_DATE: parseDateOnly(row.startDate),
@@ -395,7 +396,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
       .map((row) => ({
         BAMBOO_ROW_ID: Number(row.rowId),
         EMPLOYEE_ID: row.employeeId,
-        EMAIL: row.employeeEmail?.toLowerCase() || null,
+        EMAIL: normalizeEmailNullable(row.employeeEmail),
         EMPLOYEE_NAME: row.employeeName || null,
         DEPARTMENT: row.department || null,
         REQUEST_DATE: row.requestDate ? parseDateOnly(row.requestDate) : null,

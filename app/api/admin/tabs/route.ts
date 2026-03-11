@@ -10,6 +10,8 @@ import {
   resolveRole,
   getRoleDefaults,
   TAB_KEYS,
+  isTabKey,
+  isTabRole,
 } from '@/lib/tab-config';
 import { initializeSchema } from '@/lib/oracle';
 import { getAccessContextByEmail } from '@/lib/access';
@@ -111,6 +113,9 @@ export async function POST(request: NextRequest) {
   if (!action || !tabKey) {
     return NextResponse.json({ error: 'Missing action or tabKey' }, { status: 400 });
   }
+  if (!isTabKey(tabKey)) {
+    return NextResponse.json({ error: 'Unsupported tab key' }, { status: 400 });
+  }
 
   await initializeSchema();
   try {
@@ -118,6 +123,9 @@ export async function POST(request: NextRequest) {
       case 'set-role':
         if (!role || visible === undefined) {
           return NextResponse.json({ error: 'Missing role or visible' }, { status: 400 });
+        }
+        if (!isTabRole(role)) {
+          return NextResponse.json({ error: 'Unsupported role' }, { status: 400 });
         }
         await setRoleTabVisibility(role, tabKey, visible);
         break;
@@ -139,9 +147,15 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Tab config error:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    const isValidationError = typeof message === 'string'
+      && (
+        message.startsWith('Unsupported ')
+        || message.includes('cannot be disabled')
+      );
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Unknown error' },
-      { status: 500 },
+      { error: message },
+      { status: isValidationError ? 400 : 500 },
     );
   }
 }

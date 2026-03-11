@@ -12,7 +12,10 @@ interface ReportClientProps {
     status: string | null;
     tbsEmployeeNo: number | null;
     tbsEmployeeName: string | null;
-    tbsDepartment: string | null;
+    activTrakUser: string | null;
+    actrkId: number | null;
+    hasActivTrakMapping: boolean;
+    hasActivTrakUser: boolean;
   }>;
 }
 
@@ -24,6 +27,7 @@ function escapeCsvCell(value: string | number | null | undefined): string {
 export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
   const [bambooDepartmentFilter, setBambooDepartmentFilter] = useState('all');
   const [tbsMappingFilter, setTbsMappingFilter] = useState<'all' | 'mapped' | 'unmapped'>('all');
+  const [activTrakMappingFilter, setActivTrakMappingFilter] = useState<'all' | 'mapped' | 'unmapped'>('all');
 
   const bambooDepartments = Array.from(
     new Set(
@@ -44,12 +48,19 @@ export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
         : tbsMappingFilter === 'mapped'
           ? !!row.tbsEmployeeNo
           : !row.tbsEmployeeNo;
+    const matchesActivTrakMapping =
+      activTrakMappingFilter === 'all'
+        ? true
+        : activTrakMappingFilter === 'mapped'
+          ? row.hasActivTrakMapping
+          : !row.hasActivTrakMapping;
 
-    return matchesDepartment && matchesMapping;
+    return matchesDepartment && matchesMapping && matchesActivTrakMapping;
   });
 
   const mappedCount = filteredRows.filter((row) => !!row.tbsEmployeeNo).length;
-  const unmappedCount = filteredRows.length - mappedCount;
+  const activTrakMappedCount = filteredRows.filter((row) => row.hasActivTrakMapping).length;
+  const activTrakUnmappedCount = filteredRows.length - activTrakMappedCount;
 
   const downloadBlob = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -66,11 +77,11 @@ export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
       'Email',
       'Display Name',
       'Bamboo Department',
-      'Location',
       'Status',
       'TBS Employee No',
       'TBS Employee Name',
-      'TBS Department',
+      'ActivTrak User',
+      'ActivTrak ID',
     ];
 
     const csvRows = filteredRows.map((row) => [
@@ -78,11 +89,11 @@ export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
       row.email,
       row.displayName,
       row.department,
-      row.location,
       row.status,
       row.tbsEmployeeNo,
       row.tbsEmployeeName,
-      row.tbsDepartment,
+      row.activTrakUser,
+      row.actrkId,
     ]);
 
     const csv = [
@@ -92,7 +103,7 @@ export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
 
     downloadBlob(
       new Blob([csv], { type: 'text/csv;charset=utf-8;' }),
-      'bamboo-not-in-activtrak.csv',
+      'users-mappings.csv',
     );
   };
 
@@ -100,9 +111,9 @@ export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
     <div className="space-y-6">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-gray-900">Bamboo Not In ActivTrak</h2>
+          <h2 className="text-lg font-semibold text-gray-900">Users Mappings</h2>
           <p className="mt-1 text-sm text-gray-500">
-            Active Bamboo employees in Oracle with no rows in `TL_ATTENDANCE` and `TL_PRODUCTIVITY`.
+            Active Bamboo employees in Oracle with their TBS and ActivTrak mappings.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -120,7 +131,7 @@ export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
         </div>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-4">
         <div className="rounded-xl border border-gray-200 bg-white p-4">
           <div className="text-[11px] font-medium uppercase tracking-wider text-gray-500">Filtered Rows</div>
           <div className="mt-2 text-2xl font-semibold text-gray-900">{filteredRows.length}</div>
@@ -130,8 +141,12 @@ export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
           <div className="mt-2 text-2xl font-semibold text-gray-900">{mappedCount}</div>
         </div>
         <div className="rounded-xl border border-gray-200 bg-white p-4">
-          <div className="text-[11px] font-medium uppercase tracking-wider text-gray-500">Unmapped</div>
-          <div className="mt-2 text-2xl font-semibold text-gray-900">{unmappedCount}</div>
+          <div className="text-[11px] font-medium uppercase tracking-wider text-gray-500">Mapped To ActivTrak</div>
+          <div className="mt-2 text-2xl font-semibold text-gray-900">{activTrakMappedCount}</div>
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-white p-4">
+          <div className="text-[11px] font-medium uppercase tracking-wider text-gray-500">Unmapped In ActivTrak</div>
+          <div className="mt-2 text-2xl font-semibold text-gray-900">{activTrakUnmappedCount}</div>
         </div>
       </div>
 
@@ -167,11 +182,26 @@ export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
             <option value="unmapped">Unmapped</option>
           </select>
         </label>
+        <label className="block">
+          <span className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">
+            ActivTrak Mapping
+          </span>
+          <select
+            value={activTrakMappingFilter}
+            onChange={(e) => setActivTrakMappingFilter(e.target.value as 'all' | 'mapped' | 'unmapped')}
+            className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+          >
+            <option value="all">All</option>
+            <option value="mapped">Mapped to ActivTrak</option>
+            <option value="unmapped">Unmapped in ActivTrak</option>
+          </select>
+        </label>
         <button
           type="button"
           onClick={() => {
             setBambooDepartmentFilter('all');
             setTbsMappingFilter('all');
+            setActivTrakMappingFilter('all');
           }}
           className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] font-medium text-gray-700 transition-colors hover:bg-gray-50"
         >
@@ -187,8 +217,7 @@ export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
               <th className="px-4 py-3 text-left text-[12px] font-medium uppercase tracking-wider text-gray-500">Email</th>
               <th className="px-4 py-3 text-left text-[12px] font-medium uppercase tracking-wider text-gray-500">Bamboo Department</th>
               <th className="px-4 py-3 text-left text-[12px] font-medium uppercase tracking-wider text-gray-500">TBS User</th>
-              <th className="px-4 py-3 text-left text-[12px] font-medium uppercase tracking-wider text-gray-500">TBS Department</th>
-              <th className="px-4 py-3 text-left text-[12px] font-medium uppercase tracking-wider text-gray-500">Location</th>
+              <th className="px-4 py-3 text-left text-[12px] font-medium uppercase tracking-wider text-gray-500">ActivTrak User</th>
             </tr>
           </thead>
           <tbody>
@@ -211,13 +240,21 @@ export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
                     </div>
                   ) : '—'}
                 </td>
-                <td className="px-4 py-3 text-gray-600">{row.tbsDepartment || '—'}</td>
-                <td className="px-4 py-3 text-gray-600">{row.location || '—'}</td>
+                <td className="px-4 py-3 text-gray-600">
+                  {row.actrkId ? (
+                    <div>
+                      <div className="font-medium text-gray-800">{row.activTrakUser || '—'}</div>
+                      <div className="text-[12px] text-gray-500">#{row.actrkId}</div>
+                    </div>
+                  ) : (
+                    row.activTrakUser || '—'
+                  )}
+                </td>
               </tr>
             ))}
             {filteredRows.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-[13px] text-gray-500">
+                <td colSpan={5} className="px-4 py-8 text-center text-[13px] text-gray-500">
                   No rows match the current filters.
                 </td>
               </tr>

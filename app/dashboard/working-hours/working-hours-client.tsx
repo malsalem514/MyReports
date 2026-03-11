@@ -1,6 +1,7 @@
 'use client';
 
 import { Fragment, type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import type {
   WorkingHoursDayRow,
   WorkingHoursEmployeeWeekRow,
@@ -241,6 +242,54 @@ function formatWeekLabel(weekStart: string): string {
   return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
 }
 
+function toDateParam(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function getWeekRange() {
+  const now = new Date();
+  const dayOfWeek = now.getDay();
+  const startDate = new Date(now);
+  startDate.setDate(now.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1));
+  const endDate = new Date(startDate);
+  endDate.setDate(startDate.getDate() + 6);
+  return {
+    startDate: toDateParam(startDate),
+    endDate: toDateParam(endDate),
+  };
+}
+
+function getRangePresetKey(
+  startDate: string,
+  endDate: string,
+): 'thisweek' | 'week' | '30days' | null {
+  const today = new Date();
+  const expectedEnd = toDateParam(today);
+  if (endDate !== expectedEnd) return null;
+
+  const last7 = new Date(today);
+  last7.setDate(today.getDate() - 7);
+  if (startDate === toDateParam(last7)) {
+    return 'week';
+  }
+
+  const last30 = new Date(today);
+  last30.setDate(today.getDate() - 30);
+  if (startDate === toDateParam(last30)) {
+    return '30days';
+  }
+
+  const weekRange = getWeekRange();
+  if (startDate === weekRange.startDate && endDate === weekRange.endDate) {
+    return 'thisweek';
+  }
+
+  return null;
+}
+
 function getException(employee: WorkingHoursEmployeeWeekRow): {
   kind: ExceptionKind;
   label: string;
@@ -303,6 +352,8 @@ export function WorkingHoursClient({
   endDate,
   lastSyncedAt,
 }: Props) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [selectedGroup, setSelectedGroup] = useState('all');
   const [selectedEmployeeNo, setSelectedEmployeeNo] = useState('all');
   const [selectedUser, setSelectedUser] = useState('all');
@@ -312,6 +363,41 @@ export function WorkingHoursClient({
   const [expandedWeeks, setExpandedWeeks] = useState<ExpandedWeeks>({});
   const [detail, setDetail] = useState<DetailState | null>(null);
   const detailHistoryPushed = useRef(false);
+  const currentRangeKey = getRangePresetKey(startDate, endDate);
+  const appliedRangeLabel =
+    currentRangeKey === 'thisweek'
+      ? 'Quick range (This Week)'
+      : currentRangeKey === 'week'
+        ? 'Quick range (Last 7 Days)'
+        : currentRangeKey === '30days'
+          ? 'Quick range (30 Days)'
+          : 'Custom dates';
+
+  const handleDateChange = (newStart: string, newEnd: string) => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set('startDate', newStart);
+    params.set('endDate', newEnd);
+    router.push(`/dashboard/working-hours?${params.toString()}`);
+  };
+
+  const handlePreset = (preset: 'week' | '30days' | 'thisweek') => {
+    const end = new Date();
+    const start = new Date();
+    switch (preset) {
+      case 'thisweek': {
+        const range = getWeekRange();
+        handleDateChange(range.startDate, range.endDate);
+        return;
+      }
+      case 'week':
+        start.setDate(end.getDate() - 7);
+        break;
+      case '30days':
+        start.setDate(end.getDate() - 30);
+        break;
+    }
+    handleDateChange(toDateParam(start), toDateParam(end));
+  };
 
   const filteredWeeks = useMemo<WeekWithMeta[]>(() => {
     const query = search.trim().toLowerCase();
@@ -839,6 +925,7 @@ export function WorkingHoursClient({
           <p className="mt-1 text-[12px] text-gray-500">
             Weekly TBS vs ActivTrak comparison for {startDate} to {endDate}
           </p>
+          <p className="mt-1 text-[11px] text-gray-400">Applied: {appliedRangeLabel}</p>
           <p className="mt-1 text-[11px] text-gray-400">{formatLastSynced(lastSyncedAt)}</p>
         </div>
         <div className="flex items-center gap-2">
@@ -854,6 +941,49 @@ export function WorkingHoursClient({
           >
             XLSX
           </button>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+        <div className="grid grid-cols-3 rounded-md border border-gray-200 bg-white shadow-sm">
+          {([
+            { label: 'This Week', preset: 'thisweek' as const },
+            { label: 'Last 7 Days', preset: 'week' as const },
+            { label: '30 Days', preset: '30days' as const },
+          ]).map(({ label, preset }) => (
+            <button
+              key={label}
+              type="button"
+              onClick={() => handlePreset(preset)}
+              className={`rounded-none border-0 px-2 py-1.5 text-[11px] font-medium shadow-none first:rounded-l-md last:rounded-r-md sm:px-3 sm:text-[12px] ${
+                currentRangeKey === preset
+                  ? 'bg-slate-800 text-white hover:bg-slate-800 hover:text-white'
+                  : 'bg-white text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <label className="space-y-1">
+            <span className="block text-[11px] font-medium uppercase tracking-wider text-gray-500">Start</span>
+            <input
+              type="date"
+              value={startDate}
+              onChange={(e) => handleDateChange(e.target.value || startDate, endDate)}
+              className="w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-600 shadow-sm focus:border-gray-300 focus:outline-none"
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="block text-[11px] font-medium uppercase tracking-wider text-gray-500">End</span>
+            <input
+              type="date"
+              value={endDate}
+              onChange={(e) => handleDateChange(startDate, e.target.value || endDate)}
+              className="w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-600 shadow-sm focus:border-gray-300 focus:outline-none"
+            />
+          </label>
         </div>
       </div>
 

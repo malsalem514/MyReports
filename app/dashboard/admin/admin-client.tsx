@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 
 interface AdminClientProps {
   roles: string[];
@@ -32,6 +33,7 @@ interface EmployeeTabState {
 type OverrideState = 'inherit' | 'show' | 'hide';
 
 function formatRoleLabel(role: string): string {
+  if (role === 'root-admin') return 'Root Admin';
   if (role === 'hr-admin') return 'HR Admin';
   return role.charAt(0).toUpperCase() + role.slice(1);
 }
@@ -42,8 +44,11 @@ export function AdminClient({
   roleMap: initialRoleMap,
   directorUsers,
 }: AdminClientProps) {
+  const router = useRouter();
   const [roleMap, setRoleMap] = useState(initialRoleMap);
   const [saving, setSaving] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Employee override state
   const [searchQuery, setSearchQuery] = useState('');
@@ -67,27 +72,44 @@ export function AdminClient({
 
   const callApi = useCallback(async (body: Record<string, unknown>) => {
     setSaving(true);
+    setSaveError(null);
+    setSaveMessage(null);
     try {
       const res = await fetch('/api/admin/tabs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(await res.text());
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Save failed');
+      }
+      setSaveMessage('Saved');
+      router.refresh();
     } finally {
       setSaving(false);
     }
-  }, []);
+  }, [router]);
 
   // ── Role default toggles ──────────────────────────────────────────────
 
   const toggleRole = async (role: string, tab: string) => {
+    if (role === 'root-admin') return;
     const newVal = !roleMap[role][tab];
+    const previousRow = roleMap[role];
     setRoleMap((prev) => ({
       ...prev,
       [role]: { ...prev[role], [tab]: newVal },
     }));
-    await callApi({ action: 'set-role', role, tabKey: tab, visible: newVal });
+    try {
+      await callApi({ action: 'set-role', role, tabKey: tab, visible: newVal });
+    } catch (error) {
+      setRoleMap((prev) => ({
+        ...prev,
+        [role]: previousRow,
+      }));
+      setSaveError(error instanceof Error ? error.message : 'Save failed');
+    }
   };
 
   // ── Employee search ───────────────────────────────────────────────────
@@ -149,20 +171,35 @@ export function AdminClient({
   const setOverrideState = async (tab: string, state: OverrideState) => {
     if (!selectedEmployee) return;
     const email = searchQuery.trim().toLowerCase();
+    const previousOverrides = selectedEmployee.overrides;
 
     if (state === 'inherit') {
       // Remove override
       const next = { ...selectedEmployee.overrides };
       delete next[tab];
       setSelectedEmployee({ ...selectedEmployee, overrides: next });
-      await callApi({ action: 'remove-override', email, tabKey: tab });
+      try {
+        await callApi({ action: 'remove-override', email, tabKey: tab });
+      } catch (error) {
+        setSelectedEmployee((current) => (
+          current ? { ...current, overrides: previousOverrides } : current
+        ));
+        setSaveError(error instanceof Error ? error.message : 'Save failed');
+      }
     } else {
       const visible = state === 'show';
       setSelectedEmployee({
         ...selectedEmployee,
         overrides: { ...selectedEmployee.overrides, [tab]: visible },
       });
-      await callApi({ action: 'set-override', email, tabKey: tab, visible });
+      try {
+        await callApi({ action: 'set-override', email, tabKey: tab, visible });
+      } catch (error) {
+        setSelectedEmployee((current) => (
+          current ? { ...current, overrides: previousOverrides } : current
+        ));
+        setSaveError(error instanceof Error ? error.message : 'Save failed');
+      }
     }
   };
 
@@ -173,9 +210,20 @@ export function AdminClient({
       <div>
         <h2 className="text-lg font-semibold text-gray-900 mb-1">Tab Visibility Admin</h2>
         <p className="text-sm text-gray-500">
-          Configure which dashboard tabs are visible per role, with per-employee overrides.
+          Configure report-tab visibility per role, with per-employee overrides. Root admin always sees every report.
         </p>
       </div>
+
+      {saveError ? (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[12px] text-red-700">
+          {saveError}
+        </div>
+      ) : null}
+      {saveMessage ? (
+        <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-[12px] text-green-700">
+          {saveMessage}
+        </div>
+      ) : null}
 
       {/* ── Section 1: Role Defaults ─────────────────────────────────── */}
       <section>
@@ -205,10 +253,13 @@ export function AdminClient({
                     <td key={role} className="px-4 py-2.5 text-center">
                       <button
                         onClick={() => toggleRole(role, tab)}
-                        disabled={saving}
+                        disabled={saving || role === 'root-admin'}
+                        role="switch"
+                        aria-checked={roleMap[role]?.[tab] ?? false}
                         className={`inline-flex h-6 w-11 items-center rounded-full transition-colors ${
                           roleMap[role]?.[tab] ? 'bg-blue-500' : 'bg-gray-200'
-                        }`}
+                        } ${role === 'root-admin' ? 'cursor-not-allowed opacity-60' : ''}`}
+                        aria-label={`${formatRoleLabel(role)} ${tab} visibility`}
                       >
                         <span
                           className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${

@@ -19,7 +19,6 @@ interface Props {
   departments: string[];
   locations: string[];
   summary: AttendanceSummary;
-  lookbackWeeks: number;
   startDate: string;
   endDate: string;
 }
@@ -189,6 +188,17 @@ function formatRangeLabel(startDate: string, endDate: string): string {
   return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
 }
 
+function getActiveLookbackWeeks(startDate: string, endDate: string): number | null {
+  for (const weeksBack of LOOKBACK_OPTIONS) {
+    const range = getOfficeAttendanceDefaultRange(weeksBack);
+    if (toDateParam(range.startDate) === startDate && toDateParam(range.endDate) === endDate) {
+      return weeksBack;
+    }
+  }
+
+  return null;
+}
+
 function parseListParam(value: string | null): string[] {
   if (!value) return [];
   return value.split(',').map((part) => part.trim()).filter(Boolean);
@@ -265,7 +275,6 @@ export function AttendanceClient({
   departments,
   locations,
   summary,
-  lookbackWeeks,
   startDate,
   endDate,
 }: Props) {
@@ -334,6 +343,10 @@ export function AttendanceClient({
   const aggregateLabel = isManagerView ? 'Manager' : 'Department';
   const aggregatePluralLabel = isManagerView ? 'managers' : 'departments';
   const currentView = OFFICE_ATTENDANCE_VIEW_OPTIONS.find((option) => option.id === viewMode) ?? OFFICE_ATTENDANCE_VIEW_OPTIONS[0]!;
+  const activeLookbackWeeks = useMemo(
+    () => getActiveLookbackWeeks(startDate, endDate),
+    [endDate, startDate],
+  );
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -448,12 +461,21 @@ export function AttendanceClient({
   };
 
   const changeLookback = (val: string) => {
+    if (val === 'custom') return;
     const weeksBack = Number(val);
     const { startDate: nextStart, endDate: nextEnd } = getOfficeAttendanceDefaultRange(weeksBack);
     const params = new URLSearchParams(searchParams.toString());
     params.set('lookbackWeeks', val);
     params.set('startDate', toDateParam(nextStart));
     params.set('endDate', toDateParam(nextEnd));
+    router.push(`/dashboard/office-attendance?${params.toString()}`);
+  };
+
+  const changeDates = (nextStart: string, nextEnd: string) => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete('lookbackWeeks');
+    params.set('startDate', nextStart);
+    params.set('endDate', nextEnd);
     router.push(`/dashboard/office-attendance?${params.toString()}`);
   };
 
@@ -1203,17 +1225,11 @@ export function AttendanceClient({
                     ? `Weekly compliance is based on Quebec, non-exempt employees meeting the ${OFFICE_DAYS_REQUIRED}-day target.`
                     : `${currentView.description} Target ${OFFICE_DAYS_REQUIRED} office days per week.`}
               </p>
+              <p className="mt-1 text-[11px] text-gray-400">
+                Applied: {activeLookbackWeeks ? `Quick range (${activeLookbackWeeks} weeks)` : 'Custom dates'} · {formatRangeLabel(startDate, endDate)}
+              </p>
             </div>
             <div className="hidden items-center gap-2 md:flex">
-              <select
-                value={lookbackWeeks}
-                onChange={(e) => changeLookback(e.target.value)}
-                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-[12px] text-gray-600 focus:border-gray-300 focus:outline-none"
-              >
-                {LOOKBACK_OPTIONS.map((w) => (
-                  <option key={w} value={w}>{w} weeks</option>
-                ))}
-              </select>
               <button onClick={exportCSV}
                 className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-[12px] font-medium text-gray-700 hover:bg-gray-50">
                 CSV
@@ -1226,20 +1242,43 @@ export function AttendanceClient({
           </div>
 
           <div className="grid gap-2 md:hidden">
-            <div className="grid grid-cols-[1fr,auto] gap-2">
+            <div className="grid gap-2">
               <select
-                value={lookbackWeeks}
+                value={activeLookbackWeeks ? String(activeLookbackWeeks) : 'custom'}
                 onChange={(e) => changeLookback(e.target.value)}
                 className="min-w-0 rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
               >
+                <option value="custom">Custom dates</option>
                 {LOOKBACK_OPTIONS.map((w) => (
                   <option key={w} value={w}>{w} weeks</option>
                 ))}
               </select>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="space-y-1">
+                  <span className="block text-[11px] font-medium uppercase tracking-wider text-gray-500">Start</span>
+                  <input
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => changeDates(e.target.value || startDate, endDate)}
+                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="block text-[11px] font-medium uppercase tracking-wider text-gray-500">End</span>
+                  <input
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => changeDates(startDate, e.target.value || endDate)}
+                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+                  />
+                </label>
+              </div>
+            </div>
+            <div>
               <button
                 type="button"
                 onClick={() => setMobileFiltersOpen(true)}
-                className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] font-medium text-gray-700 hover:bg-gray-50"
+                className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] font-medium text-gray-700 hover:bg-gray-50"
               >
                 <Filter className="size-3.5" />
                 Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
@@ -1261,6 +1300,40 @@ export function AttendanceClient({
                 XLSX
               </button>
             </div>
+          </div>
+
+          <div className="hidden gap-3 rounded-xl border border-gray-200 bg-white p-4 md:grid md:grid-cols-[minmax(0,220px),minmax(0,180px),minmax(0,180px),1fr] md:items-end">
+            <div>
+              <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Quick Range</label>
+              <select
+                value={activeLookbackWeeks ? String(activeLookbackWeeks) : 'custom'}
+                onChange={(e) => changeLookback(e.target.value)}
+                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+              >
+                <option value="custom">Custom dates</option>
+                {LOOKBACK_OPTIONS.map((w) => (
+                  <option key={w} value={w}>{w} weeks</option>
+                ))}
+              </select>
+            </div>
+            <label>
+              <span className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Start</span>
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => changeDates(e.target.value || startDate, endDate)}
+                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+              />
+            </label>
+            <label>
+              <span className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">End</span>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => changeDates(startDate, e.target.value || endDate)}
+                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+              />
+            </label>
           </div>
 
           <div className="hidden flex-col gap-3 md:flex md:flex-row md:items-end">

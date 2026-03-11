@@ -2,6 +2,7 @@ import { cache } from 'react';
 import { auth } from '@/auth';
 import { getDevBypassEmail } from './dev-bypass';
 import { isAdminEmail, isRootAdminEmail } from './admin';
+import { normalizeEmail } from './email';
 import {
   fetchEmployeeDirectory,
   fetchReportingStructure,
@@ -81,7 +82,7 @@ export const getAccessContext = cache(async (): Promise<AccessContext> => {
 export async function getAccessContextByEmail(
   userEmail: string,
 ): Promise<AccessContext> {
-  const normalizedEmail = userEmail.toLowerCase().trim();
+  const normalizedEmail = normalizeEmail(userEmail);
   const isRootAdmin = isRootAdminEmail(normalizedEmail);
   const hasAdminAccess = isAdminEmail(normalizedEmail);
 
@@ -91,7 +92,7 @@ export async function getAccessContextByEmail(
       const allEmployees = await fetchEmployeeDirectory();
       const allEmails = allEmployees
         .filter((emp) => emp.workEmail)
-        .map((emp) => emp.workEmail!.toLowerCase());
+        .map((emp) => normalizeEmail(emp.workEmail!));
       return {
         userEmail: normalizedEmail,
         employeeId: null,
@@ -127,7 +128,7 @@ export async function getAccessContextByEmail(
     const allEmployees = await fetchEmployeeDirectory();
 
     const currentUser = allEmployees.find(
-      (emp) => emp.workEmail?.toLowerCase() === normalizedEmail,
+      (emp) => emp.workEmail && normalizeEmail(emp.workEmail) === normalizedEmail,
     );
 
     if (!currentUser) {
@@ -160,7 +161,7 @@ export async function getAccessContextByEmail(
     }
 
     for (const report of reports) {
-      if (report.workEmail) allowedEmails.add(report.workEmail.toLowerCase());
+      if (report.workEmail) allowedEmails.add(normalizeEmail(report.workEmail));
     }
 
     const userName =
@@ -212,7 +213,7 @@ export function getAccessLevel(context: AccessContext): AccessLevel {
 
 export function canAccessEmployee(context: AccessContext, targetEmail: string): boolean {
   if (context.isRootAdmin || context.isHRAdmin) return true;
-  return context.allowedEmails.includes(targetEmail.toLowerCase());
+  return context.allowedEmails.includes(normalizeEmail(targetEmail));
 }
 
 export function getScopedReportEmails(context: AccessContext): string[] | undefined {
@@ -222,6 +223,6 @@ export function getScopedReportEmails(context: AccessContext): string[] | undefi
 
 export function filterAccessibleEmails(context: AccessContext, emails: string[]): string[] {
   if (context.isRootAdmin || context.isHRAdmin) return emails;
-  const allowedSet = new Set(context.allowedEmails);
-  return emails.filter((email) => allowedSet.has(email.toLowerCase()));
+  const allowedSet = new Set(context.allowedEmails.map((email) => normalizeEmail(email)));
+  return emails.filter((email) => allowedSet.has(normalizeEmail(email)));
 }

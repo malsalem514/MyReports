@@ -61,7 +61,10 @@ export interface BambooNotInActivTrakEmployee {
   status: string | null;
   tbsEmployeeNo: number | null;
   tbsEmployeeName: string | null;
-  tbsDepartment: string | null;
+  activTrakUser: string | null;
+  actrkId: number | null;
+  hasActivTrakMapping: boolean;
+  hasActivTrakUser: boolean;
 }
 
 // ============================================================================
@@ -126,10 +129,13 @@ export async function getBambooNotInActivTrakEmployees(): Promise<BambooNotInAct
     STATUS: string;
     TBS_EMPLOYEE_NO: number | null;
     TBS_EMPLOYEE_NAME: string | null;
-    TBS_DEPARTMENT: string | null;
+    ACTIVTRAK_USER: string | null;
+    ACTRK_ID: number | null;
+    HAS_ACTIVTRAK_MAPPING: number;
+    HAS_ACTIVTRAK_USER: number;
   }>(`
     SELECT *
-    FROM V_BAMBOO_NOT_IN_ACTIVTRAK
+    FROM V_USER_MAPPINGS
     ORDER BY DISPLAY_NAME, EMAIL
   `);
 
@@ -148,7 +154,10 @@ export async function getBambooNotInActivTrakEmployees(): Promise<BambooNotInAct
     status: r.STATUS,
     tbsEmployeeNo: r.TBS_EMPLOYEE_NO,
     tbsEmployeeName: r.TBS_EMPLOYEE_NAME,
-    tbsDepartment: r.TBS_DEPARTMENT,
+    activTrakUser: r.ACTIVTRAK_USER,
+    actrkId: r.ACTRK_ID,
+    hasActivTrakMapping: r.HAS_ACTIVTRAK_MAPPING === 1,
+    hasActivTrakUser: r.HAS_ACTIVTRAK_USER === 1,
   }));
 }
 
