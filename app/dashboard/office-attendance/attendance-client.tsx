@@ -26,7 +26,9 @@ interface Props {
 type SortKey = 'name' | 'department' | 'officeLocation' | 'total' | 'avgPerWeek' | 'trend' | string;
 type SortDir = 'asc' | 'desc';
 type ViewMode = OfficeAttendanceViewKey;
+type DateFilterMode = 'quick' | 'custom';
 const DEFAULT_EMPLOYEE_LOCATION = 'Quebec (Montreal Head Office)';
+const DEFAULT_OFFICE_ATTENDANCE_QUICK_RANGE = 4;
 type SearchParamReader = {
   get(name: string): string | null;
   has(name: string): boolean;
@@ -199,6 +201,21 @@ function getActiveLookbackWeeks(startDate: string, endDate: string): number | nu
   return null;
 }
 
+function getAppliedDateFilterMode(
+  searchParams: SearchParamReader,
+  activeLookbackWeeks: number | null,
+): DateFilterMode {
+  const explicitMode = searchParams.get('dateMode');
+  if (explicitMode === 'custom') return 'custom';
+  if (explicitMode === 'quick') return 'quick';
+
+  if ((searchParams.has('startDate') || searchParams.has('endDate')) && activeLookbackWeeks === null) {
+    return 'custom';
+  }
+
+  return 'quick';
+}
+
 function parseListParam(value: string | null): string[] {
   if (!value) return [];
   return value.split(',').map((part) => part.trim()).filter(Boolean);
@@ -308,9 +325,7 @@ export function AttendanceClient({
     [currentWeek, weeks],
   );
   const buildStateParams = useMemo(() => {
-    const params = typeof window === 'undefined'
-      ? new URLSearchParams(searchParams.toString())
-      : new URLSearchParams(window.location.search);
+    const params = new URLSearchParams(searchParams.toString());
 
     if (search) params.set('q', search);
     else params.delete('q');
@@ -349,6 +364,16 @@ export function AttendanceClient({
     () => getActiveLookbackWeeks(startDate, endDate),
     [endDate, startDate],
   );
+  const appliedDateFilterMode = useMemo(
+    () => getAppliedDateFilterMode(searchParams, activeLookbackWeeks),
+    [activeLookbackWeeks, searchParams],
+  );
+  const [dateFilterMode, setDateFilterMode] = useState<DateFilterMode>(() => appliedDateFilterMode);
+  const [quickRangeDraft, setQuickRangeDraft] = useState<string>(
+    () => String(activeLookbackWeeks ?? DEFAULT_OFFICE_ATTENDANCE_QUICK_RANGE),
+  );
+  const [customStartDate, setCustomStartDate] = useState(startDate);
+  const [customEndDate, setCustomEndDate] = useState(endDate);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -379,17 +404,11 @@ export function AttendanceClient({
   }, [locations, searchParams, viewMode]);
 
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    if (!searchParams.has('startDate') && !searchParams.has('endDate') && !searchParams.has('lookbackWeeks')) return;
-
-    const params = new URLSearchParams(searchParams.toString());
-    params.delete('startDate');
-    params.delete('endDate');
-    params.delete('lookbackWeeks');
-
-    const nextUrl = params.toString() ? `${pathname}?${params.toString()}` : pathname;
-    window.history.replaceState(window.history.state, '', nextUrl);
-  }, [pathname, searchParams]);
+    setDateFilterMode(appliedDateFilterMode);
+    setQuickRangeDraft(String(activeLookbackWeeks ?? DEFAULT_OFFICE_ATTENDANCE_QUICK_RANGE));
+    setCustomStartDate(startDate);
+    setCustomEndDate(endDate);
+  }, [activeLookbackWeeks, appliedDateFilterMode, endDate, startDate]);
 
   useEffect(() => {
     setMobileFiltersOpen(false);
@@ -476,22 +495,28 @@ export function AttendanceClient({
   };
 
   const changeLookback = (val: string) => {
-    if (val === 'custom') return;
     const weeksBack = Number(val);
-    const { startDate: nextStart, endDate: nextEnd } = getOfficeAttendanceDefaultRange(weeksBack);
+    if (!LOOKBACK_OPTIONS.includes(weeksBack as (typeof LOOKBACK_OPTIONS)[number])) return;
     const params = new URLSearchParams(searchParams.toString());
-    params.set('lookbackWeeks', val);
-    params.set('startDate', toDateParam(nextStart));
-    params.set('endDate', toDateParam(nextEnd));
-    router.push(`/dashboard/office-attendance?${params.toString()}`);
+    params.set('dateMode', 'quick');
+    params.set('lookbackWeeks', String(weeksBack));
+    params.delete('startDate');
+    params.delete('endDate');
+    router.push(`/dashboard/office-attendance?${params.toString()}`, { scroll: false });
   };
 
   const changeDates = (nextStart: string, nextEnd: string) => {
     const params = new URLSearchParams(searchParams.toString());
+    params.set('dateMode', 'custom');
     params.delete('lookbackWeeks');
     params.set('startDate', nextStart);
     params.set('endDate', nextEnd);
-    router.push(`/dashboard/office-attendance?${params.toString()}`);
+    router.push(`/dashboard/office-attendance?${params.toString()}`, { scroll: false });
+  };
+
+  const applyCustomDates = () => {
+    if (!customStartDate || !customEndDate) return;
+    changeDates(customStartDate, customEndDate);
   };
 
   const hasFilters =
@@ -499,6 +524,13 @@ export function AttendanceClient({
     selectedDepts.length > 0 ||
     selectedLocs.length > 0 ||
     includeApprovedRemoteWork;
+  const quickRangeChanged =
+    quickRangeDraft !== String(activeLookbackWeeks ?? DEFAULT_OFFICE_ATTENDANCE_QUICK_RANGE)
+    || appliedDateFilterMode !== 'quick';
+  const customRangeChanged =
+    customStartDate !== startDate
+    || customEndDate !== endDate
+    || appliedDateFilterMode !== 'custom';
 
   // Filter
   const filtered = useMemo(() => {
@@ -1241,7 +1273,7 @@ export function AttendanceClient({
                     : `${currentView.description} Target ${OFFICE_DAYS_REQUIRED} office days per week.`}
               </p>
               <p className="mt-1 text-[11px] text-gray-400">
-                Applied: {activeLookbackWeeks ? `Quick range (${activeLookbackWeeks} weeks)` : 'Custom dates'} · {formatRangeLabel(startDate, endDate)}
+                Applied: {appliedDateFilterMode === 'quick' ? `Quick range (${activeLookbackWeeks ?? DEFAULT_OFFICE_ATTENDANCE_QUICK_RANGE} weeks)` : 'Custom dates'} · {formatRangeLabel(startDate, endDate)}
               </p>
             </div>
             <div className="hidden items-center gap-2 md:flex">
@@ -1257,37 +1289,87 @@ export function AttendanceClient({
           </div>
 
           <div className="grid gap-2 md:hidden">
-            <div className="grid gap-2">
-              <select
-                value={activeLookbackWeeks ? String(activeLookbackWeeks) : 'custom'}
-                onChange={(e) => changeLookback(e.target.value)}
-                className="min-w-0 rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
-              >
-                <option value="custom">Custom dates</option>
-                {LOOKBACK_OPTIONS.map((w) => (
-                  <option key={w} value={w}>{w} weeks</option>
-                ))}
-              </select>
-              <div className="grid grid-cols-2 gap-2">
-                <label className="space-y-1">
-                  <span className="block text-[11px] font-medium uppercase tracking-wider text-gray-500">Start</span>
-                  <input
-                    type="date"
-                    value={startDate}
-                    onChange={(e) => changeDates(e.target.value || startDate, endDate)}
-                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
-                  />
-                </label>
-                <label className="space-y-1">
-                  <span className="block text-[11px] font-medium uppercase tracking-wider text-gray-500">End</span>
-                  <input
-                    type="date"
-                    value={endDate}
-                    onChange={(e) => changeDates(startDate, e.target.value || endDate)}
-                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
-                  />
-                </label>
+            <div className="rounded-xl border border-gray-200 bg-white p-3">
+              <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-1">
+                <button
+                  type="button"
+                  onClick={() => setDateFilterMode('quick')}
+                  className={`rounded-md px-3 py-1.5 text-[12px] font-medium transition ${
+                    dateFilterMode === 'quick'
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  Quick Range
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDateFilterMode('custom')}
+                  className={`rounded-md px-3 py-1.5 text-[12px] font-medium transition ${
+                    dateFilterMode === 'custom'
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  Custom Dates
+                </button>
               </div>
+
+              {dateFilterMode === 'quick' ? (
+                <div className="mt-3 grid gap-2">
+                  <label className="space-y-1">
+                    <span className="block text-[11px] font-medium uppercase tracking-wider text-gray-500">Quick Range</span>
+                    <select
+                      value={quickRangeDraft}
+                      onChange={(e) => setQuickRangeDraft(e.target.value)}
+                      className="min-w-0 rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+                    >
+                      {LOOKBACK_OPTIONS.map((w) => (
+                        <option key={w} value={w}>{w} weeks</option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => changeLookback(quickRangeDraft)}
+                    disabled={!quickRangeChanged}
+                    className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Apply Quick Range
+                  </button>
+                </div>
+              ) : (
+                <div className="mt-3 grid gap-2">
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="space-y-1">
+                      <span className="block text-[11px] font-medium uppercase tracking-wider text-gray-500">Start</span>
+                      <input
+                        type="date"
+                        value={customStartDate}
+                        onChange={(e) => setCustomStartDate(e.target.value || customStartDate)}
+                        className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="block text-[11px] font-medium uppercase tracking-wider text-gray-500">End</span>
+                      <input
+                        type="date"
+                        value={customEndDate}
+                        onChange={(e) => setCustomEndDate(e.target.value || customEndDate)}
+                        className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+                      />
+                    </label>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={applyCustomDates}
+                    disabled={!customRangeChanged || !customStartDate || !customEndDate}
+                    className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Apply Custom Dates
+                  </button>
+                </div>
+              )}
             </div>
             <div>
               <button
@@ -1317,38 +1399,90 @@ export function AttendanceClient({
             </div>
           </div>
 
-          <div className="hidden gap-3 rounded-xl border border-gray-200 bg-white p-4 md:grid md:grid-cols-[minmax(0,220px),minmax(0,180px),minmax(0,180px),1fr] md:items-end">
-            <div>
-              <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Quick Range</label>
-              <select
-                value={activeLookbackWeeks ? String(activeLookbackWeeks) : 'custom'}
-                onChange={(e) => changeLookback(e.target.value)}
-                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
-              >
-                <option value="custom">Custom dates</option>
-                {LOOKBACK_OPTIONS.map((w) => (
-                  <option key={w} value={w}>{w} weeks</option>
-                ))}
-              </select>
+          <div className="hidden rounded-xl border border-gray-200 bg-white p-4 md:block">
+            <div className="flex items-center justify-between gap-4">
+              <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-1">
+                <button
+                  type="button"
+                  onClick={() => setDateFilterMode('quick')}
+                  className={`rounded-md px-3 py-1.5 text-[12px] font-medium transition ${
+                    dateFilterMode === 'quick'
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  Quick Range
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDateFilterMode('custom')}
+                  className={`rounded-md px-3 py-1.5 text-[12px] font-medium transition ${
+                    dateFilterMode === 'custom'
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  Custom Dates
+                </button>
+              </div>
+              <p className="text-[11px] text-gray-400">
+                Only one date mode is active at a time.
+              </p>
             </div>
-            <label>
-              <span className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Start</span>
-              <input
-                type="date"
-                value={startDate}
-                onChange={(e) => changeDates(e.target.value || startDate, endDate)}
-                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
-              />
-            </label>
-            <label>
-              <span className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">End</span>
-              <input
-                type="date"
-                value={endDate}
-                onChange={(e) => changeDates(startDate, e.target.value || endDate)}
-                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
-              />
-            </label>
+
+            {dateFilterMode === 'quick' ? (
+              <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,220px),auto,1fr] md:items-end">
+                <div>
+                  <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Quick Range</label>
+                  <select
+                    value={quickRangeDraft}
+                    onChange={(e) => setQuickRangeDraft(e.target.value)}
+                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+                  >
+                    {LOOKBACK_OPTIONS.map((w) => (
+                      <option key={w} value={w}>{w} weeks</option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => changeLookback(quickRangeDraft)}
+                  disabled={!quickRangeChanged}
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Apply Quick Range
+                </button>
+              </div>
+            ) : (
+              <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,180px),minmax(0,180px),auto,1fr] md:items-end">
+                <label>
+                  <span className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Start</span>
+                  <input
+                    type="date"
+                    value={customStartDate}
+                    onChange={(e) => setCustomStartDate(e.target.value || customStartDate)}
+                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+                  />
+                </label>
+                <label>
+                  <span className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">End</span>
+                  <input
+                    type="date"
+                    value={customEndDate}
+                    onChange={(e) => setCustomEndDate(e.target.value || customEndDate)}
+                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={applyCustomDates}
+                  disabled={!customRangeChanged || !customStartDate || !customEndDate}
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Apply Custom Dates
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="hidden flex-col gap-3 md:flex md:flex-row md:items-end">
