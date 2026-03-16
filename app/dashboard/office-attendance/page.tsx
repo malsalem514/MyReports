@@ -2,9 +2,11 @@ import { Suspense } from 'react';
 import { getAccessContext, getScopedReportEmails } from '@/lib/access';
 import { requireVisibleTab } from '@/lib/tab-config';
 import { getAttendanceReport } from '@/lib/dashboard-data';
-import { OFFICE_DAYS_REQUIRED, DEFAULT_LOOKBACK_WEEKS, LOOKBACK_OPTIONS } from '@/lib/constants';
+import { OFFICE_DAYS_REQUIRED, LOOKBACK_OPTIONS } from '@/lib/constants';
 import { getOfficeAttendanceDefaultRange, toDateParam } from '@/lib/report-date-defaults';
 import { AttendanceClient } from './attendance-client';
+
+const OFFICE_ATTENDANCE_DEFAULT_WEEKS = 4;
 
 function parseDateInput(
   value: string | undefined,
@@ -118,7 +120,7 @@ export default async function OfficeAttendancePage({
   const params = await searchParams;
   const lookbackWeeks = LOOKBACK_OPTIONS.includes(Number(params.lookbackWeeks) as any)
     ? (Number(params.lookbackWeeks) as (typeof LOOKBACK_OPTIONS)[number])
-    : DEFAULT_LOOKBACK_WEEKS;
+    : OFFICE_ATTENDANCE_DEFAULT_WEEKS;
   const { startDate: fallbackStartDate, endDate: fallbackEndDate } = getOfficeAttendanceDefaultRange(lookbackWeeks);
 
   let startDate = parseDateInput(params.startDate, fallbackStartDate, false);

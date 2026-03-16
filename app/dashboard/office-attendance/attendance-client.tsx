@@ -308,7 +308,9 @@ export function AttendanceClient({
     [currentWeek, weeks],
   );
   const buildStateParams = useMemo(() => {
-    const params = new URLSearchParams(searchParams.toString());
+    const params = typeof window === 'undefined'
+      ? new URLSearchParams(searchParams.toString())
+      : new URLSearchParams(window.location.search);
 
     if (search) params.set('q', search);
     else params.delete('q');
@@ -375,6 +377,19 @@ export function AttendanceClient({
     setSortDir((previous) => (previous === nextSortDir ? previous : nextSortDir));
     setPage((previous) => (previous === nextPage ? previous : nextPage));
   }, [locations, searchParams, viewMode]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!searchParams.has('startDate') && !searchParams.has('endDate') && !searchParams.has('lookbackWeeks')) return;
+
+    const params = new URLSearchParams(searchParams.toString());
+    params.delete('startDate');
+    params.delete('endDate');
+    params.delete('lookbackWeeks');
+
+    const nextUrl = params.toString() ? `${pathname}?${params.toString()}` : pathname;
+    window.history.replaceState(window.history.state, '', nextUrl);
+  }, [pathname, searchParams]);
 
   useEffect(() => {
     setMobileFiltersOpen(false);
@@ -974,7 +989,7 @@ export function AttendanceClient({
       ...(isAggregateView ? ['Quebec Employees', 'Remote/Exempt Employees'] : []),
       'Location',
       'Remote Workday',
-      ...weeks.map((w) => parseLocalDate(w).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })),
+      ...weeks.map((w) => getWeekLabel(w)),
       isAggregateView ? 'Total Office Days' : 'Total',
       'Avg/Week',
       'Score %',
@@ -1083,7 +1098,7 @@ export function AttendanceClient({
       ...(isAggregateView ? ['Quebec Employees', 'Remote/Exempt Employees'] : []),
       'Location',
       'Remote Workday',
-      ...weeks.map((w) => parseLocalDate(w).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })),
+      ...weeks.map((w) => getWeekLabel(w)),
       isAggregateView ? 'Total Office Days' : 'Total',
       'Avg/Week',
       'Score %',
@@ -1775,7 +1790,7 @@ export function AttendanceClient({
                           className={`cursor-pointer select-none whitespace-nowrap px-2 py-3 text-center text-[10px] font-medium uppercase tracking-wider hover:text-gray-900 ${isCurrent ? 'bg-gray-50 text-gray-400' : 'text-gray-500'}`}
                           onClick={() => handleSort(w)}
                         >
-                          {parseLocalDate(w).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                          {getWeekLabel(w)}
                           {isCurrent && <span className="ml-0.5 normal-case tracking-normal">*</span>}
                           {sortKey === w ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ''}
                         </th>
