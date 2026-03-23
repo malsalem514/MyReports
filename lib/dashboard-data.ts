@@ -437,9 +437,13 @@ export async function getAttendanceReport(
       ) WHERE rn = 1`,
       params,
     ),
-    query<{ EMAIL: string; PTO_DATE: Date; TYPE: string | null }>(
-      `SELECT LOWER(t.EMAIL) AS EMAIL, PTO_DATE, t.TYPE FROM (
-        SELECT EMAIL, START_DATE + LEVEL - 1 AS PTO_DATE, TYPE
+    query<{ EMAIL: string; PTO_DATE: string; TYPE: string | null }>(
+      `SELECT DISTINCT
+         LOWER(t.EMAIL) AS EMAIL,
+         TO_CHAR(TRUNC(PTO_DATE), 'YYYY-MM-DD') AS PTO_DATE,
+         t.TYPE
+       FROM (
+        SELECT EMAIL, TRUNC(START_DATE) + LEVEL - 1 AS PTO_DATE, TYPE
         FROM TL_TIME_OFF t
         WHERE START_DATE <= :ed AND END_DATE >= :sd
           AND STATUS != 'denied'${emails && emails.length > 0
@@ -449,7 +453,7 @@ export async function getAttendanceReport(
           AND PRIOR ROWID = ROWID
           AND PRIOR SYS_GUID() IS NOT NULL
       ) t
-      WHERE PTO_DATE BETWEEN :sd AND :ed
+      WHERE TRUNC(PTO_DATE) BETWEEN :sd AND :ed
         AND TO_CHAR(PTO_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')`,
       {
         sd: startDate,
@@ -629,8 +633,8 @@ export async function getAttendanceReport(
   for (const r of ptoDailyRows) {
     const email = r.EMAIL?.toLowerCase();
     if (!email) continue;
-    const d = r.PTO_DATE instanceof Date ? r.PTO_DATE : new Date(r.PTO_DATE);
-    const dateStr = toDateStr(d);
+    const d = parseLocalDate(r.PTO_DATE);
+    const dateStr = r.PTO_DATE.slice(0, 10);
     const dayOfWeek = d.getDay();
     const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
     const monday = new Date(d);
@@ -1161,9 +1165,13 @@ export async function getTbsComparisonReport(
 
   const [bambooDays, tbsEntries, unmappedRows] = await Promise.all([
     // Expand BambooHR PTO ranges into individual weekdays
-    query<{ EMAIL: string; PTO_DATE: Date; TYPE: string }>(
-      `SELECT LOWER(t.EMAIL) AS EMAIL, PTO_DATE, t.TYPE FROM (
-        SELECT EMAIL, START_DATE + LEVEL - 1 AS PTO_DATE, TYPE
+    query<{ EMAIL: string; PTO_DATE: string; TYPE: string }>(
+      `SELECT DISTINCT
+         LOWER(t.EMAIL) AS EMAIL,
+         TO_CHAR(TRUNC(PTO_DATE), 'YYYY-MM-DD') AS PTO_DATE,
+         t.TYPE
+       FROM (
+        SELECT EMAIL, TRUNC(START_DATE) + LEVEL - 1 AS PTO_DATE, TYPE
         FROM TL_TIME_OFF
         WHERE LOWER(EMAIL) IN (${emailPlaceholders})
           AND START_DATE <= :ed AND END_DATE >= :sd
@@ -1172,7 +1180,7 @@ export async function getTbsComparisonReport(
           AND PRIOR ROWID = ROWID
           AND PRIOR SYS_GUID() IS NOT NULL
       ) t
-      WHERE PTO_DATE BETWEEN :sd AND :ed
+      WHERE TRUNC(PTO_DATE) BETWEEN :sd AND :ed
         AND TO_CHAR(PTO_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')`,
       bambooParams,
     ),
@@ -1196,7 +1204,7 @@ export async function getTbsComparisonReport(
   // 3. Index BambooHR PTO by email|date
   const bambooByDay = new Map<string, string>(); // email|date → type
   for (const r of bambooDays) {
-    const d = toDateStr(r.PTO_DATE);
+    const d = r.PTO_DATE.slice(0, 10);
     bambooByDay.set(`${r.EMAIL}|${d}`, r.TYPE || 'PTO');
   }
 
