@@ -111,6 +111,15 @@ export interface ActivTrakUserStatRecord {
   activityRowCount: number;
 }
 
+export interface OfficeIpActivityRecord {
+  date: Date;
+  email: string;
+  displayName: string | null;
+  publicIp: string;
+  durationSeconds: number;
+  eventCount: number;
+}
+
 // ============================================================================
 // Client
 // ============================================================================
@@ -294,6 +303,65 @@ export async function fetchActivTrakUserStats(daysBack: number = 365): Promise<A
     firstSeen: row.first_seen ? parseLocalDate((row.first_seen as { value?: string }).value || String(row.first_seen)) : null,
     lastSeen: row.last_seen ? parseLocalDate((row.last_seen as { value?: string }).value || String(row.last_seen)) : null,
     activityRowCount: Number(row.row_count) || 0,
+  }));
+}
+
+export async function fetchOfficeIpActivity(
+  startDate: Date,
+  endDate: Date,
+  officeIps: string[],
+  emails?: string[],
+): Promise<OfficeIpActivityRecord[]> {
+  if (officeIps.length === 0) return [];
+
+  const client = getBigQueryClient();
+  let sql = `
+    WITH user_emails AS (
+      SELECT userid, LOWER(email) AS email,
+        ROW_NUMBER() OVER (PARTITION BY userid ORDER BY email) AS rn
+      FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.user_identifiers\`
+      WHERE email IS NOT NULL
+    )
+    SELECT
+      e.local_date,
+      ue.email,
+      ARRAY_AGG(NULLIF(TRIM(e.user_name), '') IGNORE NULLS LIMIT 1)[OFFSET(0)] AS display_name,
+      e.public_ip,
+      SUM(COALESCE(e.duration_sec, 0)) AS duration_seconds,
+      COUNT(*) AS event_count
+    FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.events\` e
+    LEFT JOIN user_emails ue
+      ON e.user_id = ue.userid
+     AND ue.rn = 1
+    WHERE e.local_date BETWEEN @startDate AND @endDate
+      AND e.public_ip IN UNNEST(@officeIps)
+      AND ue.email IS NOT NULL
+  `;
+
+  const params: Record<string, unknown> = {
+    startDate: formatDate(startDate),
+    endDate: formatDate(endDate),
+    officeIps: officeIps.map((ip) => ip.trim()).filter(Boolean),
+  };
+
+  if (emails && emails.length > 0) {
+    sql += ` AND ue.email IN UNNEST(@emails)`;
+    params.emails = emails.map((email) => email.toLowerCase());
+  }
+
+  sql += `
+    GROUP BY e.local_date, ue.email, e.public_ip
+    ORDER BY e.local_date DESC, ue.email, e.public_ip
+  `;
+
+  const [rows] = await client.query({ query: sql, params, location: 'US' });
+  return (rows as Array<Record<string, unknown>>).map((row) => ({
+    date: parseLocalDate((row.local_date as { value?: string })?.value || String(row.local_date)),
+    email: String(row.email || '').toLowerCase(),
+    displayName: row.display_name ? String(row.display_name) : null,
+    publicIp: String(row.public_ip || ''),
+    durationSeconds: Number(row.duration_seconds) || 0,
+    eventCount: Number(row.event_count) || 0,
   }));
 }
 

@@ -154,6 +154,9 @@ export async function initializeSchema(): Promise<void> {
         EMAIL VARCHAR2(255) NOT NULL,
         DISPLAY_NAME VARCHAR2(255),
         LOCATION VARCHAR2(50),
+        RAW_LOCATION VARCHAR2(50),
+        OFFICE_IP_OVERRIDE NUMBER(1) DEFAULT 0,
+        OFFICE_IP_MATCHES VARCHAR2(1000),
         TOTAL_HOURS NUMBER(10,2),
         IS_PTO NUMBER(1) DEFAULT 0,
         PTO_TYPE VARCHAR2(100),
@@ -162,6 +165,9 @@ export async function initializeSchema(): Promise<void> {
         CONSTRAINT TL_ATT_UNIQUE UNIQUE (RECORD_DATE, EMAIL)
       )
     `);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_ATTENDANCE ADD RAW_LOCATION VARCHAR2(50)`);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_ATTENDANCE ADD OFFICE_IP_OVERRIDE NUMBER(1) DEFAULT 0`);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_ATTENDANCE ADD OFFICE_IP_MATCHES VARCHAR2(1000)`);
     await safeExecuteDDL(conn, `
       CREATE TABLE TL_PRODUCTIVITY (
         ID NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -271,6 +277,30 @@ export async function initializeSchema(): Promise<void> {
         UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await safeExecuteDDL(conn, `
+      CREATE TABLE TL_OFFICE_IPS (
+        PUBLIC_IP VARCHAR2(255) PRIMARY KEY,
+        LABEL VARCHAR2(255),
+        OFFICE_LOCATION VARCHAR2(255),
+        IS_ACTIVE NUMBER(1) DEFAULT 1 NOT NULL,
+        NOTES VARCHAR2(1000),
+        CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await safeExecuteDDL(conn, `
+      CREATE TABLE TL_OFFICE_IP_ACTIVITY (
+        RECORD_DATE DATE NOT NULL,
+        EMAIL VARCHAR2(255) NOT NULL,
+        DISPLAY_NAME VARCHAR2(255),
+        PUBLIC_IP VARCHAR2(255) NOT NULL,
+        DURATION_SECONDS NUMBER DEFAULT 0,
+        EVENT_COUNT NUMBER DEFAULT 0,
+        CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT TL_OFFICE_IP_ACTIVITY_UQ UNIQUE (RECORD_DATE, EMAIL, PUBLIC_IP)
+      )
+    `);
     await safeExecuteDDL(conn, `CREATE INDEX TL_ATT_DATE_IDX ON TL_ATTENDANCE(RECORD_DATE)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_ATT_EMAIL_IDX ON TL_ATTENDANCE(EMAIL)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_PROD_DATE_IDX ON TL_PRODUCTIVITY(RECORD_DATE)`);
@@ -284,6 +314,8 @@ export async function initializeSchema(): Promise<void> {
     await safeExecuteDDL(conn, `CREATE INDEX TL_TBS_MAP_NO_IDX ON TL_TBS_EMPLOYEE_MAP(TBS_EMPLOYEE_NO)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_ACTRK_IDS_USER_IDX ON TL_ACTIVTRAK_IDENTIFIERS(USER_ID)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_ACTRK_IDS_EMAIL_IDX ON TL_ACTIVTRAK_IDENTIFIERS(IDENTIFIER_EMAIL)`);
+    await safeExecuteDDL(conn, `CREATE INDEX TL_OFFICE_IP_ACTIVITY_DATE_IDX ON TL_OFFICE_IP_ACTIVITY(RECORD_DATE)`);
+    await safeExecuteDDL(conn, `CREATE INDEX TL_OFFICE_IP_ACTIVITY_EMAIL_IDX ON TL_OFFICE_IP_ACTIVITY(EMAIL)`);
 
     // Weekly report views used by the dashboard pages.
     await safeExecuteDDL(conn, `
@@ -560,6 +592,31 @@ export async function initializeSchema(): Promise<void> {
       )
     `);
     await safeExecuteDDL(conn, `CREATE INDEX IDX_DASHBOARDS_OWNER ON TL_DASHBOARDS(LOWER(OWNER_EMAIL))`);
+
+    await conn.execute(
+      `MERGE INTO TL_OFFICE_IPS t
+         USING (
+           SELECT
+             '67.70.186.132' AS PUBLIC_IP,
+             'Known Office Network' AS LABEL,
+             'Quebec (Montreal Head Office)' AS OFFICE_LOCATION,
+             1 AS IS_ACTIVE,
+             'Seeded from ActivTrak office-day validation' AS NOTES
+           FROM DUAL
+         ) s
+         ON (t.PUBLIC_IP = s.PUBLIC_IP)
+         WHEN MATCHED THEN UPDATE SET
+           t.LABEL = s.LABEL,
+           t.OFFICE_LOCATION = s.OFFICE_LOCATION,
+           t.IS_ACTIVE = s.IS_ACTIVE,
+           t.NOTES = s.NOTES,
+           t.UPDATED_AT = CURRENT_TIMESTAMP
+         WHEN NOT MATCHED THEN INSERT (
+           PUBLIC_IP, LABEL, OFFICE_LOCATION, IS_ACTIVE, NOTES
+         ) VALUES (
+           s.PUBLIC_IP, s.LABEL, s.OFFICE_LOCATION, s.IS_ACTIVE, s.NOTES
+         )`,
+    );
 
     // Seed role defaults (MERGE = idempotent)
     const allTabs = ['office-attendance', 'timesheet-compare', 'working-hours', 'bamboo-not-in-activtrak'];

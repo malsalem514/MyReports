@@ -1,6 +1,6 @@
 import { fetchActiveEmployees, fetchRemoteWorkRequests, fetchTimeOffRequests } from './bamboohr';
-import { fetchActivTrakIdentifiers, fetchActivTrakUserStats, fetchOfficeAttendanceData, fetchProductivityData } from './bigquery';
-import { execute, executeMany, initializeSchema } from './oracle';
+import { fetchActivTrakIdentifiers, fetchActivTrakUserStats, fetchOfficeAttendanceData, fetchOfficeIpActivity, fetchProductivityData } from './bigquery';
+import { execute, executeMany, initializeSchema, query } from './oracle';
 import { normalizeEmailNullable } from './email';
 
 export interface SyncSummary {
@@ -19,6 +19,13 @@ export interface SyncSummary {
 function parseDateOnly(dateStr: string): Date {
   const [year, month, day] = dateStr.split('-').map((part) => Number(part));
   return new Date(year || 1970, (month || 1) - 1, day || 1);
+}
+
+function toDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 /**
@@ -214,19 +221,139 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
   }
 
   try {
-    const attendance = await fetchOfficeAttendanceData(startDate, now);
-    const attendanceBinds = attendance
-      .filter((row) => row.email)
+    const officeIpRows = await query<{ PUBLIC_IP: string }>(
+      `SELECT PUBLIC_IP FROM TL_OFFICE_IPS WHERE IS_ACTIVE = 1 ORDER BY PUBLIC_IP`,
+    );
+    const officeIps = officeIpRows
+      .map((row) => row.PUBLIC_IP?.trim())
+      .filter((ip): ip is string => Boolean(ip));
+
+    const [attendance, officeIpActivity] = await Promise.all([
+      fetchOfficeAttendanceData(startDate, now),
+      officeIps.length > 0
+        ? fetchOfficeIpActivity(startDate, now, officeIps)
+        : Promise.resolve([]),
+    ]);
+
+    await execute(
+      `DELETE FROM TL_OFFICE_IP_ACTIVITY
+       WHERE RECORD_DATE BETWEEN :sd AND :ed`,
+      { sd: startDate, ed: now },
+    );
+
+    const officeIpActivityBinds = officeIpActivity
+      .filter((row) => row.email && row.publicIp)
       .map((row) => ({
         RECORD_DATE: row.date,
         EMAIL: normalizeEmailNullable(row.email),
         DISPLAY_NAME: row.displayName || null,
-        LOCATION: row.location || 'Unknown',
+        PUBLIC_IP: row.publicIp,
+        DURATION_SECONDS: row.durationSeconds || 0,
+        EVENT_COUNT: row.eventCount || 0,
+      }));
+
+    if (officeIpActivityBinds.length > 0) {
+      await executeMany(
+        `INSERT INTO TL_OFFICE_IP_ACTIVITY (
+           RECORD_DATE, EMAIL, DISPLAY_NAME, PUBLIC_IP, DURATION_SECONDS, EVENT_COUNT
+         ) VALUES (
+           :RECORD_DATE, :EMAIL, :DISPLAY_NAME, :PUBLIC_IP, :DURATION_SECONDS, :EVENT_COUNT
+         )`,
+        officeIpActivityBinds,
+      );
+    }
+
+    const officeIpMatchesByDay = new Map<string, Set<string>>();
+    const syntheticOfficeRows = new Map<string, {
+      date: Date;
+      email: string;
+      displayName: string | null;
+      totalHours: number;
+    }>();
+
+    for (const row of officeIpActivity) {
+      const key = `${row.email.toLowerCase()}|${toDateKey(row.date)}`;
+      if (!officeIpMatchesByDay.has(key)) {
+        officeIpMatchesByDay.set(key, new Set());
+      }
+      officeIpMatchesByDay.get(key)!.add(row.publicIp);
+
+      if (!syntheticOfficeRows.has(key)) {
+        syntheticOfficeRows.set(key, {
+          date: row.date,
+          email: row.email.toLowerCase(),
+          displayName: row.displayName || row.email.toLowerCase(),
+          totalHours: 0,
+        });
+      }
+      syntheticOfficeRows.get(key)!.totalHours += row.durationSeconds / 3600;
+    }
+
+    const attendanceByKey = new Map<string, (typeof attendance)[number]>(
+      attendance
+        .filter((row) => row.email)
+        .map((row) => [`${row.email.toLowerCase()}|${toDateKey(row.date)}`, row]),
+    );
+
+    type AttendanceSyncRecord = {
+      date: Date;
+      email: string;
+      displayName: string | null;
+      rawLocation: 'Office' | 'Remote' | 'Unknown';
+      totalHours: number;
+      isPTO: boolean;
+      ptoType: string | null;
+      ptoHours: number;
+    };
+
+    const syncRows: AttendanceSyncRecord[] = attendance
+      .filter((row) => row.email)
+      .map((row) => ({
+        date: row.date,
+        email: row.email.toLowerCase(),
+        displayName: row.displayName || null,
+        rawLocation: row.location || 'Unknown',
+        totalHours: row.totalHours || 0,
+        isPTO: row.isPTO,
+        ptoType: row.ptoType || null,
+        ptoHours: row.ptoHours || 0,
+      }));
+
+    for (const [key, row] of syntheticOfficeRows) {
+      if (attendanceByKey.has(key)) continue;
+      syncRows.push({
+        date: row.date,
+        email: row.email,
+        displayName: row.displayName,
+        rawLocation: 'Unknown',
+        totalHours: Math.round(row.totalHours * 100) / 100,
+        isPTO: false,
+        ptoType: null,
+        ptoHours: 0,
+      });
+    }
+
+    const attendanceBinds = syncRows.map((row) => {
+      const key = `${row.email}|${toDateKey(row.date)}`;
+      const officeIpMatches = [...(officeIpMatchesByDay.get(key) || new Set())].sort();
+      const rawLocation = row.rawLocation || 'Unknown';
+      const effectiveLocation = officeIpMatches.length > 0 ? 'Office' : rawLocation;
+      const officeIpOverride = officeIpMatches.length > 0 && rawLocation !== 'Office' ? 1 : 0;
+
+      return {
+        RECORD_DATE: row.date,
+        EMAIL: normalizeEmailNullable(row.email),
+        DISPLAY_NAME: row.displayName || null,
+        LOCATION: effectiveLocation,
+        RAW_LOCATION: rawLocation,
+        OFFICE_IP_OVERRIDE: officeIpOverride,
+        OFFICE_IP_MATCHES: officeIpMatches.length > 0 ? officeIpMatches.join(', ') : null,
         TOTAL_HOURS: row.totalHours || 0,
         IS_PTO: row.isPTO ? 1 : 0,
         PTO_TYPE: row.ptoType || null,
         PTO_HOURS: row.ptoHours || 0,
-      }));
+      };
+    });
 
     if (attendanceBinds.length > 0) {
       await executeMany(
@@ -236,6 +363,9 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
            :EMAIL AS EMAIL,
            :DISPLAY_NAME AS DISPLAY_NAME,
            :LOCATION AS LOCATION,
+           :RAW_LOCATION AS RAW_LOCATION,
+           :OFFICE_IP_OVERRIDE AS OFFICE_IP_OVERRIDE,
+           :OFFICE_IP_MATCHES AS OFFICE_IP_MATCHES,
            :TOTAL_HOURS AS TOTAL_HOURS,
            :IS_PTO AS IS_PTO,
            :PTO_TYPE AS PTO_TYPE,
@@ -245,14 +375,19 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
          WHEN MATCHED THEN UPDATE SET
            t.DISPLAY_NAME = s.DISPLAY_NAME,
            t.LOCATION = s.LOCATION,
+           t.RAW_LOCATION = s.RAW_LOCATION,
+           t.OFFICE_IP_OVERRIDE = s.OFFICE_IP_OVERRIDE,
+           t.OFFICE_IP_MATCHES = s.OFFICE_IP_MATCHES,
            t.TOTAL_HOURS = s.TOTAL_HOURS,
            t.IS_PTO = s.IS_PTO,
            t.PTO_TYPE = s.PTO_TYPE,
            t.PTO_HOURS = s.PTO_HOURS
          WHEN NOT MATCHED THEN INSERT (
-           RECORD_DATE, EMAIL, DISPLAY_NAME, LOCATION, TOTAL_HOURS, IS_PTO, PTO_TYPE, PTO_HOURS
+           RECORD_DATE, EMAIL, DISPLAY_NAME, LOCATION, RAW_LOCATION, OFFICE_IP_OVERRIDE, OFFICE_IP_MATCHES,
+           TOTAL_HOURS, IS_PTO, PTO_TYPE, PTO_HOURS
          ) VALUES (
-           s.RECORD_DATE, s.EMAIL, s.DISPLAY_NAME, s.LOCATION, s.TOTAL_HOURS, s.IS_PTO, s.PTO_TYPE, s.PTO_HOURS
+           s.RECORD_DATE, s.EMAIL, s.DISPLAY_NAME, s.LOCATION, s.RAW_LOCATION, s.OFFICE_IP_OVERRIDE, s.OFFICE_IP_MATCHES,
+           s.TOTAL_HOURS, s.IS_PTO, s.PTO_TYPE, s.PTO_HOURS
          )`,
         attendanceBinds,
       );
