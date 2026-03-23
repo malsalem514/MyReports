@@ -1,5 +1,5 @@
-import { sub } from 'date-fns';
-import { DEFAULT_LOOKBACK_WEEKS } from './constants';
+import { subWeeks } from 'date-fns';
+import { DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS } from './constants';
 
 export function toDateParam(date: Date): string {
   const y = date.getFullYear();
@@ -18,13 +18,23 @@ export function getLastCompletedFriday(referenceDate = new Date()): Date {
   return completedFriday;
 }
 
-export function getOfficeAttendanceDefaultRange(lookbackWeeks = DEFAULT_LOOKBACK_WEEKS): {
+function getIsoWeekMonday(date: Date): Date {
+  const monday = new Date(date);
+  const day = monday.getDay();
+  const offset = day === 0 ? -6 : 1 - day;
+  monday.setDate(monday.getDate() + offset);
+  monday.setHours(0, 0, 0, 0);
+  return monday;
+}
+
+export function getOfficeAttendanceDefaultRange(
+  lookbackWeeks = DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS,
+): {
   startDate: Date;
   endDate: Date;
 } {
   const endDate = getLastCompletedFriday();
-  const startDate = sub(endDate, { weeks: lookbackWeeks });
-  startDate.setHours(0, 0, 0, 0);
+  const startDate = subWeeks(getIsoWeekMonday(endDate), Math.max(lookbackWeeks - 1, 0));
 
   return { startDate, endDate };
 }

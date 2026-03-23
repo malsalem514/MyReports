@@ -4,7 +4,13 @@ import { Download, Filter, X } from 'lucide-react';
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { OFFICE_DAYS_REQUIRED, LOOKBACK_OPTIONS, CELL_COLORS, CELL_HEX } from '@/lib/constants';
+import {
+  CELL_COLORS,
+  CELL_HEX,
+  DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS,
+  LOOKBACK_OPTIONS,
+  OFFICE_DAYS_REQUIRED,
+} from '@/lib/constants';
 import { OFFICE_ATTENDANCE_VIEW_OPTIONS, type OfficeAttendanceViewKey } from '@/lib/dashboard-nav-config';
 import { getOfficeAttendanceDefaultRange, toDateParam } from '@/lib/report-date-defaults';
 import type { AttendanceRemoteWorkRequest, AttendanceRow, AttendanceSummary, DayDetail, WeekCell } from '@/lib/types/attendance';
@@ -28,7 +34,6 @@ type SortDir = 'asc' | 'desc';
 type ViewMode = OfficeAttendanceViewKey;
 type DateFilterMode = 'quick' | 'custom';
 const DEFAULT_EMPLOYEE_LOCATION = 'Quebec (Montreal Head Office)';
-const DEFAULT_OFFICE_ATTENDANCE_QUICK_RANGE = 4;
 type SearchParamReader = {
   get(name: string): string | null;
   has(name: string): boolean;
@@ -370,7 +375,7 @@ export function AttendanceClient({
   );
   const [dateFilterMode, setDateFilterMode] = useState<DateFilterMode>(() => appliedDateFilterMode);
   const [quickRangeDraft, setQuickRangeDraft] = useState<string>(
-    () => String(activeLookbackWeeks ?? DEFAULT_OFFICE_ATTENDANCE_QUICK_RANGE),
+    () => String(activeLookbackWeeks ?? DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS),
   );
   const [customStartDate, setCustomStartDate] = useState(startDate);
   const [customEndDate, setCustomEndDate] = useState(endDate);
@@ -405,7 +410,7 @@ export function AttendanceClient({
 
   useEffect(() => {
     setDateFilterMode(appliedDateFilterMode);
-    setQuickRangeDraft(String(activeLookbackWeeks ?? DEFAULT_OFFICE_ATTENDANCE_QUICK_RANGE));
+    setQuickRangeDraft(String(activeLookbackWeeks ?? DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS));
     setCustomStartDate(startDate);
     setCustomEndDate(endDate);
   }, [activeLookbackWeeks, appliedDateFilterMode, endDate, startDate]);
@@ -525,7 +530,7 @@ export function AttendanceClient({
     selectedLocs.length > 0 ||
     includeApprovedRemoteWork;
   const quickRangeChanged =
-    quickRangeDraft !== String(activeLookbackWeeks ?? DEFAULT_OFFICE_ATTENDANCE_QUICK_RANGE)
+    quickRangeDraft !== String(activeLookbackWeeks ?? DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS)
     || appliedDateFilterMode !== 'quick';
   const customRangeChanged =
     customStartDate !== startDate
@@ -1273,7 +1278,7 @@ export function AttendanceClient({
                     : `${currentView.description} Target ${OFFICE_DAYS_REQUIRED} office days per week.`}
               </p>
               <p className="mt-1 text-[11px] text-gray-400">
-                Applied: {appliedDateFilterMode === 'quick' ? `Quick range (${activeLookbackWeeks ?? DEFAULT_OFFICE_ATTENDANCE_QUICK_RANGE} weeks)` : 'Custom dates'} · {formatRangeLabel(startDate, endDate)}
+                Applied: {appliedDateFilterMode === 'quick' ? `Quick range (${activeLookbackWeeks ?? DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS} weeks)` : 'Custom dates'} · {formatRangeLabel(startDate, endDate)}
               </p>
             </div>
             <div className="hidden items-center gap-2 md:flex">

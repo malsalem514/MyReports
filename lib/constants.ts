@@ -6,6 +6,7 @@ export const LOOKBACK_OPTIONS = [2, 4, 6, 8, 12, 16] as const;
 export type LookbackWeeks = (typeof LOOKBACK_OPTIONS)[number];
 
 export const DEFAULT_LOOKBACK_WEEKS = 6;
+export const DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS = 4;
 
 export const CELL_COLORS = {
   compliant: 'bg-green-100 text-green-700',   // 2+ office days
