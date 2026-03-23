@@ -262,29 +262,37 @@ function getWeekRange() {
   };
 }
 
+function getTrailingRange(days: number) {
+  const endDate = new Date();
+  const startDate = new Date(endDate);
+  startDate.setDate(endDate.getDate() - Math.max(days - 1, 0));
+  return {
+    startDate: toDateParam(startDate),
+    endDate: toDateParam(endDate),
+  };
+}
+
 function getRangePresetKey(
   startDate: string,
   endDate: string,
 ): 'thisweek' | 'week' | '30days' | null {
+  const weekRange = getWeekRange();
+  if (startDate === weekRange.startDate && endDate === weekRange.endDate) {
+    return 'thisweek';
+  }
+
   const today = new Date();
   const expectedEnd = toDateParam(today);
   if (endDate !== expectedEnd) return null;
 
-  const last7 = new Date(today);
-  last7.setDate(today.getDate() - 7);
-  if (startDate === toDateParam(last7)) {
+  const last7 = getTrailingRange(7);
+  if (startDate === last7.startDate) {
     return 'week';
   }
 
-  const last30 = new Date(today);
-  last30.setDate(today.getDate() - 30);
-  if (startDate === toDateParam(last30)) {
+  const last30 = getTrailingRange(30);
+  if (startDate === last30.startDate) {
     return '30days';
-  }
-
-  const weekRange = getWeekRange();
-  if (startDate === weekRange.startDate && endDate === weekRange.endDate) {
-    return 'thisweek';
   }
 
   return null;
@@ -381,22 +389,23 @@ export function WorkingHoursClient({
   };
 
   const handlePreset = (preset: 'week' | '30days' | 'thisweek') => {
-    const end = new Date();
-    const start = new Date();
     switch (preset) {
       case 'thisweek': {
         const range = getWeekRange();
         handleDateChange(range.startDate, range.endDate);
         return;
       }
-      case 'week':
-        start.setDate(end.getDate() - 7);
-        break;
-      case '30days':
-        start.setDate(end.getDate() - 30);
-        break;
+      case 'week': {
+        const range = getTrailingRange(7);
+        handleDateChange(range.startDate, range.endDate);
+        return;
+      }
+      case '30days': {
+        const range = getTrailingRange(30);
+        handleDateChange(range.startDate, range.endDate);
+        return;
+      }
     }
-    handleDateChange(toDateParam(start), toDateParam(end));
   };
 
   const filteredWeeks = useMemo<WeekWithMeta[]>(() => {

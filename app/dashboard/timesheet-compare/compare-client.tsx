@@ -28,6 +28,23 @@ function parseLocalDate(s: string): Date {
   return new Date(y!, m! - 1, d!);
 }
 
+function formatDateParam(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function getTrailingWeeksRange(weeksBack: number): {
+  startDate: string;
+  endDate: string;
+} {
+  const end = new Date();
+  const start = new Date(end);
+  start.setDate(start.getDate() - ((weeksBack * 7) - 1));
+  return {
+    startDate: formatDateParam(start),
+    endDate: formatDateParam(end),
+  };
+}
+
 function getCellColor(cell: { bambooPtoDays: number; tbsPtoDays: number; hasDiscrepancy: boolean } | undefined): string {
   if (!cell) return '';
   if (cell.hasDiscrepancy) return 'bg-red-100 text-red-700';
@@ -49,14 +66,12 @@ export function CompareClient({
   const searchParams = useSearchParams();
   const activeQuickRange = useMemo(() => {
     const today = new Date();
-    const expectedEnd = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const expectedEnd = formatDateParam(today);
     if (endDate !== expectedEnd) return null;
 
     for (const weeksBack of LOOKBACK_OPTIONS) {
-      const start = new Date(today);
-      start.setDate(start.getDate() - (weeksBack * 7));
-      const startLabel = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`;
-      if (startDate === startLabel) {
+      const range = getTrailingWeeksRange(weeksBack);
+      if (startDate === range.startDate) {
         return weeksBack;
       }
     }
@@ -97,13 +112,11 @@ export function CompareClient({
   const changeLookback = (val: string) => {
     if (val === 'custom') return;
     const weeksBack = Number(val);
-    const end = new Date();
-    const start = new Date(end);
-    start.setDate(start.getDate() - (weeksBack * 7));
+    const range = getTrailingWeeksRange(weeksBack);
     const params = new URLSearchParams(searchParams.toString());
     params.set('lookbackWeeks', val);
-    params.set('startDate', `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`);
-    params.set('endDate', `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, '0')}-${String(end.getDate()).padStart(2, '0')}`);
+    params.set('startDate', range.startDate);
+    params.set('endDate', range.endDate);
     router.push(`/dashboard/timesheet-compare?${params.toString()}`);
   };
 

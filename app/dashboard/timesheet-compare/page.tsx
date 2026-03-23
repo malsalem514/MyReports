@@ -101,7 +101,7 @@ export default async function TimesheetComparePage({
 
   const defaultEndDate = new Date();
   defaultEndDate.setHours(23, 59, 59, 999);
-  const defaultStartDate = sub(defaultEndDate, { weeks: lookbackWeeks });
+  const defaultStartDate = sub(defaultEndDate, { days: (lookbackWeeks * 7) - 1 });
   defaultStartDate.setHours(0, 0, 0, 0);
 
   let startDate = params.startDate ? new Date(`${params.startDate}T00:00:00`) : new Date(defaultStartDate);

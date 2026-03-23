@@ -120,7 +120,7 @@ export default async function WorkingHoursPage({
   const params = await searchParams;
 
   const defaultEndDate = new Date();
-  const defaultStartDate = sub(defaultEndDate, { days: 30 });
+  const defaultStartDate = sub(defaultEndDate, { days: 29 });
 
   let startDate = parseDateInput(params.startDate, defaultStartDate, false);
   let endDate = parseDateInput(params.endDate, defaultEndDate, true);
