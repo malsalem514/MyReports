@@ -326,6 +326,7 @@ export function AttendanceClient({
   );
   const syncedFields = useMemo<UrlStateField[]>(() => ([
     {
+      current: search,
       read: (params) => params.get('q') || '',
       sync: (nextValue) => {
         const nextSearch = nextValue as string;
@@ -337,6 +338,7 @@ export function AttendanceClient({
       },
     },
     {
+      current: selectedDepts,
       read: (params) => parseListParam(params.get('departments')),
       sync: (nextValue) => {
         const nextDepts = nextValue as string[];
@@ -346,8 +348,10 @@ export function AttendanceClient({
         if (selectedDepts.length > 0) params.set('departments', selectedDepts.join(','));
         else params.delete('departments');
       },
+      equals: (current, next) => arraysEqual(current as string[], next as string[]),
     },
     {
+      current: selectedLocs,
       read: (params) => getDefaultLocationSelection(viewMode, params, locations),
       sync: (nextValue) => {
         const nextLocs = nextValue as string[];
@@ -357,8 +361,10 @@ export function AttendanceClient({
         if (selectedLocs.length > 0) params.set('locations', selectedLocs.join(','));
         else params.delete('locations');
       },
+      equals: (current, next) => arraysEqual(current as string[], next as string[]),
     },
     {
+      current: includeApprovedRemoteWork,
       read: (params) => params.get('approvedRemoteWork') === 'include',
       sync: (nextValue) => {
         const nextIncludeApprovedRemoteWork = nextValue as boolean;
@@ -373,6 +379,7 @@ export function AttendanceClient({
       },
     },
     {
+      current: sortKey,
       read: (params) => params.get('sortKey') || 'name',
       sync: (nextValue) => {
         const nextSortKey = nextValue as SortKey;
@@ -384,6 +391,7 @@ export function AttendanceClient({
       },
     },
     {
+      current: sortDir,
       read: (params) => parseEnumParam(params.get('sortDir'), ['asc', 'desc'] as const, 'asc'),
       sync: (nextValue) => {
         const nextSortDir = nextValue as SortDir;
@@ -395,6 +403,7 @@ export function AttendanceClient({
       },
     },
     {
+      current: page,
       read: (params) => parsePageParam(params.get('page')),
       sync: (nextValue) => {
         const nextPage = nextValue as number;

@@ -384,6 +384,7 @@ export function WorkingHoursClient({
 
   const syncedFields = useMemo<UrlStateField[]>(() => ([
     {
+      current: search,
       read: (params) => params.get('q') || '',
       sync: (nextValue) => {
         const nextSearch = nextValue as string;
@@ -395,6 +396,7 @@ export function WorkingHoursClient({
       },
     },
     {
+      current: selectedGroup,
       read: (params) => sanitizeParam(params.get('group'), groups),
       sync: (nextValue) => {
         const nextGroup = nextValue as string;
@@ -406,6 +408,7 @@ export function WorkingHoursClient({
       },
     },
     {
+      current: selectedEmployeeNo,
       read: (params) => sanitizeParam(params.get('employeeNo'), employeeNumbers.map(String)),
       sync: (nextValue) => {
         const nextEmployeeNo = nextValue as string;
@@ -417,6 +420,7 @@ export function WorkingHoursClient({
       },
     },
     {
+      current: selectedUser,
       read: (params) => sanitizeParam(params.get('user'), users),
       sync: (nextValue) => {
         const nextUser = nextValue as string;
@@ -428,6 +432,7 @@ export function WorkingHoursClient({
       },
     },
     {
+      current: selectedWeek,
       read: (params) => sanitizeParam(params.get('week'), weekOptions),
       sync: (nextValue) => {
         const nextWeek = nextValue as string;
@@ -439,6 +444,7 @@ export function WorkingHoursClient({
       },
     },
     {
+      current: includeNonActivTrak,
       read: (params) => params.get('coverage') === 'all',
       sync: (nextValue) => {
         const nextIncludeNonActivTrak = nextValue as boolean;

@@ -50,6 +50,7 @@ export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
 
   const syncedFields = useMemo<UrlStateField[]>(() => ([
     {
+      current: bambooDepartmentFilter,
       read: (params) => sanitizeParam(params.get('department'), bambooDepartments),
       sync: (nextValue) => {
         const nextDepartment = nextValue as string;
@@ -63,6 +64,7 @@ export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
       },
     },
     {
+      current: tbsMappingFilter,
       read: (params) => parseEnumParam(params.get('tbs'), ['all', 'mapped', 'unmapped'] as const, 'all'),
       sync: (nextValue) => {
         const nextTbsFilter = nextValue as 'all' | 'mapped' | 'unmapped';
@@ -74,6 +76,7 @@ export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
       },
     },
     {
+      current: activTrakMappingFilter,
       read: (params) => parseEnumParam(params.get('activtrak'), ['all', 'mapped', 'unmapped'] as const, 'all'),
       sync: (nextValue) => {
         const nextActivTrakFilter = nextValue as 'all' | 'mapped' | 'unmapped';

@@ -8,9 +8,11 @@ type RouterLike = {
 };
 
 export interface UrlStateField {
+  current: unknown;
   read: (params: SearchParamReader) => unknown;
   sync: (value: unknown) => void;
   write: (params: URLSearchParams) => void;
+  equals?: (current: unknown, next: unknown) => boolean;
 }
 
 interface UseUrlStateSyncOptions {
@@ -33,6 +35,14 @@ export function useUrlStateSync({
     [fields, searchParams],
   );
 
+  const inSync = useMemo(
+    () => fields.every((field, index) => {
+      const equals = field.equals ?? Object.is;
+      return equals(field.current, nextValues[index]);
+    }),
+    [fields, nextValues],
+  );
+
   useEffect(() => {
     fields.forEach((field, index) => {
       field.sync(nextValues[index]);
@@ -48,12 +58,13 @@ export function useUrlStateSync({
   }, [fields, searchParams]);
 
   useEffect(() => {
+    if (!inSync) return;
     const next = nextParams.toString();
     const current = searchParams.toString();
     if (next !== current) {
       router.replace(buildPathWithParams(pathname, nextParams), { scroll });
     }
-  }, [nextParams, pathname, router, scroll, searchParams]);
+  }, [inSync, nextParams, pathname, router, scroll, searchParams]);
 
   return nextParams;
 }

@@ -91,6 +91,7 @@ export function CompareClient({
 
   const syncedFields = useMemo<UrlStateField[]>(() => ([
     {
+      current: search,
       read: (params) => params.get('q') || '',
       sync: (nextValue) => {
         const nextSearch = nextValue as string;
@@ -102,6 +103,7 @@ export function CompareClient({
       },
     },
     {
+      current: selectedDepts,
       read: (params) => parseListParam(params.get('departments')).filter((department) => departments.includes(department)),
       sync: (nextValue) => {
         const nextDepts = nextValue as string[];
@@ -111,8 +113,10 @@ export function CompareClient({
         if (selectedDepts.length > 0) params.set('departments', selectedDepts.join(','));
         else params.delete('departments');
       },
+      equals: (current, next) => arraysEqual(current as string[], next as string[]),
     },
     {
+      current: filterMode,
       read: (params) => parseEnumParam(params.get('show'), FILTER_MODES, 'all'),
       sync: (nextValue) => {
         const nextFilterMode = nextValue as FilterMode;
@@ -124,6 +128,7 @@ export function CompareClient({
       },
     },
     {
+      current: sortKey,
       read: (params) => params.get('sortKey') || 'discrepancyCount',
       sync: (nextValue) => {
         const nextSortKey = nextValue as SortKey;
@@ -135,6 +140,7 @@ export function CompareClient({
       },
     },
     {
+      current: sortDir,
       read: (params) => parseEnumParam(params.get('sortDir'), ['asc', 'desc'] as const, 'desc'),
       sync: (nextValue) => {
         const nextSortDir = nextValue as SortDir;
@@ -146,6 +152,7 @@ export function CompareClient({
       },
     },
     {
+      current: page,
       read: (params) => parsePageParam(params.get('page')),
       sync: (nextValue) => {
         const nextPage = nextValue as number;

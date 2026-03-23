@@ -74,6 +74,7 @@ export function SuspiciousActivTrakIdentitiesClient({ rows }: ReportClientProps)
 
   const syncedFields = useMemo<UrlStateField[]>(() => ([
     {
+      current: search,
       read: (params) => params.get('q') || '',
       sync: (nextValue) => {
         const nextSearch = nextValue as string;
@@ -85,6 +86,7 @@ export function SuspiciousActivTrakIdentitiesClient({ rows }: ReportClientProps)
       },
     },
     {
+      current: flagFilter,
       read: (params) => parseEnumParam(params.get('flag'), FLAG_FILTERS, 'all'),
       sync: (nextValue) => {
         const nextFlag = nextValue as FlagFilter;
