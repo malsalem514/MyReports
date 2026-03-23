@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 
 interface ReportClientProps {
   rows: Array<{
@@ -25,9 +26,17 @@ function escapeCsvCell(value: string | number | null | undefined): string {
 }
 
 export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
-  const [bambooDepartmentFilter, setBambooDepartmentFilter] = useState('all');
-  const [tbsMappingFilter, setTbsMappingFilter] = useState<'all' | 'mapped' | 'unmapped'>('all');
-  const [activTrakMappingFilter, setActivTrakMappingFilter] = useState<'all' | 'mapped' | 'unmapped'>('all');
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [bambooDepartmentFilter, setBambooDepartmentFilter] = useState(() => searchParams.get('department') || 'all');
+  const [tbsMappingFilter, setTbsMappingFilter] = useState<'all' | 'mapped' | 'unmapped'>(() => {
+    const value = searchParams.get('tbs');
+    return value === 'mapped' || value === 'unmapped' ? value : 'all';
+  });
+  const [activTrakMappingFilter, setActivTrakMappingFilter] = useState<'all' | 'mapped' | 'unmapped'>(() => {
+    const value = searchParams.get('activtrak');
+    return value === 'mapped' || value === 'unmapped' ? value : 'all';
+  });
 
   const bambooDepartments = Array.from(
     new Set(
@@ -36,6 +45,44 @@ export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
         .filter(Boolean),
     ),
   ).sort((a, b) => a.localeCompare(b));
+
+  useEffect(() => {
+    const nextDepartment = searchParams.get('department') || 'all';
+    const sanitizedDepartment = nextDepartment === 'all' || bambooDepartments.includes(nextDepartment)
+      ? nextDepartment
+      : 'all';
+    const nextTbs = searchParams.get('tbs');
+    const nextActivTrak = searchParams.get('activtrak');
+
+    setBambooDepartmentFilter((previous) => (previous === sanitizedDepartment ? previous : sanitizedDepartment));
+    setTbsMappingFilter((previous) => {
+      const nextValue = nextTbs === 'mapped' || nextTbs === 'unmapped' ? nextTbs : 'all';
+      return previous === nextValue ? previous : nextValue;
+    });
+    setActivTrakMappingFilter((previous) => {
+      const nextValue = nextActivTrak === 'mapped' || nextActivTrak === 'unmapped' ? nextActivTrak : 'all';
+      return previous === nextValue ? previous : nextValue;
+    });
+  }, [bambooDepartments, searchParams]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(searchParams.toString());
+
+    if (bambooDepartmentFilter !== 'all') params.set('department', bambooDepartmentFilter);
+    else params.delete('department');
+
+    if (tbsMappingFilter !== 'all') params.set('tbs', tbsMappingFilter);
+    else params.delete('tbs');
+
+    if (activTrakMappingFilter !== 'all') params.set('activtrak', activTrakMappingFilter);
+    else params.delete('activtrak');
+
+    const next = params.toString();
+    const current = searchParams.toString();
+    if (next !== current) {
+      router.replace(next ? `/dashboard/bamboo-not-in-activtrak?${next}` : '/dashboard/bamboo-not-in-activtrak', { scroll: false });
+    }
+  }, [activTrakMappingFilter, bambooDepartmentFilter, router, searchParams, tbsMappingFilter]);
 
   const filteredRows = rows.filter((row) => {
     const matchesDepartment =

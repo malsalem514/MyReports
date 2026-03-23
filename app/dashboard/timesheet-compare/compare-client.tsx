@@ -22,10 +22,20 @@ type SortDir = 'asc' | 'desc';
 type FilterMode = 'all' | 'discrepancies' | 'bamboo-only' | 'tbs-only';
 
 const PAGE_SIZE = 50;
+const FILTER_MODES: FilterMode[] = ['all', 'discrepancies', 'bamboo-only', 'tbs-only'];
 
 function parseLocalDate(s: string): Date {
   const [y, m, d] = s.split('-').map(Number);
   return new Date(y!, m! - 1, d!);
+}
+
+function parseListParam(value: string | null): string[] {
+  if (!value) return [];
+  return value.split(',').map((part) => part.trim()).filter(Boolean);
+}
+
+function arraysEqual(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
 function formatDateParam(date: Date): string {
@@ -79,14 +89,19 @@ export function CompareClient({
     return null;
   }, [startDate, endDate]);
 
-  const [search, setSearch] = useState('');
-  const [selectedDepts, setSelectedDepts] = useState<string[]>([]);
-  const [filterMode, setFilterMode] = useState<FilterMode>('all');
+  const [search, setSearch] = useState(() => searchParams.get('q') || '');
+  const [selectedDepts, setSelectedDepts] = useState<string[]>(() =>
+    parseListParam(searchParams.get('departments')).filter((department) => departments.includes(department)),
+  );
+  const [filterMode, setFilterMode] = useState<FilterMode>(() => {
+    const value = searchParams.get('show');
+    return FILTER_MODES.includes(value as FilterMode) ? (value as FilterMode) : 'all';
+  });
   const [deptOpen, setDeptOpen] = useState(false);
   const [unmappedOpen, setUnmappedOpen] = useState(false);
-  const [sortKey, setSortKey] = useState<SortKey>('discrepancyCount');
-  const [sortDir, setSortDir] = useState<SortDir>('desc');
-  const [page, setPage] = useState(0);
+  const [sortKey, setSortKey] = useState<SortKey>(() => (searchParams.get('sortKey') as SortKey) || 'discrepancyCount');
+  const [sortDir, setSortDir] = useState<SortDir>(() => (searchParams.get('sortDir') as SortDir) || 'desc');
+  const [page, setPage] = useState(() => Math.max(0, Number(searchParams.get('page') || '0') || 0));
 
   const deptRef = useRef<HTMLDivElement>(null);
 
@@ -97,6 +112,57 @@ export function CompareClient({
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
+
+  useEffect(() => {
+    const nextSearch = searchParams.get('q') || '';
+    const nextDepts = parseListParam(searchParams.get('departments'))
+      .filter((department) => departments.includes(department));
+    const nextFilterMode = FILTER_MODES.includes(searchParams.get('show') as FilterMode)
+      ? (searchParams.get('show') as FilterMode)
+      : 'all';
+    const nextSortKey = (searchParams.get('sortKey') as SortKey) || 'discrepancyCount';
+    const nextSortDir = (searchParams.get('sortDir') as SortDir) || 'desc';
+    const nextPage = Math.max(0, Number(searchParams.get('page') || '0') || 0);
+
+    setSearch((previous) => (previous === nextSearch ? previous : nextSearch));
+    setSelectedDepts((previous) => (arraysEqual(previous, nextDepts) ? previous : nextDepts));
+    setFilterMode((previous) => (previous === nextFilterMode ? previous : nextFilterMode));
+    setSortKey((previous) => (previous === nextSortKey ? previous : nextSortKey));
+    setSortDir((previous) => (previous === nextSortDir ? previous : nextSortDir));
+    setPage((previous) => (previous === nextPage ? previous : nextPage));
+  }, [departments, searchParams]);
+
+  const buildStateParams = useMemo(() => {
+    const params = new URLSearchParams(searchParams.toString());
+
+    if (search) params.set('q', search);
+    else params.delete('q');
+
+    if (selectedDepts.length > 0) params.set('departments', selectedDepts.join(','));
+    else params.delete('departments');
+
+    if (filterMode !== 'all') params.set('show', filterMode);
+    else params.delete('show');
+
+    if (sortKey !== 'discrepancyCount') params.set('sortKey', String(sortKey));
+    else params.delete('sortKey');
+
+    if (sortDir !== 'desc') params.set('sortDir', sortDir);
+    else params.delete('sortDir');
+
+    if (page > 0) params.set('page', String(page));
+    else params.delete('page');
+
+    return params;
+  }, [filterMode, page, search, searchParams, selectedDepts, sortDir, sortKey]);
+
+  useEffect(() => {
+    const next = buildStateParams.toString();
+    const current = searchParams.toString();
+    if (next !== current) {
+      router.replace(`/dashboard/timesheet-compare?${next}`, { scroll: false });
+    }
+  }, [buildStateParams, router, searchParams]);
 
   const toggleDept = (d: string) => {
     setSelectedDepts((prev) => prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]);

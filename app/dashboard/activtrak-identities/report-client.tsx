@@ -1,6 +1,7 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import type { SuspiciousActivTrakIdentity } from '@/lib/dashboard-data';
 
 interface ReportClientProps {
@@ -15,6 +16,16 @@ type FlagFilter =
   | 'non-corporate'
   | 'no-identifier'
   | 'no-activity';
+
+const FLAG_FILTERS: FlagFilter[] = [
+  'all',
+  'device-style',
+  'identifier-mismatch',
+  'non-email',
+  'non-corporate',
+  'no-identifier',
+  'no-activity',
+];
 
 function escapeCsvCell(value: string | number | null | undefined): string {
   const normalized = value == null ? '' : String(value);
@@ -52,8 +63,43 @@ function matchesFlag(row: SuspiciousActivTrakIdentity, filter: FlagFilter): bool
 }
 
 export function SuspiciousActivTrakIdentitiesClient({ rows }: ReportClientProps) {
-  const [search, setSearch] = useState('');
-  const [flagFilter, setFlagFilter] = useState<FlagFilter>('all');
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [search, setSearch] = useState(() => searchParams.get('q') || '');
+  const [flagFilter, setFlagFilter] = useState<FlagFilter>(() => {
+    const value = searchParams.get('flag');
+    return FLAG_FILTERS.includes(value as FlagFilter) ? (value as FlagFilter) : 'all';
+  });
+
+  useEffect(() => {
+    const nextSearch = searchParams.get('q') || '';
+    const nextFlag = FLAG_FILTERS.includes(searchParams.get('flag') as FlagFilter)
+      ? (searchParams.get('flag') as FlagFilter)
+      : 'all';
+
+    setSearch((previous) => (previous === nextSearch ? previous : nextSearch));
+    setFlagFilter((previous) => (previous === nextFlag ? previous : nextFlag));
+  }, [searchParams]);
+
+  const buildStateParams = useMemo(() => {
+    const params = new URLSearchParams(searchParams.toString());
+
+    if (search) params.set('q', search);
+    else params.delete('q');
+
+    if (flagFilter !== 'all') params.set('flag', flagFilter);
+    else params.delete('flag');
+
+    return params;
+  }, [flagFilter, search, searchParams]);
+
+  useEffect(() => {
+    const next = buildStateParams.toString();
+    const current = searchParams.toString();
+    if (next !== current) {
+      router.replace(next ? `/dashboard/activtrak-identities?${next}` : '/dashboard/activtrak-identities', { scroll: false });
+    }
+  }, [buildStateParams, router, searchParams]);
 
   const filteredRows = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -200,6 +246,18 @@ export function SuspiciousActivTrakIdentitiesClient({ rows }: ReportClientProps)
             <option value="no-activity">No activity</option>
           </select>
         </label>
+        {(search || flagFilter !== 'all') ? (
+          <button
+            type="button"
+            onClick={() => {
+              setSearch('');
+              setFlagFilter('all');
+            }}
+            className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] font-medium text-gray-700 transition-colors hover:bg-gray-50"
+          >
+            Clear Filters
+          </button>
+        ) : null}
       </div>
 
       <div className="max-h-[70vh] overflow-auto rounded-xl border border-gray-200 bg-white">

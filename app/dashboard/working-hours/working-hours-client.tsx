@@ -45,6 +45,14 @@ interface DetailState {
   employee: EmployeeWithMeta;
 }
 
+function getSanitizedParam(
+  value: string | null,
+  allowedValues: string[],
+): string {
+  if (!value) return 'all';
+  return allowedValues.includes(value) ? value : 'all';
+}
+
 const TOOLTIP_TEXT: Record<string, string> = {
   tbsReportedHours: 'TBS work hours reported for the week or day, excluding absence-coded entries.',
   tbsAbsenceHours: 'TBS hours logged against absence-related codes such as vacation or illness.',
@@ -362,12 +370,20 @@ export function WorkingHoursClient({
 }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [selectedGroup, setSelectedGroup] = useState('all');
-  const [selectedEmployeeNo, setSelectedEmployeeNo] = useState('all');
-  const [selectedUser, setSelectedUser] = useState('all');
-  const [selectedWeek, setSelectedWeek] = useState('all');
-  const [includeNonActivTrak, setIncludeNonActivTrak] = useState(false);
-  const [search, setSearch] = useState('');
+  const [selectedGroup, setSelectedGroup] = useState(() =>
+    getSanitizedParam(searchParams.get('group'), groups),
+  );
+  const [selectedEmployeeNo, setSelectedEmployeeNo] = useState(() =>
+    getSanitizedParam(searchParams.get('employeeNo'), employeeNumbers.map(String)),
+  );
+  const [selectedUser, setSelectedUser] = useState(() =>
+    getSanitizedParam(searchParams.get('user'), users),
+  );
+  const [selectedWeek, setSelectedWeek] = useState(() =>
+    getSanitizedParam(searchParams.get('week'), weekOptions),
+  );
+  const [includeNonActivTrak, setIncludeNonActivTrak] = useState(() => searchParams.get('coverage') === 'all');
+  const [search, setSearch] = useState(() => searchParams.get('q') || '');
   const [expandedWeeks, setExpandedWeeks] = useState<ExpandedWeeks>({});
   const [detail, setDetail] = useState<DetailState | null>(null);
   const detailHistoryPushed = useRef(false);
@@ -387,6 +403,54 @@ export function WorkingHoursClient({
     params.set('endDate', newEnd);
     router.push(`/dashboard/working-hours?${params.toString()}`);
   };
+
+  useEffect(() => {
+    const nextSearch = searchParams.get('q') || '';
+    const nextGroup = getSanitizedParam(searchParams.get('group'), groups);
+    const nextEmployeeNo = getSanitizedParam(searchParams.get('employeeNo'), employeeNumbers.map(String));
+    const nextUser = getSanitizedParam(searchParams.get('user'), users);
+    const nextWeek = getSanitizedParam(searchParams.get('week'), weekOptions);
+    const nextIncludeNonActivTrak = searchParams.get('coverage') === 'all';
+
+    setSearch((previous) => (previous === nextSearch ? previous : nextSearch));
+    setSelectedGroup((previous) => (previous === nextGroup ? previous : nextGroup));
+    setSelectedEmployeeNo((previous) => (previous === nextEmployeeNo ? previous : nextEmployeeNo));
+    setSelectedUser((previous) => (previous === nextUser ? previous : nextUser));
+    setSelectedWeek((previous) => (previous === nextWeek ? previous : nextWeek));
+    setIncludeNonActivTrak((previous) => (previous === nextIncludeNonActivTrak ? previous : nextIncludeNonActivTrak));
+  }, [employeeNumbers, groups, searchParams, users, weekOptions]);
+
+  const buildStateParams = useMemo(() => {
+    const params = new URLSearchParams(searchParams.toString());
+
+    if (search) params.set('q', search);
+    else params.delete('q');
+
+    if (selectedGroup !== 'all') params.set('group', selectedGroup);
+    else params.delete('group');
+
+    if (selectedEmployeeNo !== 'all') params.set('employeeNo', selectedEmployeeNo);
+    else params.delete('employeeNo');
+
+    if (selectedUser !== 'all') params.set('user', selectedUser);
+    else params.delete('user');
+
+    if (selectedWeek !== 'all') params.set('week', selectedWeek);
+    else params.delete('week');
+
+    if (includeNonActivTrak) params.set('coverage', 'all');
+    else params.delete('coverage');
+
+    return params;
+  }, [includeNonActivTrak, search, searchParams, selectedEmployeeNo, selectedGroup, selectedUser, selectedWeek]);
+
+  useEffect(() => {
+    const next = buildStateParams.toString();
+    const current = searchParams.toString();
+    if (next !== current) {
+      router.replace(`/dashboard/working-hours?${next}`, { scroll: false });
+    }
+  }, [buildStateParams, router, searchParams]);
 
   const handlePreset = (preset: 'week' | '30days' | 'thisweek') => {
     switch (preset) {
