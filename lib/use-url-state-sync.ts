@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { buildPathWithParams, type SearchParamReader } from './search-params';
 
 type RouterLike = {
@@ -30,6 +30,9 @@ export function useUrlStateSync({
   searchParams,
   fields,
 }: UseUrlStateSyncOptions): URLSearchParams {
+  const currentParams = searchParams.toString();
+  const lastSearchParamsRef = useRef(currentParams);
+  const pendingExternalSyncRef = useRef(false);
   const nextValues = useMemo(
     () => fields.map((field) => field.read(searchParams)),
     [fields, searchParams],
@@ -42,6 +45,12 @@ export function useUrlStateSync({
     }),
     [fields, nextValues],
   );
+
+  useEffect(() => {
+    if (lastSearchParamsRef.current === currentParams) return;
+    lastSearchParamsRef.current = currentParams;
+    pendingExternalSyncRef.current = true;
+  }, [currentParams]);
 
   useEffect(() => {
     fields.forEach((field, index) => {
@@ -58,13 +67,17 @@ export function useUrlStateSync({
   }, [fields, searchParams]);
 
   useEffect(() => {
-    if (!inSync) return;
+    if (pendingExternalSyncRef.current) {
+      if (!inSync) return;
+      pendingExternalSyncRef.current = false;
+    }
+
     const next = nextParams.toString();
-    const current = searchParams.toString();
+    const current = currentParams;
     if (next !== current) {
       router.replace(buildPathWithParams(pathname, nextParams), { scroll });
     }
-  }, [inSync, nextParams, pathname, router, scroll, searchParams]);
+  }, [currentParams, inSync, nextParams, pathname, router, scroll]);
 
   return nextParams;
 }
