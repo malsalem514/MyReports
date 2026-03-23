@@ -70,6 +70,7 @@ interface GroupRow {
   employeeCount: number;
   quebecEmployeeCount: number;
   remoteEmployeeCount: number;
+  unknownCoverageCount: number;
   managerName?: string;
   managerEmail?: string | null;
   officeLocation: string;
@@ -93,6 +94,7 @@ interface DisplayRow {
   label: string;
   secondary: string;
   officeLocation: string;
+  hasActivTrakCoverage: boolean;
   approvedRemoteWorkRequest: boolean;
   remoteWorkStatusLabel: string;
   weeks: Record<string, WeekCell>;
@@ -103,6 +105,7 @@ interface DisplayRow {
   employeeCount?: number;
   quebecEmployeeCount?: number;
   remoteEmployeeCount?: number;
+  unknownCoverageCount?: number;
   weeklyCompliance?: Record<string, {
     compliantEmployees: number;
     eligibleEmployees: number;
@@ -131,6 +134,7 @@ interface CalendarMonth {
 }
 
 const PAGE_SIZE = 50;
+const UNKNOWN_DISPLAY_VALUE = '—';
 
 /** Parse YYYY-MM-DD as local date (avoids UTC timezone shift) */
 function parseLocalDate(s: string): Date {
@@ -180,6 +184,10 @@ function scoreTone(scorePct: number): string {
   return 'bg-red-50 text-red-700';
 }
 
+function unknownTone(): string {
+  return 'bg-gray-100 text-gray-400';
+}
+
 function complianceValueTone(scorePct: number, eligibleEmployees: number): string {
   if (eligibleEmployees <= 0) return 'bg-gray-100 text-gray-400';
   return scoreTone(scorePct);
@@ -187,6 +195,21 @@ function complianceValueTone(scorePct: number, eligibleEmployees: number): strin
 
 function formatNameBucket(names: string[]): string {
   return names.length > 0 ? names.join(', ') : '—';
+}
+
+function formatKnownValue(value: number | string, isKnown: boolean): string {
+  return isKnown ? String(value) : UNKNOWN_DISPLAY_VALUE;
+}
+
+function employeeMetricTone(isKnown: boolean, scorePct: number): string {
+  return isKnown ? scoreTone(scorePct) : unknownTone();
+}
+
+function compareMaybeNumber(a: number | null, b: number | null, dir: number): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return dir * (a - b);
 }
 
 function formatRangeLabel(startDate: string, endDate: string): string {
@@ -621,12 +644,15 @@ export function AttendanceClient({
 
     const addEmployeeToGroup = (group: GroupRow, row: AttendanceRow) => {
       const isQuebecEmployee = row.officeLocation === DEFAULT_EMPLOYEE_LOCATION;
-      const isEligibleEmployee = isQuebecEmployee && !row.approvedRemoteWorkRequest;
+      const hasCoverage = row.hasActivTrakCoverage;
+      const isEligibleEmployee = isQuebecEmployee && !row.approvedRemoteWorkRequest && hasCoverage;
 
       group.employeeCount += 1;
       if (isEligibleEmployee) {
         group.quebecEmployeeCount += 1;
         group.total += row.total;
+      } else if (isQuebecEmployee && !row.approvedRemoteWorkRequest && !hasCoverage) {
+        group.unknownCoverageCount += 1;
       } else {
         group.remoteEmployeeCount += 1;
       }
@@ -684,6 +710,7 @@ export function AttendanceClient({
         employeeCount: 0,
         quebecEmployeeCount: 0,
         remoteEmployeeCount: 0,
+        unknownCoverageCount: 0,
         managerName: isManagerView ? groupLabel : undefined,
         managerEmail: isManagerView ? (row.managerEmail || null) : undefined,
         officeLocation: row.officeLocation || 'Unknown',
@@ -796,12 +823,13 @@ export function AttendanceClient({
       label: row.name,
       secondary: row.department,
       officeLocation: row.officeLocation,
+      hasActivTrakCoverage: row.hasActivTrakCoverage,
       approvedRemoteWorkRequest: row.approvedRemoteWorkRequest,
       remoteWorkStatusLabel: row.remoteWorkStatusLabel,
       weeks: row.weeks,
       total: row.total,
       avgPerWeek: row.avgPerWeek,
-      scorePct: calculateScorePct(row.weeks, scoredWeeks),
+      scorePct: row.hasActivTrakCoverage ? calculateScorePct(row.weeks, scoredWeeks) : 0,
       trend: row.trend,
       managerName: row.managerName,
       managerEmail: row.managerEmail,
@@ -813,6 +841,7 @@ export function AttendanceClient({
       label: row.groupLabel,
       secondary: String(row.employeeCount),
       officeLocation: row.officeLocation,
+      hasActivTrakCoverage: true,
       approvedRemoteWorkRequest: false,
       remoteWorkStatusLabel: '—',
       weeks: Object.fromEntries(
@@ -835,6 +864,7 @@ export function AttendanceClient({
       employeeCount: row.employeeCount,
       quebecEmployeeCount: row.quebecEmployeeCount,
       remoteEmployeeCount: row.remoteEmployeeCount,
+      unknownCoverageCount: row.unknownCoverageCount,
       weeklyCompliance: row.weeklyCompliance,
     }));
 
@@ -853,16 +883,41 @@ export function AttendanceClient({
       if (sortKey === 'quebecEmployeeCount') return dir * ((a.quebecEmployeeCount ?? 0) - (b.quebecEmployeeCount ?? 0));
       if (sortKey === 'remoteEmployeeCount') return dir * ((a.remoteEmployeeCount ?? 0) - (b.remoteEmployeeCount ?? 0));
       if (sortKey === 'officeLocation') return dir * a.officeLocation.localeCompare(b.officeLocation);
-      if (sortKey === 'total') return dir * (a.total - b.total);
-      if (sortKey === 'avgPerWeek') return dir * (a.avgPerWeek - b.avgPerWeek);
-      if (sortKey === 'status') return dir * (a.scorePct - b.scorePct);
+      if (sortKey === 'total') {
+        return compareMaybeNumber(
+          !isAggregateView && !a.hasActivTrakCoverage ? null : a.total,
+          !isAggregateView && !b.hasActivTrakCoverage ? null : b.total,
+          dir,
+        );
+      }
+      if (sortKey === 'avgPerWeek') {
+        return compareMaybeNumber(
+          !isAggregateView && !a.hasActivTrakCoverage ? null : a.avgPerWeek,
+          !isAggregateView && !b.hasActivTrakCoverage ? null : b.avgPerWeek,
+          dir,
+        );
+      }
+      if (sortKey === 'status') {
+        return compareMaybeNumber(
+          !isAggregateView && !a.hasActivTrakCoverage ? null : a.scorePct,
+          !isAggregateView && !b.hasActivTrakCoverage ? null : b.scorePct,
+          dir,
+        );
+      }
       if (sortKey === 'trend') {
         const order = { up: 2, flat: 1, down: 0 };
+        if (!isAggregateView) {
+          if (!a.hasActivTrakCoverage && !b.hasActivTrakCoverage) return 0;
+          if (!a.hasActivTrakCoverage) return 1;
+          if (!b.hasActivTrakCoverage) return -1;
+        }
         return dir * (order[a.trend] - order[b.trend]);
       }
-      const aDays = a.weeks[sortKey]?.officeDays ?? 0;
-      const bDays = b.weeks[sortKey]?.officeDays ?? 0;
-      return dir * (aDays - bDays);
+      return compareMaybeNumber(
+        !isAggregateView && !a.hasActivTrakCoverage ? null : (a.weeks[sortKey]?.officeDays ?? 0),
+        !isAggregateView && !b.hasActivTrakCoverage ? null : (b.weeks[sortKey]?.officeDays ?? 0),
+        dir,
+      );
     });
     return arr;
   }, [displayRows, isAggregateView, sortDir, sortKey]);
@@ -872,6 +927,8 @@ export function AttendanceClient({
     const totalGroups = groupedRows.length;
     const numCompletedWeeks = scoredWeeks.length;
     const totalEligibleQuebecEmployees = groupedRows.reduce((sum, row) => sum + row.quebecEmployeeCount, 0);
+    const unknownCoverageCount = filtered.filter((row) => !row.hasActivTrakCoverage).length;
+    const measurableEmployees = Math.max(0, totalEmployees - unknownCoverageCount);
     let zeroCount = 0;
     let sumOfficeDays = 0;
     let sumScorePct = 0;
@@ -886,6 +943,7 @@ export function AttendanceClient({
       }
     } else {
       for (const row of filtered) {
+        if (!row.hasActivTrakCoverage) continue;
         if (row.total === 0) zeroCount++;
         sumScorePct += calculateScorePct(row.weeks, scoredWeeks);
         for (const week of scoredWeeks) {
@@ -894,17 +952,19 @@ export function AttendanceClient({
       }
     }
 
-    const avgOfficeDays = (isAggregateView ? totalEligibleQuebecEmployees : totalEmployees) > 0 && numCompletedWeeks > 0
-      ? Math.round((sumOfficeDays / Math.max(1, isAggregateView ? totalEligibleQuebecEmployees : totalEmployees) / numCompletedWeeks) * 10) / 10
+    const avgOfficeDays = (isAggregateView ? totalEligibleQuebecEmployees : measurableEmployees) > 0 && numCompletedWeeks > 0
+      ? Math.round((sumOfficeDays / Math.max(1, isAggregateView ? totalEligibleQuebecEmployees : measurableEmployees) / numCompletedWeeks) * 10) / 10
       : 0;
-    const complianceRate = (isAggregateView ? totalGroups : totalEmployees) > 0
-      ? Math.round(sumScorePct / Math.max(1, isAggregateView ? totalGroups : totalEmployees))
+    const complianceRate = (isAggregateView ? totalGroups : measurableEmployees) > 0
+      ? Math.round(sumScorePct / Math.max(1, isAggregateView ? totalGroups : measurableEmployees))
       : 0;
-    const zeroOfficeDepartments = groupedRows.filter((row) => row.total === 0).length;
+    const zeroOfficeDepartments = groupedRows.filter((row) => row.total === 0 && row.quebecEmployeeCount > 0).length;
 
     return {
       totalEmployees,
       totalDepartments: totalGroups,
+      measurableEmployees,
+      unknownCoverageCount,
       avgOfficeDays,
       complianceRate,
       zeroOfficeDaysCount: zeroCount,
@@ -1074,6 +1134,7 @@ export function AttendanceClient({
       ...(isAggregateView ? ['Quebec Employees', 'Remote/Exempt Employees'] : []),
       'Location',
       'Remote Workday',
+      ...(isAggregateView ? [] : ['ActivTrak Coverage']),
       ...weeks.map((w) => getWeekLabel(w)),
       isAggregateView ? 'Total Office Days' : 'Total',
       'Avg/Week',
@@ -1087,11 +1148,14 @@ export function AttendanceClient({
       ...(isAggregateView ? [String(r.quebecEmployeeCount ?? 0), String(r.remoteEmployeeCount ?? 0)] : []),
       r.officeLocation,
       isAggregateView ? '—' : r.remoteWorkStatusLabel,
-      ...weeks.map((w) => isAggregateView ? `${r.weeklyCompliance?.[w]?.compliancePct ?? 0}%` : String(r.weeks[w]?.officeDays ?? 0)),
-      String(r.total),
-      String(r.avgPerWeek),
-      `${r.scorePct}%`,
-      r.trend,
+      ...(isAggregateView ? [] : [r.hasActivTrakCoverage ? 'Covered' : 'Unknown']),
+      ...weeks.map((w) => isAggregateView
+        ? `${r.weeklyCompliance?.[w]?.compliancePct ?? 0}%`
+        : (r.hasActivTrakCoverage ? String(r.weeks[w]?.officeDays ?? 0) : '')),
+      isAggregateView ? String(r.total) : (r.hasActivTrakCoverage ? String(r.total) : ''),
+      isAggregateView ? String(r.avgPerWeek) : (r.hasActivTrakCoverage ? String(r.avgPerWeek) : ''),
+      isAggregateView ? `${r.scorePct}%` : (r.hasActivTrakCoverage ? `${r.scorePct}%` : ''),
+      isAggregateView ? r.trend : (r.hasActivTrakCoverage ? r.trend : ''),
     ]);
 
     const csvLines = [headers.join(','), ...csvRows.map((row) => row.map((c) => `"${c}"`).join(','))];
@@ -1183,6 +1247,7 @@ export function AttendanceClient({
       ...(isAggregateView ? ['Quebec Employees', 'Remote/Exempt Employees'] : []),
       'Location',
       'Remote Workday',
+      ...(isAggregateView ? [] : ['ActivTrak Coverage']),
       ...weeks.map((w) => getWeekLabel(w)),
       isAggregateView ? 'Total Office Days' : 'Total',
       'Avg/Week',
@@ -1201,6 +1266,7 @@ export function AttendanceClient({
       isAggregateView ? `${filteredSummary.totalEmployees} employees` : '',
       ...(isAggregateView ? ['', ''] : []),
       '',
+      ...(isAggregateView ? [] : [filteredSummary.unknownCoverageCount > 0 ? `${filteredSummary.unknownCoverageCount} unknown` : '']),
       `${filteredSummary.complianceRate}% score`,
       ...weeks.map(() => ''),
       '',
@@ -1219,9 +1285,14 @@ export function AttendanceClient({
         ...(isAggregateView ? [r.quebecEmployeeCount ?? 0, r.remoteEmployeeCount ?? 0] : []),
         r.officeLocation,
         isAggregateView ? '—' : r.remoteWorkStatusLabel,
-        ...weeks.map((w) => isAggregateView ? `${r.weeklyCompliance?.[w]?.compliancePct ?? 0}%` : (r.weeks[w]?.officeDays ?? 0)),
-        r.total, r.avgPerWeek,
-        r.scorePct, r.trend,
+        ...(isAggregateView ? [] : [r.hasActivTrakCoverage ? 'Covered' : 'Unknown']),
+        ...weeks.map((w) => isAggregateView
+          ? `${r.weeklyCompliance?.[w]?.compliancePct ?? 0}%`
+          : (r.hasActivTrakCoverage ? (r.weeks[w]?.officeDays ?? 0) : '')),
+        isAggregateView ? r.total : (r.hasActivTrakCoverage ? r.total : ''),
+        isAggregateView ? r.avgPerWeek : (r.hasActivTrakCoverage ? r.avgPerWeek : ''),
+        isAggregateView ? r.scorePct : (r.hasActivTrakCoverage ? r.scorePct : ''),
+        isAggregateView ? r.trend : (r.hasActivTrakCoverage ? r.trend : ''),
       ]);
 
       weeks.forEach((w, i) => {
@@ -1237,7 +1308,7 @@ export function AttendanceClient({
                   : (compliance?.compliancePct ?? 0) >= 50
                       ? 'FEF3C7'
                       : 'FEE2E2'
-          : getCellHex(wc?.officeDays ?? 0, wc?.ptoDays ?? 0);
+          : (!r.hasActivTrakCoverage ? 'F3F4F6' : getCellHex(wc?.officeDays ?? 0, wc?.ptoDays ?? 0));
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: hex } };
       });
     }
@@ -1643,7 +1714,14 @@ export function AttendanceClient({
               {isApprovedRemoteWorkView ? (
                 <p className="mt-1 text-[11px] text-gray-400">All remote-work request records from `TL_REMOTE_WORK_REQUESTS`. See `Manager Approval` for status.</p>
               ) : isAggregateView ? (
-                <p className="mt-1 text-[11px] text-gray-400">{filteredSummary.totalEmployees} employees covered</p>
+                <p className="mt-1 text-[11px] text-gray-400">
+                  {filteredSummary.measurableEmployees} measurable employee{filteredSummary.measurableEmployees === 1 ? '' : 's'}
+                  {filteredSummary.unknownCoverageCount > 0 ? ` • ${filteredSummary.unknownCoverageCount} unknown` : ''}
+                </p>
+              ) : filteredSummary.unknownCoverageCount > 0 ? (
+                <p className="mt-1 text-[11px] text-gray-400">
+                  {filteredSummary.unknownCoverageCount} employee{filteredSummary.unknownCoverageCount === 1 ? '' : 's'} shown as unknown due to missing ActivTrak coverage
+                </p>
               ) : null}
             </div>
             <div className="rounded-xl border border-gray-200 bg-white p-4">
@@ -1778,8 +1856,8 @@ export function AttendanceClient({
                         </p>
                         <p className="mt-0.5 text-[12px] text-gray-500">{row.officeLocation}</p>
                       </div>
-                      <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-medium ${scoreTone(row.scorePct)}`}>
-                        {row.scorePct}%
+                      <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-medium ${isAggregateView ? scoreTone(row.scorePct) : employeeMetricTone(row.hasActivTrakCoverage, row.scorePct)}`}>
+                        {isAggregateView ? `${row.scorePct}%` : formatKnownValue(`${row.scorePct}%`, row.hasActivTrakCoverage)}
                       </span>
                     </div>
 
@@ -1791,6 +1869,11 @@ export function AttendanceClient({
                         <span className="inline-flex rounded-full bg-gray-100 px-2 py-1 text-[10px] font-medium text-gray-600">
                           {row.email}
                         </span>
+                        {!row.hasActivTrakCoverage ? (
+                          <span className="inline-flex rounded-full bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-700">
+                            No ActivTrak coverage
+                          </span>
+                        ) : null}
                       </div>
                     ) : (
                       <div className="grid grid-cols-2 gap-2">
@@ -1808,22 +1891,22 @@ export function AttendanceClient({
                     <div className="grid grid-cols-2 gap-2">
                       <div className="rounded-lg bg-gray-50 px-3 py-2">
                         <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Total</p>
-                        <p className="mt-1 text-[16px] font-semibold text-gray-900">{row.total}</p>
+                        <p className="mt-1 text-[16px] font-semibold text-gray-900">{isAggregateView ? row.total : formatKnownValue(row.total, row.hasActivTrakCoverage)}</p>
                       </div>
                       <div className="rounded-lg bg-gray-50 px-3 py-2">
                         <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Avg/Week</p>
-                        <p className="mt-1 text-[16px] font-semibold text-gray-900">{row.avgPerWeek}</p>
+                        <p className="mt-1 text-[16px] font-semibold text-gray-900">{isAggregateView ? row.avgPerWeek : formatKnownValue(row.avgPerWeek, row.hasActivTrakCoverage)}</p>
                       </div>
                       <div className="rounded-lg bg-gray-50 px-3 py-2">
                         <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Trend</p>
                         <p className="mt-1 text-[16px] font-semibold text-gray-900">
-                          {row.trend === 'up' ? 'Up' : row.trend === 'down' ? 'Down' : 'Flat'}
+                          {isAggregateView || row.hasActivTrakCoverage ? (row.trend === 'up' ? 'Up' : row.trend === 'down' ? 'Down' : 'Flat') : UNKNOWN_DISPLAY_VALUE}
                         </p>
                       </div>
                       <div className="rounded-lg bg-gray-50 px-3 py-2">
                         <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">{isAggregateView ? 'Compliance' : 'Weeks'}</p>
                         <p className="mt-1 text-[16px] font-semibold text-gray-900">
-                          {isAggregateView ? `${row.scorePct}%` : weeks.length}
+                          {isAggregateView ? `${row.scorePct}%` : formatKnownValue(weeks.length, row.hasActivTrakCoverage)}
                         </p>
                       </div>
                     </div>
@@ -1846,9 +1929,9 @@ export function AttendanceClient({
                               <span className={`inline-flex min-h-6 min-w-12 items-center justify-center rounded px-2 text-[11px] font-medium ${
                                   isAggregateView
                                     ? complianceValueTone(departmentCompliance?.compliancePct ?? 0, departmentCompliance?.eligibleEmployees ?? 0)
-                                    : getCellColor(office, pto)
+                                    : (row.hasActivTrakCoverage ? getCellColor(office, pto) : unknownTone())
                                 }`}>
-                                  {isAggregateView ? `${departmentCompliance?.compliancePct ?? 0}%` : office}
+                                  {isAggregateView ? `${departmentCompliance?.compliancePct ?? 0}%` : formatKnownValue(office, row.hasActivTrakCoverage)}
                                 </span>
                               </div>
                               {isAggregateView ? (
@@ -1880,7 +1963,7 @@ export function AttendanceClient({
                                     <p className="mt-1 leading-5 text-gray-600">{formatNameBucket(departmentCompliance?.fullyRemoteNames ?? [])}</p>
                                   </div>
                                 </div>
-                              ) : (
+                              ) : row.hasActivTrakCoverage ? (
                                 <div className="mt-2 grid grid-cols-3 gap-2 text-[11px] text-gray-500">
                                   <div>
                                     <p className="uppercase tracking-wider text-gray-400">Office</p>
@@ -1894,6 +1977,10 @@ export function AttendanceClient({
                                     <p className="uppercase tracking-wider text-gray-400">PTO</p>
                                     <p className="mt-1 font-medium text-gray-700">{pto}</p>
                                   </div>
+                                </div>
+                              ) : (
+                                <div className="mt-2 text-[11px] text-gray-500">
+                                  No ActivTrak coverage. Office attendance is unknown for this employee.
                                 </div>
                               )}
                             </div>
@@ -1993,17 +2080,22 @@ export function AttendanceClient({
                   {pageRows.map((row) => (
                     <tr key={row.id} className="hover:bg-gray-50">
                       <td className="sticky left-0 z-10 bg-white px-4 py-2 group-hover:bg-gray-50">
-                        {row.email ? (
-                          <button
-                            type="button"
-                            onClick={() => setDetail({ row })}
-                            className="whitespace-nowrap text-[13px] font-medium text-gray-900 hover:underline"
-                          >
-                            {row.label}
-                          </button>
-                        ) : (
-                          <span className="whitespace-nowrap text-[13px] font-medium text-gray-900">{row.label}</span>
-                        )}
+                        <div className="min-w-0">
+                          {row.email ? (
+                            <button
+                              type="button"
+                              onClick={() => setDetail({ row })}
+                              className="whitespace-nowrap text-[13px] font-medium text-gray-900 hover:underline"
+                            >
+                              {row.label}
+                            </button>
+                          ) : (
+                            <span className="whitespace-nowrap text-[13px] font-medium text-gray-900">{row.label}</span>
+                          )}
+                          {!isAggregateView && !row.hasActivTrakCoverage ? (
+                            <div className="mt-0.5 text-[10px] font-medium text-amber-700">No ActivTrak coverage</div>
+                          ) : null}
+                        </div>
                       </td>
                       <td className="whitespace-nowrap px-3 py-2 text-[12px] text-gray-500">{row.secondary}</td>
                       {isAggregateView ? (
@@ -2021,12 +2113,12 @@ export function AttendanceClient({
                         const departmentCompliance = row.weeklyCompliance?.[w];
                         const color = isAggregateView
                           ? complianceValueTone(departmentCompliance?.compliancePct ?? 0, departmentCompliance?.eligibleEmployees ?? 0)
-                          : getCellColor(office, pto);
+                          : (row.hasActivTrakCoverage ? getCellColor(office, pto) : unknownTone());
                         return (
                           <td key={w} className="px-2 py-1.5 text-center">
                             <div className="group relative inline-flex">
                               <span className={`inline-flex min-h-6 min-w-8 cursor-default items-center justify-center rounded px-1 text-[11px] font-medium ${color}`}>
-                                {isAggregateView ? `${departmentCompliance?.compliancePct ?? 0}%` : office}
+                                {isAggregateView ? `${departmentCompliance?.compliancePct ?? 0}%` : formatKnownValue(office, row.hasActivTrakCoverage)}
                               </span>
                               <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-80 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-3 py-2.5 opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
                                 <div className="text-left text-[11px]">
@@ -2050,6 +2142,10 @@ export function AttendanceClient({
                                         <p className="uppercase tracking-wider text-gray-400">Fully remote</p>
                                         <p className="mt-1 leading-5">{formatNameBucket(departmentCompliance?.fullyRemoteNames ?? [])}</p>
                                       </div>
+                                    </div>
+                                  ) : !row.hasActivTrakCoverage ? (
+                                    <div className="text-gray-500">
+                                      No ActivTrak coverage. Office attendance is unknown for this employee.
                                     </div>
                                   ) : cell && cell.days.length > 0 ? (
                                     <div className="space-y-0.5">
@@ -2081,15 +2177,20 @@ export function AttendanceClient({
                           </td>
                         );
                       })}
-                      <td className="whitespace-nowrap px-3 py-1.5 text-center text-[13px] font-semibold text-gray-900">{row.total}</td>
-                      <td className="whitespace-nowrap px-3 py-1.5 text-center text-[12px] text-gray-600">{row.avgPerWeek}</td>
+                      <td className="whitespace-nowrap px-3 py-1.5 text-center text-[13px] font-semibold text-gray-900">
+                        {isAggregateView ? row.total : formatKnownValue(row.total, row.hasActivTrakCoverage)}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-1.5 text-center text-[12px] text-gray-600">
+                        {isAggregateView ? row.avgPerWeek : formatKnownValue(row.avgPerWeek, row.hasActivTrakCoverage)}
+                      </td>
                       <td className="whitespace-nowrap px-3 py-1.5 text-center">
-                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${scoreTone(row.scorePct)}`}>
-                          {row.scorePct}%
+                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${isAggregateView ? scoreTone(row.scorePct) : employeeMetricTone(row.hasActivTrakCoverage, row.scorePct)}`}>
+                          {isAggregateView ? `${row.scorePct}%` : formatKnownValue(`${row.scorePct}%`, row.hasActivTrakCoverage)}
                         </span>
                       </td>
                       <td className="whitespace-nowrap px-3 py-1.5 text-center text-[14px]">
-                        {row.trend === 'up' ? <span className="text-green-600">↑</span> :
+                        {!isAggregateView && !row.hasActivTrakCoverage ? <span className="text-gray-400">{UNKNOWN_DISPLAY_VALUE}</span> :
+                         row.trend === 'up' ? <span className="text-green-600">↑</span> :
                          row.trend === 'down' ? <span className="text-red-600">↓</span> :
                          <span className="text-gray-400">–</span>}
                       </td>
@@ -2296,6 +2397,7 @@ function AttendanceDetailModal({
   returnTo: string;
   onClose: () => void;
 }) {
+  const hasActivTrakCoverage = row.hasActivTrakCoverage;
   const weekSummaries = weeks.map((week) => {
     const cell = row.weeks[week] || { officeDays: 0, remoteDays: 0, ptoDays: 0, days: [] };
     return {
@@ -2376,6 +2478,11 @@ function AttendanceDetailModal({
               }`}>
                 {row.remoteWorkStatusLabel}
               </span>
+              {!hasActivTrakCoverage ? (
+                <span className="inline-flex rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                  No ActivTrak coverage
+                </span>
+              ) : null}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -2397,12 +2504,18 @@ function AttendanceDetailModal({
           </div>
         </div>
 
+        {!hasActivTrakCoverage ? (
+          <div className="border-b border-amber-100 bg-amber-50/80 px-6 py-3 text-[12px] text-amber-800">
+            This employee does not currently have an ActivTrak identity in the source data. Office attendance is unknown, so attendance values are intentionally left blank instead of showing zero.
+          </div>
+        ) : null}
+
         <div className="grid gap-4 border-b border-gray-100 bg-gray-50/70 px-6 py-4 md:grid-cols-5">
-          <MetricCard label="Score" value={`${row.scorePct}%`} tone={scoreTone(row.scorePct)} />
-          <MetricCard label="Office Days" value={String(officeDays)} />
-          <MetricCard label="Remote Days" value={String(remoteDays)} />
+          <MetricCard label="Score" value={formatKnownValue(`${row.scorePct}%`, hasActivTrakCoverage)} tone={employeeMetricTone(hasActivTrakCoverage, row.scorePct)} />
+          <MetricCard label="Office Days" value={formatKnownValue(officeDays, hasActivTrakCoverage)} />
+          <MetricCard label="Remote Days" value={formatKnownValue(remoteDays, hasActivTrakCoverage)} />
           <MetricCard label="PTO Days" value={String(ptoDays)} />
-          <MetricCard label="Weeks With Activity" value={String(activeWeeks)} />
+          <MetricCard label="Weeks With Activity" value={formatKnownValue(activeWeeks, hasActivTrakCoverage)} />
         </div>
 
         <div className="flex-1 overflow-y-auto px-6 py-5">
@@ -2490,13 +2603,15 @@ function AttendanceDetailModal({
               <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
                 <div className="divide-y divide-gray-100">
                   {weekSummaries.map((weekSummary) => {
-                    const compliantWeek = weekSummary.officeDays >= OFFICE_DAYS_REQUIRED;
+                    const compliantWeek = hasActivTrakCoverage && weekSummary.officeDays >= OFFICE_DAYS_REQUIRED;
                     return (
                       <div key={weekSummary.week} className="flex items-center justify-between gap-4 px-4 py-3">
                         <div className="min-w-0">
                           <p className="text-[13px] font-medium text-gray-900">{weekSummary.label}</p>
                           <p className="mt-1 text-[11px] text-gray-400">
-                            {weekSummary.officeDays} office • {weekSummary.remoteDays} remote • {weekSummary.ptoDays} PTO
+                            {hasActivTrakCoverage
+                              ? `${weekSummary.officeDays} office • ${weekSummary.remoteDays} remote • ${weekSummary.ptoDays} PTO`
+                              : `Attendance unknown • ${weekSummary.ptoDays} PTO`}
                           </p>
                         </div>
                         <div className="flex items-center gap-3">
@@ -2505,12 +2620,12 @@ function AttendanceDetailModal({
                               ✓
                             </span>
                           ) : (
-                            <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-gray-100 text-[14px] font-semibold text-gray-400">
-                              —
+                            <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full text-[14px] font-semibold ${hasActivTrakCoverage ? 'bg-gray-100 text-gray-400' : 'bg-amber-50 text-amber-700'}`}>
+                              {hasActivTrakCoverage ? '—' : '?'}
                             </span>
                           )}
-                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${scoreTone(weekSummary.scorePct)}`}>
-                            {weekSummary.scorePct}%
+                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${employeeMetricTone(hasActivTrakCoverage, weekSummary.scorePct)}`}>
+                            {formatKnownValue(`${weekSummary.scorePct}%`, hasActivTrakCoverage)}
                           </span>
                         </div>
                       </div>
@@ -2566,7 +2681,11 @@ function AttendanceDetailModal({
                         </tr>
                       )) : (
                         <tr>
-                          <td colSpan={6} className="px-4 py-8 text-center text-[13px] text-gray-500">No day-level activity in this range.</td>
+                          <td colSpan={6} className="px-4 py-8 text-center text-[13px] text-gray-500">
+                            {hasActivTrakCoverage
+                              ? 'No day-level activity in this range.'
+                              : 'No ActivTrak day-level data is available for this employee in this range.'}
+                          </td>
                         </tr>
                       )}
                     </tbody>
@@ -2574,9 +2693,9 @@ function AttendanceDetailModal({
                 </div>
               </div>
               <div className="grid gap-3 sm:grid-cols-3">
-                <MetricCard label="Unknown Days" value={String(unknownDays)} />
-                <MetricCard label="Avg Office / Week" value={String(row.avgPerWeek)} />
-                <MetricCard label="Trend" value={row.trend === 'flat' ? 'Flat' : row.trend === 'up' ? 'Up' : 'Down'} />
+                <MetricCard label="Unknown Days" value={formatKnownValue(unknownDays, hasActivTrakCoverage)} />
+                <MetricCard label="Avg Office / Week" value={formatKnownValue(row.avgPerWeek, hasActivTrakCoverage)} />
+                <MetricCard label="Trend" value={hasActivTrakCoverage ? (row.trend === 'flat' ? 'Flat' : row.trend === 'up' ? 'Up' : 'Down') : UNKNOWN_DISPLAY_VALUE} />
               </div>
             </section>
           </div>

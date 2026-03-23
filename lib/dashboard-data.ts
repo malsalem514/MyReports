@@ -411,18 +411,20 @@ export async function getAttendanceReport(
       LOCATION: string;
       MANAGER_NAME: string;
       MANAGER_EMAIL: string | null;
+      HAS_ACTIVTRAK_USER: number;
     }>(
       `SELECT
-         LOWER(EMAIL) AS EMAIL,
-         NVL(DISPLAY_NAME, EMAIL) AS DISPLAY_NAME,
-         NVL(DEPARTMENT, 'Unknown') AS DEPARTMENT,
-         NVL(LOCATION, 'Unknown') AS LOCATION,
-         NVL(SUPERVISOR_NAME, 'Unassigned') AS MANAGER_NAME,
-         LOWER(SUPERVISOR_EMAIL) AS MANAGER_EMAIL
-       FROM TL_EMPLOYEES
-       WHERE EMAIL IS NOT NULL
-         AND (STATUS IS NULL OR UPPER(STATUS) != 'INACTIVE')
-         AND DEPARTMENT NOT IN ('Executive', 'Administration')${empEmailFilter}`,
+         m.EMAIL,
+         NVL(m.DISPLAY_NAME, m.EMAIL) AS DISPLAY_NAME,
+         NVL(m.DEPARTMENT, 'Unknown') AS DEPARTMENT,
+         NVL(m.LOCATION, 'Unknown') AS LOCATION,
+         NVL(e.SUPERVISOR_NAME, 'Unassigned') AS MANAGER_NAME,
+         LOWER(e.SUPERVISOR_EMAIL) AS MANAGER_EMAIL,
+         NVL(m.HAS_ACTIVTRAK_USER, 0) AS HAS_ACTIVTRAK_USER
+       FROM V_USER_MAPPINGS m
+       LEFT JOIN TL_EMPLOYEES e
+         ON LOWER(e.EMAIL) = m.EMAIL
+       WHERE 1 = 1${empEmailFilter}`,
       empParams,
     ),
     // Daily detail (deduped, Office wins, weekdays only) — includes PTO flag from ActivTrak
@@ -721,6 +723,7 @@ export async function getAttendanceReport(
   // --- Index attendance by employee ---
   const empWeeks = new Map<string, {
     name: string; department: string; managerName: string; managerEmail: string | null; officeLocation: string;
+    hasActivTrakCoverage: boolean;
     approvedRemoteWorkRequest: boolean;
     remoteWorkStatusLabel: string;
     weeks: Record<string, WeekCell>;
@@ -742,6 +745,7 @@ export async function getAttendanceReport(
         managerName: employeeMeta?.MANAGER_NAME || 'Unassigned',
         managerEmail: employeeMeta?.MANAGER_EMAIL || null,
         officeLocation: employeeMeta?.LOCATION || r.OFFICE_LOCATION || 'Unknown',
+        hasActivTrakCoverage: employeeMeta ? employeeMeta.HAS_ACTIVTRAK_USER === 1 : true,
         approvedRemoteWorkRequest: approvedRemoteWorkEmails.has(email),
         remoteWorkStatusLabel: getRemoteWorkStatusLabel(email),
         weeks: {},
@@ -775,6 +779,7 @@ export async function getAttendanceReport(
         managerName: employee?.MANAGER_NAME || 'Unassigned',
         managerEmail: employee?.MANAGER_EMAIL || null,
         officeLocation: employee?.LOCATION || 'Unknown',
+        hasActivTrakCoverage: employee?.HAS_ACTIVTRAK_USER === 1,
         approvedRemoteWorkRequest: approvedRemoteWorkEmails.has(email),
         remoteWorkStatusLabel: getRemoteWorkStatusLabel(email),
         weeks: {},
@@ -808,6 +813,7 @@ export async function getAttendanceReport(
       managerName: emp.MANAGER_NAME || 'Unassigned',
       managerEmail: emp.MANAGER_EMAIL || null,
       officeLocation: emp.LOCATION || 'Unknown',
+      hasActivTrakCoverage: emp.HAS_ACTIVTRAK_USER === 1,
       approvedRemoteWorkRequest: approvedRemoteWorkEmails.has(email),
       remoteWorkStatusLabel: getRemoteWorkStatusLabel(email),
       weeks: {},
@@ -901,6 +907,7 @@ export async function getAttendanceReport(
       managerName: data.managerName,
       managerEmail: data.managerEmail,
       officeLocation: data.officeLocation,
+      hasActivTrakCoverage: data.hasActivTrakCoverage,
       approvedRemoteWorkRequest: data.approvedRemoteWorkRequest,
       remoteWorkStatusLabel: data.remoteWorkStatusLabel,
       weeks: data.weeks,
@@ -913,18 +920,27 @@ export async function getAttendanceReport(
 
   // --- Summary ---
   const totalEmployees = rows.length;
-  let compliantCount = 0, zeroOfficeDaysCount = 0, sumCompletedOfficeDays = 0;
+  let compliantCount = 0;
+  let zeroOfficeDaysCount = 0;
+  let sumCompletedOfficeDays = 0;
+  let coveredEmployeesCount = 0;
+  let unknownCoverageCount = 0;
   for (const r of rows) {
+    if (!r.hasActivTrakCoverage) {
+      unknownCoverageCount++;
+      continue;
+    }
+    coveredEmployeesCount++;
     if (r.compliant) compliantCount++;
     if (r.total === 0) zeroOfficeDaysCount++;
     for (const wk of completedDataWeeks) {
       sumCompletedOfficeDays += r.weeks[wk]?.officeDays ?? 0;
     }
   }
-  const avgOfficeDays = totalEmployees > 0 && numCompletedWeeks > 0
-    ? Math.round((sumCompletedOfficeDays / totalEmployees / numCompletedWeeks) * 10) / 10
+  const avgOfficeDays = coveredEmployeesCount > 0 && numCompletedWeeks > 0
+    ? Math.round((sumCompletedOfficeDays / coveredEmployeesCount / numCompletedWeeks) * 10) / 10
     : 0;
-  const complianceRate = totalEmployees > 0 ? Math.round((compliantCount / totalEmployees) * 100) : 0;
+  const complianceRate = coveredEmployeesCount > 0 ? Math.round((compliantCount / coveredEmployeesCount) * 100) : 0;
 
   return {
     rows,
@@ -934,7 +950,7 @@ export async function getAttendanceReport(
     currentWeek: isCurrentWeekInRange ? currentWeekStr : null,
     departments: [...deptSet].sort(),
     locations: [...locSet].sort(),
-    summary: { totalEmployees, avgOfficeDays, complianceRate, zeroOfficeDaysCount },
+    summary: { totalEmployees, avgOfficeDays, complianceRate, zeroOfficeDaysCount, unknownCoverageCount },
   };
 }
 

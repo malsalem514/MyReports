@@ -21,6 +21,7 @@ export interface AttendanceRow {
   managerName: string;
   managerEmail: string | null;
   officeLocation: string;
+  hasActivTrakCoverage: boolean;
   approvedRemoteWorkRequest: boolean;
   remoteWorkStatusLabel: string;
   weeks: Record<string, WeekCell>;
@@ -53,4 +54,5 @@ export interface AttendanceSummary {
   avgOfficeDays: number;
   complianceRate: number;
   zeroOfficeDaysCount: number;
+  unknownCoverageCount: number;
 }

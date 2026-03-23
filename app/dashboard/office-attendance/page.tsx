@@ -62,7 +62,7 @@ async function AttendanceData({
           dataWeeks={[]}
           departments={[]}
           locations={[]}
-          summary={{ totalEmployees: 0, avgOfficeDays: 0, complianceRate: 0, zeroOfficeDaysCount: 0 }}
+          summary={{ totalEmployees: 0, avgOfficeDays: 0, complianceRate: 0, zeroOfficeDaysCount: 0, unknownCoverageCount: 0 }}
           startDate={startDateLabel}
           endDate={endDateLabel}
         />
