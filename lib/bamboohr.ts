@@ -27,6 +27,7 @@ const BAMBOOHR_BASE_URL = `https://api.bamboohr.com/api/gateway.php/${BAMBOOHR_S
 
 export const BambooHREmployeeSchema = z.object({
   id: z.string(),
+  employeeNumber: z.string().optional().nullable(),
   displayName: z.string().optional(),
   firstName: z.string().optional(),
   lastName: z.string().optional(),
@@ -159,7 +160,7 @@ async function bambooFetch<T>(endpoint: string, options: RequestInit = {}): Prom
 // ============================================================================
 
 const EMPLOYEE_FIELDS = [
-  'id', 'displayName', 'firstName', 'lastName', 'preferredName',
+  'id', 'employeeNumber', 'displayName', 'firstName', 'lastName', 'preferredName',
   'jobTitle', 'workPhone', 'mobilePhone', 'workEmail', 'department',
   'location', 'division', 'supervisor', 'supervisorId', 'supervisorEId',
   'hireDate', 'employmentStatus', 'status', 'photoUrl', '4631',

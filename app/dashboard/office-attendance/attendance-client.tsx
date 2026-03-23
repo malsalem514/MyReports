@@ -59,8 +59,8 @@ function getDefaultLocationSelection(
   searchParams: SearchParamReader,
   locations: string[],
 ): string[] {
-  if (viewMode !== 'employees') return [];
   if (searchParams.has('locations')) return parseListParam(searchParams.get('locations'));
+  if (viewMode !== 'employees') return [];
   return locations.includes(DEFAULT_EMPLOYEE_LOCATION) ? [DEFAULT_EMPLOYEE_LOCATION] : [];
 }
 
@@ -658,7 +658,7 @@ export function AttendanceClient({
 
     if (isManagerView) {
       const employeeByEmail = new Map<string, AttendanceRow>();
-      for (const row of rows) {
+      for (const row of filtered) {
         const normalizedEmail = normalizeEmail(row.email);
         if (!normalizedEmail) continue;
         if (!employeeByEmail.has(normalizedEmail)) {
@@ -740,7 +740,7 @@ export function AttendanceClient({
         trend,
       };
     });
-  }, [filtered, isManagerView, rows, scoredWeeks, weeks]);
+  }, [filtered, isManagerView, scoredWeeks, weeks]);
 
   const displayRows = useMemo<DisplayRow[]>(() => {
     const employeeRows: DisplayRow[] = filtered.map((row) => ({

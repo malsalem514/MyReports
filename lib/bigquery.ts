@@ -98,6 +98,19 @@ export const DailyUserSummarySchema = RawDailyUserSummarySchema.transform((raw) 
 
 export type DailyUserSummary = z.infer<typeof DailyUserSummarySchema>;
 
+export interface ActivTrakIdentifierRecord {
+  userId: number;
+  identifierEmail: string;
+}
+
+export interface ActivTrakUserStatRecord {
+  userId: number;
+  userName: string | null;
+  firstSeen: Date | null;
+  lastSeen: Date | null;
+  activityRowCount: number;
+}
+
 // ============================================================================
 // Client
 // ============================================================================
@@ -227,6 +240,61 @@ export async function fetchProductivityStats(
     totalProductiveHours: Number(row.total_productive_hours) || 0,
     totalTrackedHours: Number(row.total_tracked_hours) || 0,
   };
+}
+
+export async function fetchActivTrakIdentifiers(): Promise<ActivTrakIdentifierRecord[]> {
+  const client = getBigQueryClient();
+  const sql = `
+    SELECT DISTINCT
+      userid,
+      LOWER(email) AS email
+    FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.user_identifiers\`
+    WHERE email IS NOT NULL
+    ORDER BY userid, email
+  `;
+
+  const [rows] = await client.query({ query: sql, location: 'US' });
+  return (rows as Array<Record<string, unknown>>).map((row) => ({
+    userId: Number(row.userid),
+    identifierEmail: String(row.email || '').toLowerCase(),
+  }));
+}
+
+export async function fetchActivTrakUserStats(daysBack: number = 365): Promise<ActivTrakUserStatRecord[]> {
+  const client = getBigQueryClient();
+  const sql = `
+    SELECT
+      user_id,
+      ARRAY_AGG(user_name IGNORE NULLS ORDER BY last_seen DESC LIMIT 1)[OFFSET(0)] AS user_name,
+      MIN(local_date) AS first_seen,
+      MAX(local_date) AS last_seen,
+      COUNT(*) AS row_count
+    FROM (
+      SELECT
+        user_id,
+        user_name,
+        local_date,
+        MAX(local_date) OVER (PARTITION BY user_id, user_name) AS last_seen
+      FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.${DAILY_USER_SUMMARY_TABLE}\`
+      WHERE local_date >= DATE_SUB(CURRENT_DATE(), INTERVAL @daysBack DAY)
+    )
+    GROUP BY user_id
+    ORDER BY user_id
+  `;
+
+  const [rows] = await client.query({
+    query: sql,
+    params: { daysBack },
+    location: 'US',
+  });
+
+  return (rows as Array<Record<string, unknown>>).map((row) => ({
+    userId: Number(row.user_id),
+    userName: row.user_name ? String(row.user_name) : null,
+    firstSeen: row.first_seen ? parseLocalDate((row.first_seen as { value?: string }).value || String(row.first_seen)) : null,
+    lastSeen: row.last_seen ? parseLocalDate((row.last_seen as { value?: string }).value || String(row.last_seen)) : null,
+    activityRowCount: Number(row.row_count) || 0,
+  }));
 }
 
 // ============================================================================

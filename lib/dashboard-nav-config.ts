@@ -130,6 +130,12 @@ export function buildDashboardNavItems(
       label: 'Tab Visibility',
       section: 'admin',
     });
+    navItems.push({
+      key: 'activtrak-identities',
+      path: '/dashboard/activtrak-identities',
+      label: 'ActivTrak Identities',
+      section: 'admin',
+    });
   }
 
   navItems.push({

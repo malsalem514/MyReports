@@ -1,5 +1,5 @@
 import { fetchActiveEmployees, fetchRemoteWorkRequests, fetchTimeOffRequests } from './bamboohr';
-import { fetchOfficeAttendanceData, fetchProductivityData } from './bigquery';
+import { fetchActivTrakIdentifiers, fetchActivTrakUserStats, fetchOfficeAttendanceData, fetchProductivityData } from './bigquery';
 import { execute, executeMany, initializeSchema } from './oracle';
 import { normalizeEmailNullable } from './email';
 
@@ -22,17 +22,16 @@ function parseDateOnly(dateStr: string): Date {
 }
 
 /**
- * Auto-maps unmapped BambooHR employees to TBS employee numbers by matching
- * on first+last name. When multiple TBS records share a name, picks the one
- * with the most recent time entry.
+ * Auto-maps unmapped BambooHR employees to TBS employee numbers.
+ * Priority:
+ * 1. BambooHR Employee #, but only when it exists in TBS_EMPLOYEES
+ * 2. First+last name match, preferring the employee with the most recent TBS entry
  */
 export async function syncTbsEmployeeMap(): Promise<number> {
   const result = await execute(`
     MERGE INTO TL_TBS_EMPLOYEE_MAP m
     USING (
-      SELECT b.EMAIL, t.EMPLOYEE_NO
-      FROM TL_EMPLOYEES b
-      JOIN (
+      WITH name_candidates AS (
         SELECT EMPLOYEE_NO, EMPLOYEE_FIRST_NAME, EMPLOYEE_LAST_NAME,
                ROW_NUMBER() OVER (
                  PARTITION BY UPPER(TRIM(EMPLOYEE_FIRST_NAME)), UPPER(TRIM(EMPLOYEE_LAST_NAME))
@@ -44,16 +43,49 @@ export async function syncTbsEmployeeMap(): Promise<number> {
                   WHERE v.EMPLOYEE_NO = e.EMPLOYEE_NO) AS LAST_ENTRY
           FROM TBS_EMPLOYEES@TBS_LINK e
         )
-      ) t ON UPPER(b.FIRST_NAME) = UPPER(TRIM(t.EMPLOYEE_FIRST_NAME))
-          AND UPPER(b.LAST_NAME) = UPPER(TRIM(t.EMPLOYEE_LAST_NAME))
-          AND t.RN = 1
-      WHERE b.EMAIL IS NOT NULL
-        AND (b.STATUS IS NULL OR UPPER(b.STATUS) != 'INACTIVE')
-        AND LOWER(b.EMAIL) NOT IN (SELECT LOWER(EMAIL) FROM TL_TBS_EMPLOYEE_MAP)
+      ),
+      source_rows AS (
+        SELECT
+          LOWER(b.EMAIL) AS email,
+          t.EMPLOYEE_NO AS employee_no,
+          'auto-bamboo' AS match_method,
+          1 AS priority
+        FROM TL_EMPLOYEES b
+        JOIN TBS_EMPLOYEES@TBS_LINK t
+          ON t.EMPLOYEE_NO = b.EMPLOYEE_NUMBER
+        WHERE b.EMAIL IS NOT NULL
+          AND b.EMPLOYEE_NUMBER IS NOT NULL
+          AND (b.STATUS IS NULL OR UPPER(b.STATUS) != 'INACTIVE')
+          AND LOWER(b.EMAIL) NOT IN (SELECT LOWER(EMAIL) FROM TL_TBS_EMPLOYEE_MAP)
+
+        UNION ALL
+
+        SELECT
+          LOWER(b.EMAIL) AS email,
+          t.EMPLOYEE_NO AS employee_no,
+          'auto-name' AS match_method,
+          2 AS priority
+        FROM TL_EMPLOYEES b
+        JOIN name_candidates t
+          ON UPPER(b.FIRST_NAME) = UPPER(TRIM(t.EMPLOYEE_FIRST_NAME))
+         AND UPPER(b.LAST_NAME) = UPPER(TRIM(t.EMPLOYEE_LAST_NAME))
+         AND t.RN = 1
+        WHERE b.EMAIL IS NOT NULL
+          AND (b.STATUS IS NULL OR UPPER(b.STATUS) != 'INACTIVE')
+          AND LOWER(b.EMAIL) NOT IN (SELECT LOWER(EMAIL) FROM TL_TBS_EMPLOYEE_MAP)
+      ),
+      ranked_rows AS (
+        SELECT email, employee_no, match_method,
+               ROW_NUMBER() OVER (PARTITION BY email ORDER BY priority, employee_no) AS selection_rank
+        FROM source_rows
+      )
+      SELECT email, employee_no, match_method
+      FROM ranked_rows
+      WHERE selection_rank = 1
     ) src
     ON (LOWER(m.EMAIL) = LOWER(src.EMAIL))
     WHEN NOT MATCHED THEN INSERT (EMAIL, TBS_EMPLOYEE_NO, MATCH_METHOD, CREATED_AT)
-    VALUES (LOWER(src.EMAIL), src.EMPLOYEE_NO, 'auto-name', CURRENT_TIMESTAMP)
+    VALUES (LOWER(src.email), src.employee_no, src.match_method, CURRENT_TIMESTAMP)
   `);
 
   const mapped = result.rowsAffected || 0;
@@ -101,6 +133,10 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
       .filter((emp) => emp.workEmail)
       .map((emp) => ({
         ID: emp.id,
+        EMPLOYEE_NUMBER:
+          emp.employeeNumber && !Number.isNaN(Number(emp.employeeNumber))
+            ? Number(emp.employeeNumber)
+            : null,
         EMAIL: normalizeEmailNullable(emp.workEmail),
         DISPLAY_NAME: emp.displayName || null,
         FIRST_NAME: emp.firstName || null,
@@ -123,6 +159,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
         `MERGE INTO TL_EMPLOYEES t
          USING (SELECT
            :ID AS ID,
+           :EMPLOYEE_NUMBER AS EMPLOYEE_NUMBER,
            :EMAIL AS EMAIL,
            :DISPLAY_NAME AS DISPLAY_NAME,
            :FIRST_NAME AS FIRST_NAME,
@@ -141,6 +178,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
          FROM DUAL) s
          ON (t.ID = s.ID)
          WHEN MATCHED THEN UPDATE SET
+           t.EMPLOYEE_NUMBER = s.EMPLOYEE_NUMBER,
            t.EMAIL = s.EMAIL,
            t.DISPLAY_NAME = s.DISPLAY_NAME,
            t.FIRST_NAME = s.FIRST_NAME,
@@ -158,11 +196,11 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
            t.REMOTE_WORKDAY_POLICY_ASSIGNED = s.REMOTE_WORKDAY_POLICY_ASSIGNED,
            t.UPDATED_AT = CURRENT_TIMESTAMP
          WHEN NOT MATCHED THEN INSERT (
-           ID, EMAIL, DISPLAY_NAME, FIRST_NAME, LAST_NAME, JOB_TITLE,
+           ID, EMPLOYEE_NUMBER, EMAIL, DISPLAY_NAME, FIRST_NAME, LAST_NAME, JOB_TITLE,
            DEPARTMENT, DIVISION, LOCATION, SUPERVISOR_ID, SUPERVISOR_NAME, SUPERVISOR_EMAIL,
            HIRE_DATE, STATUS, PHOTO_URL, REMOTE_WORKDAY_POLICY_ASSIGNED
          ) VALUES (
-           s.ID, s.EMAIL, s.DISPLAY_NAME, s.FIRST_NAME, s.LAST_NAME, s.JOB_TITLE,
+           s.ID, s.EMPLOYEE_NUMBER, s.EMAIL, s.DISPLAY_NAME, s.FIRST_NAME, s.LAST_NAME, s.JOB_TITLE,
            s.DEPARTMENT, s.DIVISION, s.LOCATION, s.SUPERVISOR_ID, s.SUPERVISOR_NAME, s.SUPERVISOR_EMAIL,
            s.HIRE_DATE, s.STATUS, s.PHOTO_URL, s.REMOTE_WORKDAY_POLICY_ASSIGNED
          )`,
@@ -326,6 +364,42 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     productivitySynced = productivityBinds.length;
   } catch (error) {
     errors.push(`Productivity sync failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    const identifiers = await fetchActivTrakIdentifiers();
+    await execute(`DELETE FROM TL_ACTIVTRAK_IDENTIFIERS`);
+    if (identifiers.length > 0) {
+      await executeMany(
+        `INSERT INTO TL_ACTIVTRAK_IDENTIFIERS (USER_ID, IDENTIFIER_EMAIL)
+         VALUES (:USER_ID, :IDENTIFIER_EMAIL)`,
+        identifiers.map((row) => ({
+          USER_ID: row.userId,
+          IDENTIFIER_EMAIL: row.identifierEmail,
+        })),
+      );
+    }
+
+    const userStats = await fetchActivTrakUserStats();
+    await execute(`DELETE FROM TL_ACTIVTRAK_USER_STATS`);
+    if (userStats.length > 0) {
+      await executeMany(
+        `INSERT INTO TL_ACTIVTRAK_USER_STATS (
+           USER_ID, USER_NAME, FIRST_SEEN, LAST_SEEN, ACTIVITY_ROW_COUNT
+         ) VALUES (
+           :USER_ID, :USER_NAME, :FIRST_SEEN, :LAST_SEEN, :ACTIVITY_ROW_COUNT
+         )`,
+        userStats.map((row) => ({
+          USER_ID: row.userId,
+          USER_NAME: row.userName,
+          FIRST_SEEN: row.firstSeen,
+          LAST_SEEN: row.lastSeen,
+          ACTIVITY_ROW_COUNT: row.activityRowCount,
+        })),
+      );
+    }
+  } catch (error) {
+    errors.push(`ActivTrak identity sync failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   try {

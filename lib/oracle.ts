@@ -124,6 +124,7 @@ export async function initializeSchema(): Promise<void> {
     await safeExecuteDDL(conn, `
       CREATE TABLE TL_EMPLOYEES (
         ID VARCHAR2(50) PRIMARY KEY,
+        EMPLOYEE_NUMBER NUMBER,
         EMAIL VARCHAR2(255) UNIQUE,
         DISPLAY_NAME VARCHAR2(255),
         FIRST_NAME VARCHAR2(100),
@@ -143,6 +144,7 @@ export async function initializeSchema(): Promise<void> {
         UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await safeExecuteDDL(conn, `ALTER TABLE TL_EMPLOYEES ADD EMPLOYEE_NUMBER NUMBER`);
     await safeExecuteDDL(conn, `ALTER TABLE TL_EMPLOYEES ADD SUPERVISOR_NAME VARCHAR2(255)`);
     await safeExecuteDDL(conn, `ALTER TABLE TL_EMPLOYEES ADD REMOTE_WORKDAY_POLICY_ASSIGNED NUMBER(1) DEFAULT 0`);
     await safeExecuteDDL(conn, `
@@ -250,6 +252,25 @@ export async function initializeSchema(): Promise<void> {
         CONSTRAINT TL_TBS_EMPLOYEE_MAP_UQ_NO UNIQUE (TBS_EMPLOYEE_NO)
       )
     `);
+    await safeExecuteDDL(conn, `
+      CREATE TABLE TL_ACTIVTRAK_IDENTIFIERS (
+        USER_ID NUMBER NOT NULL,
+        IDENTIFIER_EMAIL VARCHAR2(500) NOT NULL,
+        CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT TL_ACTRK_IDS_UQ UNIQUE (USER_ID, IDENTIFIER_EMAIL)
+      )
+    `);
+    await safeExecuteDDL(conn, `
+      CREATE TABLE TL_ACTIVTRAK_USER_STATS (
+        USER_ID NUMBER PRIMARY KEY,
+        USER_NAME VARCHAR2(500),
+        FIRST_SEEN DATE,
+        LAST_SEEN DATE,
+        ACTIVITY_ROW_COUNT NUMBER DEFAULT 0,
+        CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
     await safeExecuteDDL(conn, `CREATE INDEX TL_ATT_DATE_IDX ON TL_ATTENDANCE(RECORD_DATE)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_ATT_EMAIL_IDX ON TL_ATTENDANCE(EMAIL)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_PROD_DATE_IDX ON TL_PRODUCTIVITY(RECORD_DATE)`);
@@ -261,6 +282,8 @@ export async function initializeSchema(): Promise<void> {
     await safeExecuteDDL(conn, `CREATE INDEX TL_EMP_STATUS_IDX ON TL_EMPLOYEES(STATUS)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_TBS_MAP_EMAIL_IDX ON TL_TBS_EMPLOYEE_MAP(EMAIL)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_TBS_MAP_NO_IDX ON TL_TBS_EMPLOYEE_MAP(TBS_EMPLOYEE_NO)`);
+    await safeExecuteDDL(conn, `CREATE INDEX TL_ACTRK_IDS_USER_IDX ON TL_ACTIVTRAK_IDENTIFIERS(USER_ID)`);
+    await safeExecuteDDL(conn, `CREATE INDEX TL_ACTRK_IDS_EMAIL_IDX ON TL_ACTIVTRAK_IDENTIFIERS(IDENTIFIER_EMAIL)`);
 
     // Weekly report views used by the dashboard pages.
     await safeExecuteDDL(conn, `
@@ -405,6 +428,85 @@ export async function initializeSchema(): Promise<void> {
       SELECT *
       FROM V_USER_MAPPINGS
       WHERE HAS_ACTIVTRAK_USER = 0
+    `);
+    await safeExecuteDDL(conn, `
+      CREATE OR REPLACE VIEW V_SUSPICIOUS_ACTIVTRAK_IDENTITIES AS
+      WITH identifier_rollup AS (
+        SELECT
+          ai.USER_ID,
+          LISTAGG(ai.IDENTIFIER_EMAIL, '; ') WITHIN GROUP (ORDER BY ai.IDENTIFIER_EMAIL) AS IDENTIFIERS,
+          COUNT(*) AS IDENTIFIER_COUNT,
+          MAX(CASE
+            WHEN REGEXP_LIKE(ai.IDENTIFIER_EMAIL, '^[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$', 'i')
+              THEN 0 ELSE 1
+          END) AS HAS_NON_EMAIL_IDENTIFIER,
+          MAX(CASE
+            WHEN REGEXP_LIKE(LOWER(ai.IDENTIFIER_EMAIL), 'macbook|laptop|desktop|(^|[^a-z])pc([^a-z]|$)|imac|book pro')
+              THEN 1 ELSE 0
+          END) AS HAS_DEVICE_STYLE_IDENTIFIER,
+          MAX(CASE
+            WHEN REGEXP_LIKE(LOWER(ai.IDENTIFIER_EMAIL), '@(jestais\\.com|jesta\\.com|jestais\\.onmicrosoft\\.com)$')
+              THEN 0 ELSE 1
+          END) AS HAS_NON_CORPORATE_DOMAIN
+        FROM TL_ACTIVTRAK_IDENTIFIERS ai
+        GROUP BY ai.USER_ID
+      )
+      SELECT
+        LOWER(e.EMAIL) AS EMAIL,
+        NVL(
+          e.DISPLAY_NAME,
+          TRIM(NVL(e.FIRST_NAME, '') || ' ' || NVL(e.LAST_NAME, ''))
+        ) AS DISPLAY_NAME,
+        NVL(e.DEPARTMENT, 'Unknown') AS DEPARTMENT,
+        NVL(e.LOCATION, 'Unknown') AS LOCATION,
+        m.TBS_EMPLOYEE_NO,
+        act.ACTRK_ID,
+        act.EMPLOYEE_NAME AS ACTRK_EMPLOYEE_NAME,
+        stats.USER_NAME AS ACTIVTRAK_USER_NAME,
+        ids.IDENTIFIERS,
+        NVL(ids.IDENTIFIER_COUNT, 0) AS IDENTIFIER_COUNT,
+        NVL(stats.ACTIVITY_ROW_COUNT, 0) AS ACTIVITY_ROW_COUNT,
+        stats.FIRST_SEEN,
+        stats.LAST_SEEN,
+        CASE WHEN ids.USER_ID IS NULL THEN 1 ELSE 0 END AS HAS_NO_IDENTIFIER,
+        CASE
+          WHEN ids.USER_ID IS NULL THEN 0
+          WHEN EXISTS (
+            SELECT 1
+            FROM TL_ACTIVTRAK_IDENTIFIERS ai_match
+            WHERE ai_match.USER_ID = act.ACTRK_ID
+              AND LOWER(ai_match.IDENTIFIER_EMAIL) = LOWER(e.EMAIL)
+          ) THEN 0
+          ELSE 1
+        END AS HAS_IDENTIFIER_MISMATCH,
+        NVL(ids.HAS_DEVICE_STYLE_IDENTIFIER, 0) AS HAS_DEVICE_STYLE_IDENTIFIER,
+        NVL(ids.HAS_NON_EMAIL_IDENTIFIER, 0) AS HAS_NON_EMAIL_IDENTIFIER,
+        NVL(ids.HAS_NON_CORPORATE_DOMAIN, 0) AS HAS_NON_CORPORATE_DOMAIN,
+        CASE WHEN NVL(stats.ACTIVITY_ROW_COUNT, 0) = 0 THEN 1 ELSE 0 END AS HAS_NO_ACTIVITY
+      FROM TL_EMPLOYEES e
+      JOIN TL_TBS_EMPLOYEE_MAP m
+        ON LOWER(m.EMAIL) = LOWER(e.EMAIL)
+      JOIN ACTRK_TBS_IDS act
+        ON act.EMPLOYEE_NO = m.TBS_EMPLOYEE_NO
+       AND act.ACTRK_ID IS NOT NULL
+      LEFT JOIN identifier_rollup ids
+        ON ids.USER_ID = act.ACTRK_ID
+      LEFT JOIN TL_ACTIVTRAK_USER_STATS stats
+        ON stats.USER_ID = act.ACTRK_ID
+      WHERE (e.STATUS IS NULL OR UPPER(e.STATUS) != 'INACTIVE')
+        AND (
+          ids.USER_ID IS NULL
+          OR NVL(stats.ACTIVITY_ROW_COUNT, 0) = 0
+          OR NVL(ids.HAS_DEVICE_STYLE_IDENTIFIER, 0) = 1
+          OR NVL(ids.HAS_NON_EMAIL_IDENTIFIER, 0) = 1
+          OR NVL(ids.HAS_NON_CORPORATE_DOMAIN, 0) = 1
+          OR NOT EXISTS (
+            SELECT 1
+            FROM TL_ACTIVTRAK_IDENTIFIERS ai_match
+            WHERE ai_match.USER_ID = act.ACTRK_ID
+              AND LOWER(ai_match.IDENTIFIER_EMAIL) = LOWER(e.EMAIL)
+          )
+        )
     `);
 
     // Tab visibility — role defaults
