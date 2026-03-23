@@ -5,33 +5,10 @@ import { getAttendanceReport } from '@/lib/dashboard-data';
 import {
   DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS,
   OFFICE_DAYS_REQUIRED,
-  LOOKBACK_OPTIONS,
 } from '@/lib/constants';
-import { getOfficeAttendanceDefaultRange, toDateParam } from '@/lib/report-date-defaults';
+import { getOfficeAttendanceDefaultRange, parseDateInput, toDateParam } from '@/lib/report-date-defaults';
+import { parseLookbackWeeks } from '@/lib/search-params';
 import { AttendanceClient } from './attendance-client';
-
-function parseDateInput(
-  value: string | undefined,
-  fallback: Date,
-  endOfDay: boolean,
-): Date {
-  const parsed = value ? new Date(`${value}T00:00:00`) : new Date(fallback);
-  if (Number.isNaN(parsed.getTime())) {
-    const fallbackDate = new Date(fallback);
-    if (endOfDay) {
-      fallbackDate.setHours(23, 59, 59, 999);
-    } else {
-      fallbackDate.setHours(0, 0, 0, 0);
-    }
-    return fallbackDate;
-  }
-  if (endOfDay) {
-    parsed.setHours(23, 59, 59, 999);
-  } else {
-    parsed.setHours(0, 0, 0, 0);
-  }
-  return parsed;
-}
 
 async function AttendanceData({
   startDate,
@@ -120,9 +97,7 @@ export default async function OfficeAttendancePage({
   searchParams: Promise<{ lookbackWeeks?: string; startDate?: string; endDate?: string }>;
 }) {
   const params = await searchParams;
-  const lookbackWeeks = LOOKBACK_OPTIONS.includes(Number(params.lookbackWeeks) as any)
-    ? (Number(params.lookbackWeeks) as (typeof LOOKBACK_OPTIONS)[number])
-    : DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS;
+  const lookbackWeeks = parseLookbackWeeks(params.lookbackWeeks, DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS);
   const { startDate: fallbackStartDate, endDate: fallbackEndDate } = getOfficeAttendanceDefaultRange(lookbackWeeks);
 
   let startDate = parseDateInput(params.startDate, fallbackStartDate, false);

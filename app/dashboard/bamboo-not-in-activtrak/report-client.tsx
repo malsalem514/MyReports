@@ -1,7 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { parseEnumParam, sanitizeParam } from '@/lib/search-params';
+import { useUrlStateSync, type UrlStateField } from '@/lib/use-url-state-sync';
 
 interface ReportClientProps {
   rows: Array<{
@@ -28,61 +30,70 @@ function escapeCsvCell(value: string | number | null | undefined): string {
 export function BambooNotInActivTrakClient({ rows }: ReportClientProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [bambooDepartmentFilter, setBambooDepartmentFilter] = useState(() => searchParams.get('department') || 'all');
-  const [tbsMappingFilter, setTbsMappingFilter] = useState<'all' | 'mapped' | 'unmapped'>(() => {
-    const value = searchParams.get('tbs');
-    return value === 'mapped' || value === 'unmapped' ? value : 'all';
-  });
-  const [activTrakMappingFilter, setActivTrakMappingFilter] = useState<'all' | 'mapped' | 'unmapped'>(() => {
-    const value = searchParams.get('activtrak');
-    return value === 'mapped' || value === 'unmapped' ? value : 'all';
-  });
-
-  const bambooDepartments = Array.from(
+  const bambooDepartments = useMemo(() => Array.from(
     new Set(
       rows
         .map((row) => row.department || 'Unknown')
         .filter(Boolean),
     ),
-  ).sort((a, b) => a.localeCompare(b));
+  ).sort((a, b) => a.localeCompare(b)), [rows]);
 
-  useEffect(() => {
-    const nextDepartment = searchParams.get('department') || 'all';
-    const sanitizedDepartment = nextDepartment === 'all' || bambooDepartments.includes(nextDepartment)
-      ? nextDepartment
-      : 'all';
-    const nextTbs = searchParams.get('tbs');
-    const nextActivTrak = searchParams.get('activtrak');
+  const [bambooDepartmentFilter, setBambooDepartmentFilter] = useState(() =>
+    sanitizeParam(searchParams.get('department'), bambooDepartments),
+  );
+  const [tbsMappingFilter, setTbsMappingFilter] = useState<'all' | 'mapped' | 'unmapped'>(() => {
+    return parseEnumParam(searchParams.get('tbs'), ['all', 'mapped', 'unmapped'] as const, 'all');
+  });
+  const [activTrakMappingFilter, setActivTrakMappingFilter] = useState<'all' | 'mapped' | 'unmapped'>(() => {
+    return parseEnumParam(searchParams.get('activtrak'), ['all', 'mapped', 'unmapped'] as const, 'all');
+  });
 
-    setBambooDepartmentFilter((previous) => (previous === sanitizedDepartment ? previous : sanitizedDepartment));
-    setTbsMappingFilter((previous) => {
-      const nextValue = nextTbs === 'mapped' || nextTbs === 'unmapped' ? nextTbs : 'all';
-      return previous === nextValue ? previous : nextValue;
-    });
-    setActivTrakMappingFilter((previous) => {
-      const nextValue = nextActivTrak === 'mapped' || nextActivTrak === 'unmapped' ? nextActivTrak : 'all';
-      return previous === nextValue ? previous : nextValue;
-    });
-  }, [bambooDepartments, searchParams]);
+  const syncedFields = useMemo<UrlStateField[]>(() => ([
+    {
+      read: (params) => sanitizeParam(params.get('department'), bambooDepartments),
+      sync: (nextValue) => {
+        const nextDepartment = nextValue as string;
+        setBambooDepartmentFilter((previous) => (
+          previous === nextDepartment ? previous : nextDepartment
+        ));
+      },
+      write: (params) => {
+        if (bambooDepartmentFilter !== 'all') params.set('department', bambooDepartmentFilter);
+        else params.delete('department');
+      },
+    },
+    {
+      read: (params) => parseEnumParam(params.get('tbs'), ['all', 'mapped', 'unmapped'] as const, 'all'),
+      sync: (nextValue) => {
+        const nextTbsFilter = nextValue as 'all' | 'mapped' | 'unmapped';
+        setTbsMappingFilter((previous) => (previous === nextTbsFilter ? previous : nextTbsFilter));
+      },
+      write: (params) => {
+        if (tbsMappingFilter !== 'all') params.set('tbs', tbsMappingFilter);
+        else params.delete('tbs');
+      },
+    },
+    {
+      read: (params) => parseEnumParam(params.get('activtrak'), ['all', 'mapped', 'unmapped'] as const, 'all'),
+      sync: (nextValue) => {
+        const nextActivTrakFilter = nextValue as 'all' | 'mapped' | 'unmapped';
+        setActivTrakMappingFilter((previous) => (
+          previous === nextActivTrakFilter ? previous : nextActivTrakFilter
+        ));
+      },
+      write: (params) => {
+        if (activTrakMappingFilter !== 'all') params.set('activtrak', activTrakMappingFilter);
+        else params.delete('activtrak');
+      },
+    },
+  ]), [activTrakMappingFilter, bambooDepartmentFilter, bambooDepartments, tbsMappingFilter]);
 
-  useEffect(() => {
-    const params = new URLSearchParams(searchParams.toString());
-
-    if (bambooDepartmentFilter !== 'all') params.set('department', bambooDepartmentFilter);
-    else params.delete('department');
-
-    if (tbsMappingFilter !== 'all') params.set('tbs', tbsMappingFilter);
-    else params.delete('tbs');
-
-    if (activTrakMappingFilter !== 'all') params.set('activtrak', activTrakMappingFilter);
-    else params.delete('activtrak');
-
-    const next = params.toString();
-    const current = searchParams.toString();
-    if (next !== current) {
-      router.replace(next ? `/dashboard/bamboo-not-in-activtrak?${next}` : '/dashboard/bamboo-not-in-activtrak', { scroll: false });
-    }
-  }, [activTrakMappingFilter, bambooDepartmentFilter, router, searchParams, tbsMappingFilter]);
+  useUrlStateSync({
+    pathname: '/dashboard/bamboo-not-in-activtrak',
+    router,
+    searchParams,
+    fields: syncedFields,
+  });
 
   const filteredRows = rows.filter((row) => {
     const matchesDepartment =

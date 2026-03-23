@@ -6,6 +6,14 @@ import { LOOKBACK_OPTIONS } from '@/lib/constants';
 import type {
   TbsComparisonRow, TbsComparisonSummary,
 } from '@/lib/dashboard-data';
+import { getTrailingWeeksParamRange, parseLocalDate, toDateParam } from '@/lib/report-date-defaults';
+import {
+  arraysEqual,
+  parseEnumParam,
+  parseListParam,
+  parsePageParam,
+} from '@/lib/search-params';
+import { useUrlStateSync, type UrlStateField } from '@/lib/use-url-state-sync';
 
 interface Props {
   rows: TbsComparisonRow[];
@@ -23,37 +31,6 @@ type FilterMode = 'all' | 'discrepancies' | 'bamboo-only' | 'tbs-only';
 
 const PAGE_SIZE = 50;
 const FILTER_MODES: FilterMode[] = ['all', 'discrepancies', 'bamboo-only', 'tbs-only'];
-
-function parseLocalDate(s: string): Date {
-  const [y, m, d] = s.split('-').map(Number);
-  return new Date(y!, m! - 1, d!);
-}
-
-function parseListParam(value: string | null): string[] {
-  if (!value) return [];
-  return value.split(',').map((part) => part.trim()).filter(Boolean);
-}
-
-function arraysEqual(a: string[], b: string[]): boolean {
-  return a.length === b.length && a.every((value, index) => value === b[index]);
-}
-
-function formatDateParam(date: Date): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-}
-
-function getTrailingWeeksRange(weeksBack: number): {
-  startDate: string;
-  endDate: string;
-} {
-  const end = new Date();
-  const start = new Date(end);
-  start.setDate(start.getDate() - ((weeksBack * 7) - 1));
-  return {
-    startDate: formatDateParam(start),
-    endDate: formatDateParam(end),
-  };
-}
 
 function getCellColor(cell: { bambooPtoDays: number; tbsPtoDays: number; hasDiscrepancy: boolean } | undefined): string {
   if (!cell) return '';
@@ -76,11 +53,11 @@ export function CompareClient({
   const searchParams = useSearchParams();
   const activeQuickRange = useMemo(() => {
     const today = new Date();
-    const expectedEnd = formatDateParam(today);
+    const expectedEnd = toDateParam(today);
     if (endDate !== expectedEnd) return null;
 
     for (const weeksBack of LOOKBACK_OPTIONS) {
-      const range = getTrailingWeeksRange(weeksBack);
+      const range = getTrailingWeeksParamRange(weeksBack);
       if (startDate === range.startDate) {
         return weeksBack;
       }
@@ -94,14 +71,13 @@ export function CompareClient({
     parseListParam(searchParams.get('departments')).filter((department) => departments.includes(department)),
   );
   const [filterMode, setFilterMode] = useState<FilterMode>(() => {
-    const value = searchParams.get('show');
-    return FILTER_MODES.includes(value as FilterMode) ? (value as FilterMode) : 'all';
+    return parseEnumParam(searchParams.get('show'), FILTER_MODES, 'all');
   });
   const [deptOpen, setDeptOpen] = useState(false);
   const [unmappedOpen, setUnmappedOpen] = useState(false);
-  const [sortKey, setSortKey] = useState<SortKey>(() => (searchParams.get('sortKey') as SortKey) || 'discrepancyCount');
-  const [sortDir, setSortDir] = useState<SortDir>(() => (searchParams.get('sortDir') as SortDir) || 'desc');
-  const [page, setPage] = useState(() => Math.max(0, Number(searchParams.get('page') || '0') || 0));
+  const [sortKey, setSortKey] = useState<SortKey>(() => searchParams.get('sortKey') || 'discrepancyCount');
+  const [sortDir, setSortDir] = useState<SortDir>(() => parseEnumParam(searchParams.get('sortDir'), ['asc', 'desc'] as const, 'desc'));
+  const [page, setPage] = useState(() => parsePageParam(searchParams.get('page')));
 
   const deptRef = useRef<HTMLDivElement>(null);
 
@@ -113,56 +89,81 @@ export function CompareClient({
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  useEffect(() => {
-    const nextSearch = searchParams.get('q') || '';
-    const nextDepts = parseListParam(searchParams.get('departments'))
-      .filter((department) => departments.includes(department));
-    const nextFilterMode = FILTER_MODES.includes(searchParams.get('show') as FilterMode)
-      ? (searchParams.get('show') as FilterMode)
-      : 'all';
-    const nextSortKey = (searchParams.get('sortKey') as SortKey) || 'discrepancyCount';
-    const nextSortDir = (searchParams.get('sortDir') as SortDir) || 'desc';
-    const nextPage = Math.max(0, Number(searchParams.get('page') || '0') || 0);
+  const syncedFields = useMemo<UrlStateField[]>(() => ([
+    {
+      read: (params) => params.get('q') || '',
+      sync: (nextValue) => {
+        const nextSearch = nextValue as string;
+        setSearch((previous) => (previous === nextSearch ? previous : nextSearch));
+      },
+      write: (params) => {
+        if (search) params.set('q', search);
+        else params.delete('q');
+      },
+    },
+    {
+      read: (params) => parseListParam(params.get('departments')).filter((department) => departments.includes(department)),
+      sync: (nextValue) => {
+        const nextDepts = nextValue as string[];
+        setSelectedDepts((previous) => (arraysEqual(previous, nextDepts) ? previous : nextDepts));
+      },
+      write: (params) => {
+        if (selectedDepts.length > 0) params.set('departments', selectedDepts.join(','));
+        else params.delete('departments');
+      },
+    },
+    {
+      read: (params) => parseEnumParam(params.get('show'), FILTER_MODES, 'all'),
+      sync: (nextValue) => {
+        const nextFilterMode = nextValue as FilterMode;
+        setFilterMode((previous) => (previous === nextFilterMode ? previous : nextFilterMode));
+      },
+      write: (params) => {
+        if (filterMode !== 'all') params.set('show', filterMode);
+        else params.delete('show');
+      },
+    },
+    {
+      read: (params) => params.get('sortKey') || 'discrepancyCount',
+      sync: (nextValue) => {
+        const nextSortKey = nextValue as SortKey;
+        setSortKey((previous) => (previous === nextSortKey ? previous : nextSortKey));
+      },
+      write: (params) => {
+        if (sortKey !== 'discrepancyCount') params.set('sortKey', String(sortKey));
+        else params.delete('sortKey');
+      },
+    },
+    {
+      read: (params) => parseEnumParam(params.get('sortDir'), ['asc', 'desc'] as const, 'desc'),
+      sync: (nextValue) => {
+        const nextSortDir = nextValue as SortDir;
+        setSortDir((previous) => (previous === nextSortDir ? previous : nextSortDir));
+      },
+      write: (params) => {
+        if (sortDir !== 'desc') params.set('sortDir', sortDir);
+        else params.delete('sortDir');
+      },
+    },
+    {
+      read: (params) => parsePageParam(params.get('page')),
+      sync: (nextValue) => {
+        const nextPage = nextValue as number;
+        setPage((previous) => (previous === nextPage ? previous : nextPage));
+      },
+      write: (params) => {
+        if (page > 0) params.set('page', String(page));
+        else params.delete('page');
+      },
+    },
+  ]), [departments, filterMode, page, search, selectedDepts, sortDir, sortKey]);
 
-    setSearch((previous) => (previous === nextSearch ? previous : nextSearch));
-    setSelectedDepts((previous) => (arraysEqual(previous, nextDepts) ? previous : nextDepts));
-    setFilterMode((previous) => (previous === nextFilterMode ? previous : nextFilterMode));
-    setSortKey((previous) => (previous === nextSortKey ? previous : nextSortKey));
-    setSortDir((previous) => (previous === nextSortDir ? previous : nextSortDir));
-    setPage((previous) => (previous === nextPage ? previous : nextPage));
-  }, [departments, searchParams]);
-
-  const buildStateParams = useMemo(() => {
-    const params = new URLSearchParams(searchParams.toString());
-
-    if (search) params.set('q', search);
-    else params.delete('q');
-
-    if (selectedDepts.length > 0) params.set('departments', selectedDepts.join(','));
-    else params.delete('departments');
-
-    if (filterMode !== 'all') params.set('show', filterMode);
-    else params.delete('show');
-
-    if (sortKey !== 'discrepancyCount') params.set('sortKey', String(sortKey));
-    else params.delete('sortKey');
-
-    if (sortDir !== 'desc') params.set('sortDir', sortDir);
-    else params.delete('sortDir');
-
-    if (page > 0) params.set('page', String(page));
-    else params.delete('page');
-
-    return params;
-  }, [filterMode, page, search, searchParams, selectedDepts, sortDir, sortKey]);
-
-  useEffect(() => {
-    const next = buildStateParams.toString();
-    const current = searchParams.toString();
-    if (next !== current) {
-      router.replace(`/dashboard/timesheet-compare?${next}`, { scroll: false });
-    }
-  }, [buildStateParams, router, searchParams]);
+  useUrlStateSync({
+    pathname: '/dashboard/timesheet-compare',
+    router,
+    searchParams,
+    fields: syncedFields,
+  });
 
   const toggleDept = (d: string) => {
     setSelectedDepts((prev) => prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]);
@@ -178,7 +179,7 @@ export function CompareClient({
   const changeLookback = (val: string) => {
     if (val === 'custom') return;
     const weeksBack = Number(val);
-    const range = getTrailingWeeksRange(weeksBack);
+    const range = getTrailingWeeksParamRange(weeksBack);
     const params = new URLSearchParams(searchParams.toString());
     params.set('lookbackWeeks', val);
     params.set('startDate', range.startDate);

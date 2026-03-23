@@ -1,8 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import type { SuspiciousActivTrakIdentity } from '@/lib/dashboard-data';
+import { parseEnumParam } from '@/lib/search-params';
+import { useUrlStateSync, type UrlStateField } from '@/lib/use-url-state-sync';
 
 interface ReportClientProps {
   rows: SuspiciousActivTrakIdentity[];
@@ -67,39 +69,40 @@ export function SuspiciousActivTrakIdentitiesClient({ rows }: ReportClientProps)
   const searchParams = useSearchParams();
   const [search, setSearch] = useState(() => searchParams.get('q') || '');
   const [flagFilter, setFlagFilter] = useState<FlagFilter>(() => {
-    const value = searchParams.get('flag');
-    return FLAG_FILTERS.includes(value as FlagFilter) ? (value as FlagFilter) : 'all';
+    return parseEnumParam(searchParams.get('flag'), FLAG_FILTERS, 'all');
   });
 
-  useEffect(() => {
-    const nextSearch = searchParams.get('q') || '';
-    const nextFlag = FLAG_FILTERS.includes(searchParams.get('flag') as FlagFilter)
-      ? (searchParams.get('flag') as FlagFilter)
-      : 'all';
+  const syncedFields = useMemo<UrlStateField[]>(() => ([
+    {
+      read: (params) => params.get('q') || '',
+      sync: (nextValue) => {
+        const nextSearch = nextValue as string;
+        setSearch((previous) => (previous === nextSearch ? previous : nextSearch));
+      },
+      write: (params) => {
+        if (search) params.set('q', search);
+        else params.delete('q');
+      },
+    },
+    {
+      read: (params) => parseEnumParam(params.get('flag'), FLAG_FILTERS, 'all'),
+      sync: (nextValue) => {
+        const nextFlag = nextValue as FlagFilter;
+        setFlagFilter((previous) => (previous === nextFlag ? previous : nextFlag));
+      },
+      write: (params) => {
+        if (flagFilter !== 'all') params.set('flag', flagFilter);
+        else params.delete('flag');
+      },
+    },
+  ]), [flagFilter, search]);
 
-    setSearch((previous) => (previous === nextSearch ? previous : nextSearch));
-    setFlagFilter((previous) => (previous === nextFlag ? previous : nextFlag));
-  }, [searchParams]);
-
-  const buildStateParams = useMemo(() => {
-    const params = new URLSearchParams(searchParams.toString());
-
-    if (search) params.set('q', search);
-    else params.delete('q');
-
-    if (flagFilter !== 'all') params.set('flag', flagFilter);
-    else params.delete('flag');
-
-    return params;
-  }, [flagFilter, search, searchParams]);
-
-  useEffect(() => {
-    const next = buildStateParams.toString();
-    const current = searchParams.toString();
-    if (next !== current) {
-      router.replace(next ? `/dashboard/activtrak-identities?${next}` : '/dashboard/activtrak-identities', { scroll: false });
-    }
-  }, [buildStateParams, router, searchParams]);
+  useUrlStateSync({
+    pathname: '/dashboard/activtrak-identities',
+    router,
+    searchParams,
+    fields: syncedFields,
+  });
 
   const filteredRows = useMemo(() => {
     const query = search.trim().toLowerCase();

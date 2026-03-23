@@ -8,6 +8,9 @@ import type {
   WorkingHoursTbsLineEntry,
   WorkingHoursWeekGroup,
 } from '@/lib/dashboard-data';
+import { getTrailingDaysParamRange, toDateParam } from '@/lib/report-date-defaults';
+import { sanitizeParam } from '@/lib/search-params';
+import { useUrlStateSync, type UrlStateField } from '@/lib/use-url-state-sync';
 
 interface Props {
   weeks: WorkingHoursWeekGroup[];
@@ -43,14 +46,6 @@ type WeekWithMeta = Omit<WorkingHoursWeekGroup, 'employees'> & {
 interface DetailState {
   week: string;
   employee: EmployeeWithMeta;
-}
-
-function getSanitizedParam(
-  value: string | null,
-  allowedValues: string[],
-): string {
-  if (!value) return 'all';
-  return allowedValues.includes(value) ? value : 'all';
 }
 
 const TOOLTIP_TEXT: Record<string, string> = {
@@ -250,13 +245,6 @@ function formatWeekLabel(weekStart: string): string {
   return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
 }
 
-function toDateParam(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
 function getWeekRange() {
   const now = new Date();
   const dayOfWeek = now.getDay();
@@ -264,16 +252,6 @@ function getWeekRange() {
   startDate.setDate(now.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1));
   const endDate = new Date(startDate);
   endDate.setDate(startDate.getDate() + 6);
-  return {
-    startDate: toDateParam(startDate),
-    endDate: toDateParam(endDate),
-  };
-}
-
-function getTrailingRange(days: number) {
-  const endDate = new Date();
-  const startDate = new Date(endDate);
-  startDate.setDate(endDate.getDate() - Math.max(days - 1, 0));
   return {
     startDate: toDateParam(startDate),
     endDate: toDateParam(endDate),
@@ -293,12 +271,12 @@ function getRangePresetKey(
   const expectedEnd = toDateParam(today);
   if (endDate !== expectedEnd) return null;
 
-  const last7 = getTrailingRange(7);
+  const last7 = getTrailingDaysParamRange(7);
   if (startDate === last7.startDate) {
     return 'week';
   }
 
-  const last30 = getTrailingRange(30);
+  const last30 = getTrailingDaysParamRange(30);
   if (startDate === last30.startDate) {
     return '30days';
   }
@@ -371,16 +349,16 @@ export function WorkingHoursClient({
   const router = useRouter();
   const searchParams = useSearchParams();
   const [selectedGroup, setSelectedGroup] = useState(() =>
-    getSanitizedParam(searchParams.get('group'), groups),
+    sanitizeParam(searchParams.get('group'), groups),
   );
   const [selectedEmployeeNo, setSelectedEmployeeNo] = useState(() =>
-    getSanitizedParam(searchParams.get('employeeNo'), employeeNumbers.map(String)),
+    sanitizeParam(searchParams.get('employeeNo'), employeeNumbers.map(String)),
   );
   const [selectedUser, setSelectedUser] = useState(() =>
-    getSanitizedParam(searchParams.get('user'), users),
+    sanitizeParam(searchParams.get('user'), users),
   );
   const [selectedWeek, setSelectedWeek] = useState(() =>
-    getSanitizedParam(searchParams.get('week'), weekOptions),
+    sanitizeParam(searchParams.get('week'), weekOptions),
   );
   const [includeNonActivTrak, setIncludeNonActivTrak] = useState(() => searchParams.get('coverage') === 'all');
   const [search, setSearch] = useState(() => searchParams.get('q') || '');
@@ -404,53 +382,94 @@ export function WorkingHoursClient({
     router.push(`/dashboard/working-hours?${params.toString()}`);
   };
 
-  useEffect(() => {
-    const nextSearch = searchParams.get('q') || '';
-    const nextGroup = getSanitizedParam(searchParams.get('group'), groups);
-    const nextEmployeeNo = getSanitizedParam(searchParams.get('employeeNo'), employeeNumbers.map(String));
-    const nextUser = getSanitizedParam(searchParams.get('user'), users);
-    const nextWeek = getSanitizedParam(searchParams.get('week'), weekOptions);
-    const nextIncludeNonActivTrak = searchParams.get('coverage') === 'all';
+  const syncedFields = useMemo<UrlStateField[]>(() => ([
+    {
+      read: (params) => params.get('q') || '',
+      sync: (nextValue) => {
+        const nextSearch = nextValue as string;
+        setSearch((previous) => (previous === nextSearch ? previous : nextSearch));
+      },
+      write: (params) => {
+        if (search) params.set('q', search);
+        else params.delete('q');
+      },
+    },
+    {
+      read: (params) => sanitizeParam(params.get('group'), groups),
+      sync: (nextValue) => {
+        const nextGroup = nextValue as string;
+        setSelectedGroup((previous) => (previous === nextGroup ? previous : nextGroup));
+      },
+      write: (params) => {
+        if (selectedGroup !== 'all') params.set('group', selectedGroup);
+        else params.delete('group');
+      },
+    },
+    {
+      read: (params) => sanitizeParam(params.get('employeeNo'), employeeNumbers.map(String)),
+      sync: (nextValue) => {
+        const nextEmployeeNo = nextValue as string;
+        setSelectedEmployeeNo((previous) => (previous === nextEmployeeNo ? previous : nextEmployeeNo));
+      },
+      write: (params) => {
+        if (selectedEmployeeNo !== 'all') params.set('employeeNo', selectedEmployeeNo);
+        else params.delete('employeeNo');
+      },
+    },
+    {
+      read: (params) => sanitizeParam(params.get('user'), users),
+      sync: (nextValue) => {
+        const nextUser = nextValue as string;
+        setSelectedUser((previous) => (previous === nextUser ? previous : nextUser));
+      },
+      write: (params) => {
+        if (selectedUser !== 'all') params.set('user', selectedUser);
+        else params.delete('user');
+      },
+    },
+    {
+      read: (params) => sanitizeParam(params.get('week'), weekOptions),
+      sync: (nextValue) => {
+        const nextWeek = nextValue as string;
+        setSelectedWeek((previous) => (previous === nextWeek ? previous : nextWeek));
+      },
+      write: (params) => {
+        if (selectedWeek !== 'all') params.set('week', selectedWeek);
+        else params.delete('week');
+      },
+    },
+    {
+      read: (params) => params.get('coverage') === 'all',
+      sync: (nextValue) => {
+        const nextIncludeNonActivTrak = nextValue as boolean;
+        setIncludeNonActivTrak((previous) => (
+          previous === nextIncludeNonActivTrak ? previous : nextIncludeNonActivTrak
+        ));
+      },
+      write: (params) => {
+        if (includeNonActivTrak) params.set('coverage', 'all');
+        else params.delete('coverage');
+      },
+    },
+  ]), [
+    employeeNumbers,
+    groups,
+    includeNonActivTrak,
+    search,
+    selectedEmployeeNo,
+    selectedGroup,
+    selectedUser,
+    selectedWeek,
+    users,
+    weekOptions,
+  ]);
 
-    setSearch((previous) => (previous === nextSearch ? previous : nextSearch));
-    setSelectedGroup((previous) => (previous === nextGroup ? previous : nextGroup));
-    setSelectedEmployeeNo((previous) => (previous === nextEmployeeNo ? previous : nextEmployeeNo));
-    setSelectedUser((previous) => (previous === nextUser ? previous : nextUser));
-    setSelectedWeek((previous) => (previous === nextWeek ? previous : nextWeek));
-    setIncludeNonActivTrak((previous) => (previous === nextIncludeNonActivTrak ? previous : nextIncludeNonActivTrak));
-  }, [employeeNumbers, groups, searchParams, users, weekOptions]);
-
-  const buildStateParams = useMemo(() => {
-    const params = new URLSearchParams(searchParams.toString());
-
-    if (search) params.set('q', search);
-    else params.delete('q');
-
-    if (selectedGroup !== 'all') params.set('group', selectedGroup);
-    else params.delete('group');
-
-    if (selectedEmployeeNo !== 'all') params.set('employeeNo', selectedEmployeeNo);
-    else params.delete('employeeNo');
-
-    if (selectedUser !== 'all') params.set('user', selectedUser);
-    else params.delete('user');
-
-    if (selectedWeek !== 'all') params.set('week', selectedWeek);
-    else params.delete('week');
-
-    if (includeNonActivTrak) params.set('coverage', 'all');
-    else params.delete('coverage');
-
-    return params;
-  }, [includeNonActivTrak, search, searchParams, selectedEmployeeNo, selectedGroup, selectedUser, selectedWeek]);
-
-  useEffect(() => {
-    const next = buildStateParams.toString();
-    const current = searchParams.toString();
-    if (next !== current) {
-      router.replace(`/dashboard/working-hours?${next}`, { scroll: false });
-    }
-  }, [buildStateParams, router, searchParams]);
+  useUrlStateSync({
+    pathname: '/dashboard/working-hours',
+    router,
+    searchParams,
+    fields: syncedFields,
+  });
 
   const handlePreset = (preset: 'week' | '30days' | 'thisweek') => {
     switch (preset) {
@@ -460,12 +479,12 @@ export function WorkingHoursClient({
         return;
       }
       case 'week': {
-        const range = getTrailingRange(7);
+        const range = getTrailingDaysParamRange(7);
         handleDateChange(range.startDate, range.endDate);
         return;
       }
       case '30days': {
-        const range = getTrailingRange(30);
+        const range = getTrailingDaysParamRange(30);
         handleDateChange(range.startDate, range.endDate);
         return;
       }

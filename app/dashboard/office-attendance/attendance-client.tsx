@@ -13,7 +13,15 @@ import {
 } from '@/lib/constants';
 import { OFFICE_ATTENDANCE_VIEW_OPTIONS, type OfficeAttendanceViewKey } from '@/lib/dashboard-nav-config';
 import { getOfficeAttendanceDefaultRange, toDateParam } from '@/lib/report-date-defaults';
+import {
+  arraysEqual,
+  parseEnumParam,
+  parseListParam,
+  parsePageParam,
+  type SearchParamReader,
+} from '@/lib/search-params';
 import type { AttendanceRemoteWorkRequest, AttendanceRow, AttendanceSummary, DayDetail, WeekCell } from '@/lib/types/attendance';
+import { useUrlStateSync, type UrlStateField } from '@/lib/use-url-state-sync';
 
 interface Props {
   rows: AttendanceRow[];
@@ -34,14 +42,6 @@ type SortDir = 'asc' | 'desc';
 type ViewMode = OfficeAttendanceViewKey;
 type DateFilterMode = 'quick' | 'custom';
 const DEFAULT_EMPLOYEE_LOCATION = 'Quebec (Montreal Head Office)';
-type SearchParamReader = {
-  get(name: string): string | null;
-  has(name: string): boolean;
-};
-
-function arraysEqual(a: string[], b: string[]): boolean {
-  return a.length === b.length && a.every((value, index) => value === b[index]);
-}
 
 function getInitialViewMode(searchParams: SearchParamReader): ViewMode {
   const view = searchParams.get('view');
@@ -221,11 +221,6 @@ function getAppliedDateFilterMode(
   return 'quick';
 }
 
-function parseListParam(value: string | null): string[] {
-  if (!value) return [];
-  return value.split(',').map((part) => part.trim()).filter(Boolean);
-}
-
 function buildReturnTo(pathname: string, params: URLSearchParams): string {
   const query = params.toString();
   return query ? `${pathname}?${query}` : pathname;
@@ -311,9 +306,9 @@ export function AttendanceClient({
   const [includeApprovedRemoteWork, setIncludeApprovedRemoteWork] = useState(() => searchParams.get('approvedRemoteWork') === 'include');
   const [deptOpen, setDeptOpen] = useState(false);
   const [locOpen, setLocOpen] = useState(false);
-  const [sortKey, setSortKey] = useState<SortKey>(() => (searchParams.get('sortKey') as SortKey) || 'name');
-  const [sortDir, setSortDir] = useState<SortDir>(() => (searchParams.get('sortDir') as SortDir) || 'asc');
-  const [page, setPage] = useState(() => Math.max(0, Number(searchParams.get('page') || '0') || 0));
+  const [sortKey, setSortKey] = useState<SortKey>(() => searchParams.get('sortKey') || 'name');
+  const [sortDir, setSortDir] = useState<SortDir>(() => parseEnumParam(searchParams.get('sortDir'), ['asc', 'desc'] as const, 'asc'));
+  const [page, setPage] = useState(() => parsePageParam(searchParams.get('page')));
   const [detail, setDetail] = useState<DetailState | null>(null);
   const [showScrollRail, setShowScrollRail] = useState(false);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
@@ -329,34 +324,104 @@ export function AttendanceClient({
     () => (currentWeek ? weeks.filter((week) => week !== currentWeek) : weeks),
     [currentWeek, weeks],
   );
-  const buildStateParams = useMemo(() => {
-    const params = new URLSearchParams(searchParams.toString());
-
-    if (search) params.set('q', search);
-    else params.delete('q');
-
-    if (selectedDepts.length > 0) params.set('departments', selectedDepts.join(','));
-    else params.delete('departments');
-
-    if (selectedLocs.length > 0) params.set('locations', selectedLocs.join(','));
-    else params.delete('locations');
-
-    if (includeApprovedRemoteWork) params.set('approvedRemoteWork', 'include');
-    else params.delete('approvedRemoteWork');
-
-    if (sortKey !== 'name') params.set('sortKey', String(sortKey));
-    else params.delete('sortKey');
-
-    if (sortDir !== 'asc') params.set('sortDir', sortDir);
-    else params.delete('sortDir');
-
-    if (page > 0) params.set('page', String(page));
-    else params.delete('page');
-
-    params.delete('remoteWork');
-
-    return params;
-  }, [includeApprovedRemoteWork, page, search, searchParams, selectedDepts, selectedLocs, sortDir, sortKey]);
+  const syncedFields = useMemo<UrlStateField[]>(() => ([
+    {
+      read: (params) => params.get('q') || '',
+      sync: (nextValue) => {
+        const nextSearch = nextValue as string;
+        setSearch((previous) => (previous === nextSearch ? previous : nextSearch));
+      },
+      write: (params) => {
+        if (search) params.set('q', search);
+        else params.delete('q');
+      },
+    },
+    {
+      read: (params) => parseListParam(params.get('departments')),
+      sync: (nextValue) => {
+        const nextDepts = nextValue as string[];
+        setSelectedDepts((previous) => (arraysEqual(previous, nextDepts) ? previous : nextDepts));
+      },
+      write: (params) => {
+        if (selectedDepts.length > 0) params.set('departments', selectedDepts.join(','));
+        else params.delete('departments');
+      },
+    },
+    {
+      read: (params) => getDefaultLocationSelection(viewMode, params, locations),
+      sync: (nextValue) => {
+        const nextLocs = nextValue as string[];
+        setSelectedLocs((previous) => (arraysEqual(previous, nextLocs) ? previous : nextLocs));
+      },
+      write: (params) => {
+        if (selectedLocs.length > 0) params.set('locations', selectedLocs.join(','));
+        else params.delete('locations');
+      },
+    },
+    {
+      read: (params) => params.get('approvedRemoteWork') === 'include',
+      sync: (nextValue) => {
+        const nextIncludeApprovedRemoteWork = nextValue as boolean;
+        setIncludeApprovedRemoteWork((previous) => (
+          previous === nextIncludeApprovedRemoteWork ? previous : nextIncludeApprovedRemoteWork
+        ));
+      },
+      write: (params) => {
+        if (includeApprovedRemoteWork) params.set('approvedRemoteWork', 'include');
+        else params.delete('approvedRemoteWork');
+        params.delete('remoteWork');
+      },
+    },
+    {
+      read: (params) => params.get('sortKey') || 'name',
+      sync: (nextValue) => {
+        const nextSortKey = nextValue as SortKey;
+        setSortKey((previous) => (previous === nextSortKey ? previous : nextSortKey));
+      },
+      write: (params) => {
+        if (sortKey !== 'name') params.set('sortKey', String(sortKey));
+        else params.delete('sortKey');
+      },
+    },
+    {
+      read: (params) => parseEnumParam(params.get('sortDir'), ['asc', 'desc'] as const, 'asc'),
+      sync: (nextValue) => {
+        const nextSortDir = nextValue as SortDir;
+        setSortDir((previous) => (previous === nextSortDir ? previous : nextSortDir));
+      },
+      write: (params) => {
+        if (sortDir !== 'asc') params.set('sortDir', sortDir);
+        else params.delete('sortDir');
+      },
+    },
+    {
+      read: (params) => parsePageParam(params.get('page')),
+      sync: (nextValue) => {
+        const nextPage = nextValue as number;
+        setPage((previous) => (previous === nextPage ? previous : nextPage));
+      },
+      write: (params) => {
+        if (page > 0) params.set('page', String(page));
+        else params.delete('page');
+      },
+    },
+  ]), [
+    includeApprovedRemoteWork,
+    locations,
+    page,
+    search,
+    selectedDepts,
+    selectedLocs,
+    sortDir,
+    sortKey,
+    viewMode,
+  ]);
+  const buildStateParams = useUrlStateSync({
+    pathname,
+    router,
+    searchParams,
+    fields: syncedFields,
+  });
   const returnTo = useMemo(() => buildReturnTo(pathname, buildStateParams), [buildStateParams, pathname]);
   const isDepartmentView = viewMode === 'departments';
   const isManagerView = viewMode === 'managers';
@@ -391,24 +456,6 @@ export function AttendanceClient({
   }, []);
 
   useEffect(() => {
-    const nextSearch = searchParams.get('q') || '';
-    const nextDepts = parseListParam(searchParams.get('departments'));
-    const nextLocs = getDefaultLocationSelection(viewMode, searchParams, locations);
-    const nextIncludeApprovedRemoteWork = searchParams.get('approvedRemoteWork') === 'include';
-    const nextSortKey = (searchParams.get('sortKey') as SortKey) || 'name';
-    const nextSortDir = (searchParams.get('sortDir') as SortDir) || 'asc';
-    const nextPage = Math.max(0, Number(searchParams.get('page') || '0') || 0);
-
-    setSearch((previous) => (previous === nextSearch ? previous : nextSearch));
-    setSelectedDepts((previous) => (arraysEqual(previous, nextDepts) ? previous : nextDepts));
-    setSelectedLocs((previous) => (arraysEqual(previous, nextLocs) ? previous : nextLocs));
-    setIncludeApprovedRemoteWork((previous) => (previous === nextIncludeApprovedRemoteWork ? previous : nextIncludeApprovedRemoteWork));
-    setSortKey((previous) => (previous === nextSortKey ? previous : nextSortKey));
-    setSortDir((previous) => (previous === nextSortDir ? previous : nextSortDir));
-    setPage((previous) => (previous === nextPage ? previous : nextPage));
-  }, [locations, searchParams, viewMode]);
-
-  useEffect(() => {
     setDateFilterMode(appliedDateFilterMode);
     setQuickRangeDraft(String(activeLookbackWeeks ?? DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS));
     setCustomStartDate(startDate);
@@ -418,14 +465,6 @@ export function AttendanceClient({
   useEffect(() => {
     setMobileFiltersOpen(false);
   }, [searchParams, viewMode]);
-
-  useEffect(() => {
-    const next = buildStateParams.toString();
-    const current = searchParams.toString();
-    if (next !== current) {
-      router.replace(`${pathname}?${next}`, { scroll: false });
-    }
-  }, [buildStateParams, pathname, router, searchParams]);
 
   useEffect(() => {
     if (!detail || typeof window === 'undefined') return;

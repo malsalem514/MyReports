@@ -1,39 +1,9 @@
 import { Suspense } from 'react';
-import { sub } from 'date-fns';
 import { getAccessContext, getScopedReportEmails } from '@/lib/access';
 import { requireVisibleTab } from '@/lib/tab-config';
 import { getWorkingHoursReport } from '@/lib/dashboard-data';
+import { getTrailingDaysDateRange, parseDateInput, toDateParam } from '@/lib/report-date-defaults';
 import { WorkingHoursClient } from './working-hours-client';
-
-function parseDateInput(
-  value: string | undefined,
-  fallback: Date,
-  endOfDay: boolean,
-): Date {
-  const parsed = value ? new Date(`${value}T00:00:00`) : new Date(fallback);
-  if (Number.isNaN(parsed.getTime())) {
-    const fallbackDate = new Date(fallback);
-    if (endOfDay) {
-      fallbackDate.setHours(23, 59, 59, 999);
-    } else {
-      fallbackDate.setHours(0, 0, 0, 0);
-    }
-    return fallbackDate;
-  }
-  if (endOfDay) {
-    parsed.setHours(23, 59, 59, 999);
-  } else {
-    parsed.setHours(0, 0, 0, 0);
-  }
-  return parsed;
-}
-
-function toDateParam(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
 
 async function WorkingHoursData({
   startDate,
@@ -119,8 +89,7 @@ export default async function WorkingHoursPage({
 }) {
   const params = await searchParams;
 
-  const defaultEndDate = new Date();
-  const defaultStartDate = sub(defaultEndDate, { days: 29 });
+  const { startDate: defaultStartDate, endDate: defaultEndDate } = getTrailingDaysDateRange(30);
 
   let startDate = parseDateInput(params.startDate, defaultStartDate, false);
   let endDate = parseDateInput(params.endDate, defaultEndDate, true);

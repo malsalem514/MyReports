@@ -1,9 +1,10 @@
 import { Suspense } from 'react';
-import { sub } from 'date-fns';
 import { getAccessContext, getScopedReportEmails } from '@/lib/access';
 import { requireVisibleTab } from '@/lib/tab-config';
 import { getTbsComparisonReport } from '@/lib/dashboard-data';
-import { DEFAULT_LOOKBACK_WEEKS, LOOKBACK_OPTIONS } from '@/lib/constants';
+import { DEFAULT_LOOKBACK_WEEKS } from '@/lib/constants';
+import { getTrailingWeeksDateRange, parseDateInput, toDateParam } from '@/lib/report-date-defaults';
+import { parseLookbackWeeks } from '@/lib/search-params';
 import { CompareClient } from './compare-client';
 
 async function CompareData({
@@ -95,20 +96,11 @@ export default async function TimesheetComparePage({
   searchParams: Promise<{ lookbackWeeks?: string; startDate?: string; endDate?: string }>;
 }) {
   const params = await searchParams;
-  const lookbackWeeks = LOOKBACK_OPTIONS.includes(Number(params.lookbackWeeks) as any)
-    ? (Number(params.lookbackWeeks) as (typeof LOOKBACK_OPTIONS)[number])
-    : DEFAULT_LOOKBACK_WEEKS;
+  const lookbackWeeks = parseLookbackWeeks(params.lookbackWeeks, DEFAULT_LOOKBACK_WEEKS);
+  const { startDate: defaultStartDate, endDate: defaultEndDate } = getTrailingWeeksDateRange(lookbackWeeks);
 
-  const defaultEndDate = new Date();
-  defaultEndDate.setHours(23, 59, 59, 999);
-  const defaultStartDate = sub(defaultEndDate, { days: (lookbackWeeks * 7) - 1 });
-  defaultStartDate.setHours(0, 0, 0, 0);
-
-  let startDate = params.startDate ? new Date(`${params.startDate}T00:00:00`) : new Date(defaultStartDate);
-  let endDate = params.endDate ? new Date(`${params.endDate}T23:59:59.999`) : new Date(defaultEndDate);
-
-  if (Number.isNaN(startDate.getTime())) startDate = new Date(defaultStartDate);
-  if (Number.isNaN(endDate.getTime())) endDate = new Date(defaultEndDate);
+  let startDate = parseDateInput(params.startDate, defaultStartDate, false);
+  let endDate = parseDateInput(params.endDate, defaultEndDate, true);
   if (startDate > endDate) {
     const nextStart = new Date(endDate);
     nextStart.setHours(0, 0, 0, 0);
@@ -117,13 +109,6 @@ export default async function TimesheetComparePage({
     startDate = nextStart;
     endDate = nextEnd;
   }
-
-  const toDateParam = (date: Date) => {
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, '0');
-    const d = String(date.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
-  };
 
   return (
     <Suspense fallback={<CompareSkeleton />}>

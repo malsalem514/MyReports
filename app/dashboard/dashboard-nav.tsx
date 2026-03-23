@@ -84,7 +84,7 @@ export function DashboardNav({ navItems, children }: { navItems: DashboardNavIte
   }, [mobileNavOpen]);
 
   const getDateRangeForPath = (targetPath: string) => {
-    if (startDateParam && endDateParam) {
+    if (targetPath === pathname && startDateParam && endDateParam) {
       return {
         startDate: startDateParam,
         endDate: endDateParam,
