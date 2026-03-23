@@ -40,7 +40,7 @@ export const OFFICE_ATTENDANCE_VIEW_OPTIONS: Array<{
   { id: 'employees', label: 'Employees', description: 'Individual attendance and weekly office presence.' },
   { id: 'departments', label: 'Departments', description: 'Department rollups across the selected range.', params: { view: 'departments' } },
   { id: 'managers', label: 'Managers', description: 'Manager rollups across the selected range.', params: { view: 'managers' } },
-  { id: 'approved-remote-work', label: 'Approved Remote Work', description: 'Employees with approved remote-work requests from Oracle.', params: { view: 'approved-remote-work' } },
+  { id: 'approved-remote-work', label: 'Remote Work Requests', description: 'Remote-work request records from Oracle with visible approval status.', params: { view: 'approved-remote-work' } },
 ];
 
 export const OFFICE_ATTENDANCE_NAV_CHILDREN: DashboardNavChild[] = OFFICE_ATTENDANCE_VIEW_OPTIONS.map((option) => ({
@@ -128,6 +128,12 @@ export function buildDashboardNavItems(
       key: 'admin',
       path: '/dashboard/admin',
       label: 'Tab Visibility',
+      section: 'admin',
+    });
+    navItems.push({
+      key: 'activtrak-identities',
+      path: '/dashboard/activtrak-identities',
+      label: 'ActivTrak Identities',
       section: 'admin',
     });
   }

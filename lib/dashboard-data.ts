@@ -67,6 +67,28 @@ export interface BambooNotInActivTrakEmployee {
   hasActivTrakUser: boolean;
 }
 
+export interface SuspiciousActivTrakIdentity {
+  email: string;
+  displayName: string | null;
+  department: string | null;
+  location: string | null;
+  tbsEmployeeNo: number | null;
+  actrkId: number | null;
+  actrkEmployeeName: string | null;
+  activTrakUserName: string | null;
+  identifiers: string | null;
+  identifierCount: number;
+  activityRowCount: number;
+  firstSeen: Date | null;
+  lastSeen: Date | null;
+  hasNoIdentifier: boolean;
+  hasIdentifierMismatch: boolean;
+  hasDeviceStyleIdentifier: boolean;
+  hasNonEmailIdentifier: boolean;
+  hasNonCorporateDomain: boolean;
+  hasNoActivity: boolean;
+}
+
 // ============================================================================
 // Employee Queries
 // ============================================================================
@@ -158,6 +180,56 @@ export async function getBambooNotInActivTrakEmployees(): Promise<BambooNotInAct
     actrkId: r.ACTRK_ID,
     hasActivTrakMapping: r.HAS_ACTIVTRAK_MAPPING === 1,
     hasActivTrakUser: r.HAS_ACTIVTRAK_USER === 1,
+  }));
+}
+
+export async function getSuspiciousActivTrakIdentities(): Promise<SuspiciousActivTrakIdentity[]> {
+  const rows = await query<{
+    EMAIL: string;
+    DISPLAY_NAME: string;
+    DEPARTMENT: string;
+    LOCATION: string;
+    TBS_EMPLOYEE_NO: number | null;
+    ACTRK_ID: number | null;
+    ACTRK_EMPLOYEE_NAME: string | null;
+    ACTIVTRAK_USER_NAME: string | null;
+    IDENTIFIERS: string | null;
+    IDENTIFIER_COUNT: number | null;
+    ACTIVITY_ROW_COUNT: number | null;
+    FIRST_SEEN: Date | null;
+    LAST_SEEN: Date | null;
+    HAS_NO_IDENTIFIER: number;
+    HAS_IDENTIFIER_MISMATCH: number;
+    HAS_DEVICE_STYLE_IDENTIFIER: number;
+    HAS_NON_EMAIL_IDENTIFIER: number;
+    HAS_NON_CORPORATE_DOMAIN: number;
+    HAS_NO_ACTIVITY: number;
+  }>(`
+    SELECT *
+    FROM V_SUSPICIOUS_ACTIVTRAK_IDENTITIES
+    ORDER BY DISPLAY_NAME, EMAIL
+  `);
+
+  return rows.map((row) => ({
+    email: row.EMAIL,
+    displayName: row.DISPLAY_NAME,
+    department: row.DEPARTMENT,
+    location: row.LOCATION,
+    tbsEmployeeNo: row.TBS_EMPLOYEE_NO,
+    actrkId: row.ACTRK_ID,
+    actrkEmployeeName: row.ACTRK_EMPLOYEE_NAME,
+    activTrakUserName: row.ACTIVTRAK_USER_NAME,
+    identifiers: row.IDENTIFIERS,
+    identifierCount: row.IDENTIFIER_COUNT || 0,
+    activityRowCount: row.ACTIVITY_ROW_COUNT || 0,
+    firstSeen: row.FIRST_SEEN,
+    lastSeen: row.LAST_SEEN,
+    hasNoIdentifier: row.HAS_NO_IDENTIFIER === 1,
+    hasIdentifierMismatch: row.HAS_IDENTIFIER_MISMATCH === 1,
+    hasDeviceStyleIdentifier: row.HAS_DEVICE_STYLE_IDENTIFIER === 1,
+    hasNonEmailIdentifier: row.HAS_NON_EMAIL_IDENTIFIER === 1,
+    hasNonCorporateDomain: row.HAS_NON_CORPORATE_DOMAIN === 1,
+    hasNoActivity: row.HAS_NO_ACTIVITY === 1,
   }));
 }
 
@@ -418,8 +490,7 @@ export async function getAttendanceReport(
        LEFT JOIN TL_EMPLOYEES e
          ON LOWER(e.EMAIL) = LOWER(r.EMAIL)
        WHERE r.REMOTE_WORK_START_DATE <= :ed
-         AND NVL(r.REMOTE_WORK_END_DATE, DATE '2999-12-31') >= :sd
-         AND UPPER(NVL(r.MANAGER_APPROVAL_RECEIVED, 'NO')) IN ('YES', 'APPROVED')${emails && emails.length > 0
+         AND NVL(r.REMOTE_WORK_END_DATE, DATE '2999-12-31') >= :sd${emails && emails.length > 0
            ? ` AND LOWER(r.EMAIL) IN (${emails.map((_, i) => `:re${i}`).join(',')})`
            : ''}
        ORDER BY r.REMOTE_WORK_START_DATE DESC, LOWER(r.EMAIL), r.BAMBOO_ROW_ID DESC`,
@@ -588,11 +659,14 @@ export async function getAttendanceReport(
 
   for (const row of remoteWorkRows) {
     const email = row.EMAIL?.toLowerCase();
-    if (email) {
+    const approvalValue = (row.MANAGER_APPROVAL_RECEIVED || '').trim().toUpperCase();
+    const isApprovedRemoteWork = approvalValue === 'YES' || approvalValue === 'APPROVED';
+
+    if (email && isApprovedRemoteWork) {
       approvedRemoteWorkEmails.add(email);
     }
     const type = row.REMOTE_WORK_TYPE?.trim();
-    if (email && type) {
+    if (email && type && isApprovedRemoteWork) {
       if (!approvedRemoteWorkTypesByEmail.has(email)) {
         approvedRemoteWorkTypesByEmail.set(email, new Set());
       }

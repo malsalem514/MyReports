@@ -1272,7 +1272,7 @@ export function AttendanceClient({
               <h2 className="text-[15px] font-semibold text-gray-900">{currentView.label}</h2>
               <p className="mt-0.5 text-[12px] text-gray-500">
                 {isApprovedRemoteWorkView
-                  ? 'Exact approved remote-work request records from Oracle.'
+                  ? 'All remote-work request records from Oracle. Use Manager Approval to see the request status.'
                   : isAggregateView
                     ? `Weekly compliance is based on Quebec, non-exempt employees meeting the ${OFFICE_DAYS_REQUIRED}-day target.`
                     : `${currentView.description} Target ${OFFICE_DAYS_REQUIRED} office days per week.`}
@@ -1593,7 +1593,7 @@ export function AttendanceClient({
                     : filteredSummary.totalEmployees}
               </p>
               {isApprovedRemoteWorkView ? (
-                <p className="mt-1 text-[11px] text-gray-400">Exact approved records from `TL_REMOTE_WORK_REQUESTS`</p>
+                <p className="mt-1 text-[11px] text-gray-400">All remote-work request records from `TL_REMOTE_WORK_REQUESTS`. See `Manager Approval` for status.</p>
               ) : isAggregateView ? (
                 <p className="mt-1 text-[11px] text-gray-400">{filteredSummary.totalEmployees} employees covered</p>
               ) : null}
