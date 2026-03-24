@@ -391,7 +391,7 @@ export async function getAttendanceReport(
   let empEmailFilter = '';
   if (emails && emails.length > 0) {
     const placeholders = emails.map((_, i) => `:em${i}`).join(',');
-    empEmailFilter = ` AND LOWER(EMAIL) IN (${placeholders})`;
+    empEmailFilter = ` AND LOWER(m.EMAIL) IN (${placeholders})`;
     emails.forEach((email, i) => { empParams[`em${i}`] = email.toLowerCase(); });
   }
 
