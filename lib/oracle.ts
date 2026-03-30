@@ -488,7 +488,12 @@ export async function initializeSchema(): Promise<void> {
       WITH activtrak_email_activity AS (
         SELECT
           EMAIL,
-          MAX(ACTIVITY_AT) AS LAST_ACTIVTRAK_ACTIVITY
+          MAX(
+            CASE
+              WHEN ACTIVITY_AT <= CAST(SYSDATE + 1 AS TIMESTAMP) THEN ACTIVITY_AT
+              ELSE NULL
+            END
+          ) AS LAST_ACTIVTRAK_ACTIVITY
         FROM (
           SELECT
             LOWER(p.EMAIL) AS EMAIL,
@@ -516,6 +521,15 @@ export async function initializeSchema(): Promise<void> {
           GROUP BY LOWER(o.EMAIL)
         )
         GROUP BY EMAIL
+      ),
+      activtrak_user_stats_clean AS (
+        SELECT
+          USER_ID,
+          CASE
+            WHEN LAST_SEEN <= CAST(SYSDATE + 1 AS TIMESTAMP) THEN CAST(LAST_SEEN AS TIMESTAMP)
+            ELSE NULL
+          END AS LAST_SEEN
+        FROM TL_ACTIVTRAK_USER_STATS
       ),
       tbs_last_entry AS (
         SELECT
@@ -552,7 +566,7 @@ export async function initializeSchema(): Promise<void> {
       FROM V_USER_MAPPINGS m
       LEFT JOIN activtrak_email_activity activity
         ON activity.EMAIL = m.EMAIL
-      LEFT JOIN TL_ACTIVTRAK_USER_STATS stats
+      LEFT JOIN activtrak_user_stats_clean stats
         ON stats.USER_ID = m.ACTRK_ID
       LEFT JOIN tbs_last_entry tbs
         ON tbs.EMPLOYEE_NO = m.TBS_EMPLOYEE_NO
