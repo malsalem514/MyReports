@@ -253,16 +253,38 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
       { sd: startDate, ed: now },
     );
 
-    const officeIpActivityBinds = officeIpActivity
-      .filter((row) => row.email && row.publicIp)
-      .map((row) => ({
+    const officeIpActivityByKey = new Map<string, {
+      RECORD_DATE: Date;
+      EMAIL: string | null;
+      DISPLAY_NAME: string | null;
+      PUBLIC_IP: string;
+      DURATION_SECONDS: number;
+      EVENT_COUNT: number;
+    }>();
+    for (const row of officeIpActivity) {
+      const email = normalizeEmailNullable(row.email);
+      const publicIp = row.publicIp?.trim();
+      if (!email || !publicIp) continue;
+      const key = `${toDateKey(row.date)}|${email}|${publicIp}`;
+      const existing = officeIpActivityByKey.get(key);
+      if (existing) {
+        existing.DURATION_SECONDS += row.durationSeconds || 0;
+        existing.EVENT_COUNT += row.eventCount || 0;
+        if (!existing.DISPLAY_NAME && row.displayName) {
+          existing.DISPLAY_NAME = row.displayName;
+        }
+        continue;
+      }
+      officeIpActivityByKey.set(key, {
         RECORD_DATE: row.date,
-        EMAIL: normalizeEmailNullable(row.email),
+        EMAIL: email,
         DISPLAY_NAME: row.displayName || null,
-        PUBLIC_IP: row.publicIp,
+        PUBLIC_IP: publicIp,
         DURATION_SECONDS: row.durationSeconds || 0,
         EVENT_COUNT: row.eventCount || 0,
-      }));
+      });
+    }
+    const officeIpActivityBinds = [...officeIpActivityByKey.values()];
 
     if (officeIpActivityBinds.length > 0) {
       await executeMany(
