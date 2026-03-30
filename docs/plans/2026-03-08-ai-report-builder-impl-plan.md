@@ -112,8 +112,9 @@ Verify connection works:
 npx tsx -e "
 import oracledb from 'oracledb';
 const conn = await oracledb.getConnection({
-  user: 'timelogs', password: 'timelogs',
-  connectString: 'localhost:1521/FREEPDB1'
+  user: process.env.ORACLE_USER,
+  password: process.env.ORACLE_PASSWORD,
+  connectString: process.env.ORACLE_CONNECT_STRING ?? 'localhost:1521/FREEPDB1'
 });
 const r = await conn.execute('SELECT 1 AS OK FROM DUAL');
 console.log('Connected:', r.rows);

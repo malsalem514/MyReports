@@ -1,5 +1,9 @@
 # Server Access — srv-test-docker-musa
 
+This file documents the old Windows Docker host.
+
+MyReports production now runs on the Linux host documented in [`/Users/musaalsalem/.codex/worktrees/033d/MyReports/docs/LINUX-PRODUCTION-SERVER-ACCESS.md`](/Users/musaalsalem/.codex/worktrees/033d/MyReports/docs/LINUX-PRODUCTION-SERVER-ACCESS.md).
+
 ## Connection Details
 
 | Field | Value |
@@ -8,28 +12,23 @@
 | IP | 172.16.30.77 |
 | OS | Windows 11 Pro (VMware VM) |
 | User | `malsalem@jestais.com` |
-| Password | `Kool3ala6ool!@#$%` |
+| Credentials | Retrieve from the approved secret store or IT owner. Do not store passwords in this repo. |
 
 ## SSH Connection
 
-The password contains special characters (`!@#$%`) that break shell quoting. Use a file-based approach:
+This host is obsolete for MyReports production. If access is still needed for ERPNext or historical recovery, use your local SSH client and retrieve credentials from the approved secret store at runtime.
 
 ```bash
-# 1. Create password file (once per session)
-printf '%s' 'Kool3ala6ool!@#$%' > /tmp/.sshpw && chmod 600 /tmp/.sshpw
-
-# 2. Connect
-sshpass -f /tmp/.sshpw ssh -o StrictHostKeyChecking=no -o PubkeyAuthentication=no 'malsalem@jestais.com'@172.16.30.77
+ssh 'malsalem@jestais.com'@172.16.30.77
 ```
 
-> Use IP `172.16.30.77` — DNS for the hostname may not always resolve.
-> `-o PubkeyAuthentication=no` is required to avoid pubkey auth failures.
+> Use IP `172.16.30.77` if hostname resolution fails.
+> Do not commit passwords or disable host key verification in repository examples.
 
 ## File Transfer (SCP)
 
 ```bash
-sshpass -f /tmp/.sshpw scp -o StrictHostKeyChecking=no -o PubkeyAuthentication=no \
-  /local/file 'malsalem@jestais.com'@172.16.30.77:'C:\remote\path\'
+scp /local/file 'malsalem@jestais.com'@172.16.30.77:'C:\remote\path\'
 ```
 
 ## Running Commands
@@ -39,8 +38,7 @@ The default SSH shell is **cmd.exe** (not bash). For complex commands with pipes
 ```bash
 CMD='your-command-here 2>&1'
 ENCODED=$(echo "$CMD" | iconv -t UTF-16LE | base64)
-sshpass -f /tmp/.sshpw ssh -o StrictHostKeyChecking=no -o PubkeyAuthentication=no \
-  'malsalem@jestais.com'@172.16.30.77 "powershell -EncodedCommand $ENCODED"
+ssh 'malsalem@jestais.com'@172.16.30.77 "powershell -EncodedCommand $ENCODED"
 ```
 
 > Windows has no `tail`, `grep`, or `head` — use PowerShell encoded commands for log viewing.
@@ -127,7 +125,7 @@ DNS: Both domains resolve to `172.16.30.77`. Nginx uses `server_name` to route t
 |-------|-------|
 | App (Client) ID | `620f7434-4322-4d2a-8e44-14972f728a84` |
 | Tenant ID | `e066e01b-f090-4220-8ac6-acf706a671aa` |
-| Client Secret | `<see myreports.env on server or memory/server-access.md>` |
+| Client Secret | `<retrieve from approved secret store or server env>` |
 | NEXTAUTH_URL | `https://myreports.jestais.com` |
 | Redirect URI | `https://myreports.jestais.com/api/auth/callback/microsoft-entra-id` |
 
@@ -135,8 +133,8 @@ DNS: Both domains resolve to `172.16.30.77`. Nginx uses `server_name` to route t
 | Field | Value |
 |-------|-------|
 | Admin User | `Administrator` |
-| Admin Password | `Admin2026Jestais` |
-| MariaDB Root Password | `Frappe2026Jestais` |
+| Admin Password | `<retrieve from approved secret store>` |
+| MariaDB Root Password | `<retrieve from approved secret store>` |
 | Site Name | `erp.localhost` |
 | Target Domain | `myprojects.jestais.com` |
 
@@ -145,36 +143,34 @@ DNS: Both domains resolve to `172.16.30.77`. Nginx uses `server_name` to route t
 |-------|-------|
 | App (Client) ID | `a338904d-64d6-4146-9c77-252b4d69e271` |
 | Tenant ID | `e066e01b-f090-4220-8ac6-acf706a671aa` |
-| Client Secret | `<see ERPNext Social Login Key or memory/server-access.md>` |
+| Client Secret | `<retrieve from approved secret store or ERPNext Social Login Key>` |
 | Redirect URI | `https://myprojects.jestais.com/api/method/frappe.integrations.oauth2_logins.login_via_office365` |
 
 ## Common Operations
 
 ```bash
 # Check all containers
-sshpass -f /tmp/.sshpw ssh ... 'malsalem@jestais.com'@172.16.30.77 "docker ps"
+ssh 'malsalem@jestais.com'@172.16.30.77 "docker ps"
 
 # Restart MyReports
-sshpass -f /tmp/.sshpw ssh ... 'malsalem@jestais.com'@172.16.30.77 \
+ssh 'malsalem@jestais.com'@172.16.30.77 \
   "docker stop myreports && docker rm myreports && docker run -d --name myreports --restart unless-stopped -p 3001:3000 --env-file C:\myreports\myreports.env --add-host srv-db-100:172.16.25.63 -v C:\myreports\google-sa.json:/run/secrets/google-sa.json:ro ghcr.io/malsalem514/myreports:latest"
 
 # Restart ERPNext stack
-sshpass -f /tmp/.sshpw ssh ... 'malsalem@jestais.com'@172.16.30.77 \
+ssh 'malsalem@jestais.com'@172.16.30.77 \
   "cd C:\erpnext && docker compose -f docker-compose.erpnext.yml restart"
 
 # Restart SSL proxy
-sshpass -f /tmp/.sshpw ssh ... 'malsalem@jestais.com'@172.16.30.77 "docker restart nginx-ssl"
+ssh 'malsalem@jestais.com'@172.16.30.77 "docker restart nginx-ssl"
 
 # View MyReports logs
-sshpass -f /tmp/.sshpw ssh ... 'malsalem@jestais.com'@172.16.30.77 "docker logs myreports"
+ssh 'malsalem@jestais.com'@172.16.30.77 "docker logs myreports"
 
 # View Windows Docker/bootstrap recovery log
-sshpass -f /tmp/.sshpw ssh ... 'malsalem@jestais.com'@172.16.30.77 \
+ssh 'malsalem@jestais.com'@172.16.30.77 \
   "powershell -NoProfile -Command \"Get-Content C:\myreports\logs\ensure-docker-and-app.log -Tail 100\""
 
 # ERPNext bench commands
-sshpass -f /tmp/.sshpw ssh ... 'malsalem@jestais.com'@172.16.30.77 \
+ssh 'malsalem@jestais.com'@172.16.30.77 \
   "cd C:\erpnext && docker compose -f docker-compose.erpnext.yml exec backend bench --site erp.localhost <command>"
 ```
-
-> In all examples above, `...` is shorthand for `-o StrictHostKeyChecking=no -o PubkeyAuthentication=no`
