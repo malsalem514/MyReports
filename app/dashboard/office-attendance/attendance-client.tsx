@@ -182,18 +182,36 @@ function parseLocalDate(s: string): Date {
   return new Date(y!, m! - 1, d!);
 }
 
+type EmployeeCellToneKey = keyof typeof CELL_COLORS;
+
+function hasWeekPto(cell?: Pick<WeekCell, 'ptoDays'>): boolean {
+  return (cell?.ptoDays ?? 0) > 0;
+}
+
+function getEmployeeCellToneKey(cell?: WeekCell): EmployeeCellToneKey {
+  if (hasWeekPto(cell)) return 'pto';
+  if (cell?.adjustedCompliant) return 'compliant';
+  if ((cell?.officeDays ?? 0) >= 1) return 'partial';
+  return 'absent';
+}
+
 function getEmployeeCellColor(cell?: WeekCell): string {
-  if (cell?.isPtoExcused) return CELL_COLORS.pto;
-  if (cell?.adjustedCompliant) return CELL_COLORS.compliant;
-  if ((cell?.officeDays ?? 0) >= 1) return CELL_COLORS.partial;
-  return CELL_COLORS.absent;
+  return CELL_COLORS[getEmployeeCellToneKey(cell)];
 }
 
 function getEmployeeCellHex(cell?: WeekCell): string {
-  if (cell?.isPtoExcused) return CELL_HEX.pto;
-  if (cell?.adjustedCompliant) return CELL_HEX.compliant;
-  if ((cell?.officeDays ?? 0) >= 1) return CELL_HEX.partial;
-  return CELL_HEX.absent;
+  return CELL_HEX[getEmployeeCellToneKey(cell)];
+}
+
+function getAdjustedTargetDisplay(cell?: Pick<WeekCell, 'adjustedOfficeTarget' | 'isPtoExcused'>): string {
+  if (cell?.adjustedOfficeTarget == null) return cell?.isPtoExcused ? 'Excused' : '—';
+  return String(cell.adjustedOfficeTarget);
+}
+
+function getWeekPolicyLabel(cell?: Pick<WeekCell, 'exceptionLabel' | 'isPtoExcused'>): string {
+  if (cell?.exceptionLabel && cell?.isPtoExcused) return `${cell.exceptionLabel} · PTO-excused`;
+  if (cell?.exceptionLabel) return cell.exceptionLabel;
+  return cell?.isPtoExcused ? 'PTO-excused week' : 'Standard Policy';
 }
 
 function getWeekCoverageKinds(cell?: Pick<WeekCell, 'hasApprovedRemoteCoverage' | 'hasApprovedWorkAbroadCoverage'>): Array<'remote' | 'abroad'> {
@@ -2372,16 +2390,12 @@ export function AttendanceClient({
                                     </div>
                                     <div>
                                       <p className="uppercase tracking-wider text-gray-400">Target</p>
-                                      <p className="mt-1 font-medium text-gray-700">
-                                        {cell?.adjustedOfficeTarget == null ? (cell?.isPtoExcused ? 'Excused' : '—') : cell.adjustedOfficeTarget}
-                                      </p>
+                                      <p className="mt-1 font-medium text-gray-700">{getAdjustedTargetDisplay(cell)}</p>
                                     </div>
                                   </div>
                                   <div>
                                     <p className="uppercase tracking-wider text-gray-400">Policy</p>
-                                    <p className="mt-1 leading-5 text-gray-600">
-                                      {cell?.exceptionLabel || (cell?.isPtoExcused ? 'PTO-excused week' : 'Standard Policy')}
-                                    </p>
+                                    <p className="mt-1 leading-5 text-gray-600">{getWeekPolicyLabel(cell)}</p>
                                   </div>
                                 </div>
                               ) : (
@@ -2626,13 +2640,13 @@ export function AttendanceClient({
                                         <div className="flex justify-between gap-3"><span>Office days</span><span className="font-medium text-gray-900">{office}</span></div>
                                         <div className="flex justify-between gap-3"><span>Remote days</span><span className="font-medium text-gray-900">{remote}</span></div>
                                         <div className="flex justify-between gap-3"><span>PTO days</span><span className="font-medium text-gray-900">{pto}</span></div>
-                                        <div className="flex justify-between gap-3"><span>Adjusted target</span><span className="font-medium text-gray-900">{cell?.adjustedOfficeTarget == null ? (cell?.isPtoExcused ? 'Excused' : '—') : cell.adjustedOfficeTarget}</span></div>
+                                        <div className="flex justify-between gap-3"><span>Adjusted target</span><span className="font-medium text-gray-900">{getAdjustedTargetDisplay(cell)}</span></div>
                                         <div className="flex justify-between gap-3"><span>Coverage source</span><span className="font-medium text-gray-900">{getCoverageSummaryLabel(cell)}</span></div>
                                         <div className="flex justify-between gap-3"><span>Approved weekdays</span><span className="font-medium text-gray-900">{cell?.approvedCoverageWeekdays ?? 0}</span></div>
                                       </div>
                                       <div>
                                         <p className="uppercase tracking-wider text-gray-400">Policy</p>
-                                        <p className="mt-1">{cell?.exceptionLabel || (cell?.isPtoExcused ? 'PTO-excused week' : 'Standard Policy')}</p>
+                                        <p className="mt-1">{getWeekPolicyLabel(cell)}</p>
                                       </div>
                                       {cell && cell.days.length > 0 ? (
                                         <div className="space-y-0.5">
@@ -2734,7 +2748,7 @@ export function AttendanceClient({
           <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.compliant}`} /> Compliant under adjusted policy</span>
           <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.partial}`} /> Below adjusted target</span>
           <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.absent}`} /> No office days</span>
-          <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.pto}`} /> PTO-excused week</span>
+          <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.pto}`} /> Includes PTO this week</span>
           <span className="flex items-center gap-1.5">{renderWeekCoverageMarkers({ hasApprovedRemoteCoverage: true, hasApprovedWorkAbroadCoverage: false }, 'h-3.5 w-3.5')} Approved remote-work coverage affected this week</span>
           <span className="flex items-center gap-1.5">{renderWeekCoverageMarkers({ hasApprovedRemoteCoverage: false, hasApprovedWorkAbroadCoverage: true }, 'h-3.5 w-3.5')} Approved work-abroad coverage affected this week</span>
           {currentWeek ? <span className="flex items-center gap-1.5"><span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-300" /> Current week is excluded from score</span> : null}
@@ -3139,7 +3153,7 @@ function AttendanceDetailModal({
                               {weekSummary.adjustedOfficeTarget == null
                                 ? (weekSummary.isPtoExcused ? 'Adjusted target: PTO-excused' : 'Adjusted target: —')
                                 : `Adjusted target: ${weekSummary.adjustedOfficeTarget}`}
-                              {weekSummary.exceptionLabel ? ` • ${weekSummary.exceptionLabel}` : ''}
+                              {getWeekPolicyLabel(weekSummary) !== 'Standard Policy' ? ` • ${getWeekPolicyLabel(weekSummary)}` : ''}
                             </p>
                           ) : null}
                         </div>
