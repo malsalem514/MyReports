@@ -26,7 +26,7 @@ async function AttendanceData({
   const allowedEmails = getScopedReportEmails(access);
 
   try {
-    const { rows, remoteWorkRequests, weeks, dataWeeks, currentWeek, departments, locations, summary } = await getAttendanceReport(
+    const { rows, remoteWorkRequests, workAbroadRequests, weeks, dataWeeks, currentWeek, departments, locations, summary } = await getAttendanceReport(
       startDate,
       endDate,
       OFFICE_DAYS_REQUIRED,
@@ -37,6 +37,7 @@ async function AttendanceData({
       <AttendanceClient
         rows={rows}
         remoteWorkRequests={remoteWorkRequests}
+        workAbroadRequests={workAbroadRequests}
         weeks={weeks}
         dataWeeks={dataWeeks}
         currentWeek={currentWeek}
@@ -58,6 +59,7 @@ async function AttendanceData({
         <AttendanceClient
           rows={[]}
           remoteWorkRequests={[]}
+          workAbroadRequests={[]}
           weeks={[]}
           dataWeeks={[]}
           departments={[]}

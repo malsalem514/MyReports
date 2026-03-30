@@ -127,6 +127,39 @@ export interface RemoteWorkRequestRecord {
   managerName: string | null;
 }
 
+export const WorkAbroadRequestSchema = z.object({
+  id: z.union([z.string(), z.number()]).transform((value) => String(value)),
+  employeeId: z.union([z.string(), z.number()]).transform((value) => String(value)),
+  customStartDate1: z.string().optional().nullable(),
+  customEndDate1: z.string().optional().nullable(),
+  customAddressofremoteworklocation: z.string().optional().nullable(),
+  customCountry: z.string().optional().nullable(),
+  customReasonforWorkingabroad: z.string().optional().nullable(),
+  customScheduledetails: z.string().optional().nullable(),
+  customRequestApproved: z.string().optional().nullable(),
+  'customApproved/DeclinedBy': z.string().optional().nullable(),
+  customRequestDate3: z.string().optional().nullable(),
+});
+
+export type WorkAbroadRequest = z.infer<typeof WorkAbroadRequestSchema>;
+
+export interface WorkAbroadRequestRecord {
+  rowId: string;
+  employeeId: string;
+  employeeEmail: string;
+  employeeName: string;
+  department: string;
+  requestDate: string | null;
+  workAbroadStartDate: string;
+  workAbroadEndDate: string | null;
+  remoteWorkLocationAddress: string | null;
+  countryOrProvince: string | null;
+  reason: string | null;
+  workSchedule: string | null;
+  requestApproved: string | null;
+  approvedDeclinedBy: string | null;
+}
+
 // ============================================================================
 // API Client
 // ============================================================================
@@ -358,6 +391,7 @@ export async function fetchPTOByEmployee(
 
 const REMOTE_WORK_REQUESTS_TABLE =
   'customRemoteWorkRequestonScheduledOfficeDayApprovalRequired';
+const WORK_ABROAD_REQUESTS_TABLE = 'customWorkingabroadrequests';
 
 async function _fetchRemoteWorkRequestsUncached(): Promise<RemoteWorkRequestRecord[]> {
   const data = await bambooFetch<unknown[]>(
@@ -411,6 +445,61 @@ export async function fetchRemoteWorkRequests(): Promise<RemoteWorkRequestRecord
     });
   } catch (error) {
     console.error('Failed to fetch remote work requests:', error);
+    return [];
+  }
+}
+
+async function _fetchWorkAbroadRequestsUncached(): Promise<WorkAbroadRequestRecord[]> {
+  const data = await bambooFetch<unknown[]>(
+    `/employees/all/tables/${WORK_ABROAD_REQUESTS_TABLE}`,
+  );
+
+  const employees = await fetchEmployeeDirectory();
+  const employeeMap = new Map(employees.map((employee) => [employee.id, employee]));
+  const records: WorkAbroadRequestRecord[] = [];
+
+  for (const item of data || []) {
+    try {
+      const request = WorkAbroadRequestSchema.parse(item);
+      if (!request.customStartDate1) continue;
+      const employee = employeeMap.get(request.employeeId);
+      records.push({
+        rowId: request.id,
+        employeeId: request.employeeId,
+        employeeEmail: normalizeEmailNullable(employee?.workEmail) || '',
+        employeeName:
+          employee?.displayName ||
+          `${employee?.firstName || ''} ${employee?.lastName || ''}`.trim() ||
+          '',
+        department: employee?.department || 'Unknown',
+        requestDate: request.customRequestDate3 || null,
+        workAbroadStartDate: request.customStartDate1,
+        workAbroadEndDate: request.customEndDate1 || null,
+        remoteWorkLocationAddress: request.customAddressofremoteworklocation || null,
+        countryOrProvince: request.customCountry || null,
+        reason: request.customReasonforWorkingabroad || null,
+        workSchedule: request.customScheduledetails || null,
+        requestApproved: request.customRequestApproved || null,
+        approvedDeclinedBy: request['customApproved/DeclinedBy'] || null,
+      });
+    } catch (error) {
+      console.warn('Invalid work abroad request:', item, error);
+    }
+  }
+
+  return records;
+}
+
+export async function fetchWorkAbroadRequests(): Promise<WorkAbroadRequestRecord[]> {
+  try {
+    return await cachified({
+      key: 'bamboohr:work-abroad-requests',
+      ttl: 1000 * 60 * 5,
+      staleWhileRevalidate: 1000 * 60 * 15,
+      getFreshValue: _fetchWorkAbroadRequestsUncached,
+    });
+  } catch (error) {
+    console.error('Failed to fetch work abroad requests:', error);
     return [];
   }
 }

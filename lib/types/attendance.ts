@@ -7,11 +7,25 @@ export interface DayDetail {
   activeHours?: number;
 }
 
+export type WfhExceptionType =
+  | 'none'
+  | 'standing_policy'
+  | 'temporary_partial'
+  | 'temporary_full';
+
 export interface WeekCell {
   officeDays: number;
   remoteDays: number;
   ptoDays: number;
   days: DayDetail[];
+  rawOfficeTarget: number;
+  adjustedOfficeTarget: number | null;
+  adjustedCompliant: boolean | null;
+  isPtoExcused: boolean;
+  hasApprovedWfhCoverage: boolean;
+  wfhExceptionType: WfhExceptionType;
+  approvedRemoteWeekdays: number;
+  exceptionLabel: string | null;
 }
 
 export interface AttendanceRow {
@@ -23,12 +37,17 @@ export interface AttendanceRow {
   officeLocation: string;
   hasActivTrakCoverage: boolean;
   approvedRemoteWorkRequest: boolean;
+  hasStandingWfhPolicy: boolean;
+  hasApprovedRemoteRequestInRange: boolean;
+  hasApprovedWorkAbroadRequestInRange: boolean;
+  hasAnyApprovedWfhCoverageInRange: boolean;
   remoteWorkStatusLabel: string;
   weeks: Record<string, WeekCell>;
   total: number;
   avgPerWeek: number;
   compliant: boolean;
   trend: 'up' | 'down' | 'flat';
+  exemptWeekCount: number;
 }
 
 export interface AttendanceRemoteWorkRequest {
@@ -47,6 +66,24 @@ export interface AttendanceRemoteWorkRequest {
   alternateInOfficeWorkDate: string | null;
   managerApprovalReceived: string | null;
   managerName: string | null;
+}
+
+export interface AttendanceWorkAbroadRequest {
+  bambooRowId: number;
+  employeeId: string;
+  email: string;
+  employeeName: string;
+  department: string;
+  officeLocation: string;
+  requestDate: string | null;
+  workAbroadStartDate: string;
+  workAbroadEndDate: string | null;
+  remoteWorkLocationAddress: string | null;
+  countryOrProvince: string | null;
+  reason: string | null;
+  workSchedule: string | null;
+  requestApproved: string | null;
+  approvedDeclinedBy: string | null;
 }
 
 export interface AttendanceSummary {

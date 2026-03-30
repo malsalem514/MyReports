@@ -1,5 +1,12 @@
 import { query } from './oracle';
-import type { AttendanceRemoteWorkRequest, AttendanceRow, AttendanceSummary, WeekCell } from './types/attendance';
+import type {
+  AttendanceRemoteWorkRequest,
+  AttendanceWorkAbroadRequest,
+  AttendanceRow,
+  AttendanceSummary,
+  WeekCell,
+  WfhExceptionType,
+} from './types/attendance';
 
 // ============================================================================
 // Types
@@ -362,6 +369,7 @@ export async function getTimeOff(
 export interface AttendanceReportResult {
   rows: AttendanceRow[];
   remoteWorkRequests: AttendanceRemoteWorkRequest[];
+  workAbroadRequests: AttendanceWorkAbroadRequest[];
   weeks: string[];
   /** Completed weeks that have actual attendance data — used for avg/compliance in client */
   dataWeeks: string[];
@@ -395,7 +403,7 @@ export async function getAttendanceReport(
     emails.forEach((email, i) => { empParams[`em${i}`] = email.toLowerCase(); });
   }
 
-  const [attRows, empRows, dailyRows, ptoDailyRows, remoteWorkRows] = await Promise.all([
+  const [attRows, empRows, dailyRows, ptoDailyRows, remoteWorkRows, workAbroadRows] = await Promise.all([
     query<{
       EMAIL: string; DISPLAY_NAME: string; DEPARTMENT: string;
       OFFICE_LOCATION: string; WEEK_START: Date;
@@ -412,6 +420,7 @@ export async function getAttendanceReport(
       MANAGER_NAME: string;
       MANAGER_EMAIL: string | null;
       HAS_ACTIVTRAK_USER: number;
+      REMOTE_WORKDAY_POLICY_ASSIGNED: number;
     }>(
       `SELECT
          m.EMAIL,
@@ -420,7 +429,8 @@ export async function getAttendanceReport(
          NVL(m.LOCATION, 'Unknown') AS LOCATION,
          NVL(e.SUPERVISOR_NAME, 'Unassigned') AS MANAGER_NAME,
          LOWER(e.SUPERVISOR_EMAIL) AS MANAGER_EMAIL,
-         NVL(m.HAS_ACTIVTRAK_USER, 0) AS HAS_ACTIVTRAK_USER
+         NVL(m.HAS_ACTIVTRAK_USER, 0) AS HAS_ACTIVTRAK_USER,
+         NVL(e.REMOTE_WORKDAY_POLICY_ASSIGNED, 0) AS REMOTE_WORKDAY_POLICY_ASSIGNED
        FROM V_USER_MAPPINGS m
        LEFT JOIN TL_EMPLOYEES e
          ON LOWER(e.EMAIL) = m.EMAIL
@@ -514,6 +524,55 @@ export async function getAttendanceReport(
           : {}),
       },
     ),
+    query<{
+      BAMBOO_ROW_ID: number;
+      EMPLOYEE_ID: string;
+      EMAIL: string | null;
+      EMPLOYEE_NAME: string | null;
+      DEPARTMENT: string | null;
+      OFFICE_LOCATION: string | null;
+      REQUEST_DATE: Date | null;
+      WORK_ABROAD_START_DATE: Date;
+      WORK_ABROAD_END_DATE: Date | null;
+      REMOTE_WORK_LOCATION_ADDRESS: string | null;
+      COUNTRY_OR_PROVINCE: string | null;
+      REASON: string | null;
+      WORK_SCHEDULE: string | null;
+      REQUEST_APPROVED: string | null;
+      APPROVED_DECLINED_BY: string | null;
+    }>(
+      `SELECT
+         r.BAMBOO_ROW_ID,
+         r.EMPLOYEE_ID,
+         LOWER(r.EMAIL) AS EMAIL,
+         r.EMPLOYEE_NAME,
+         r.DEPARTMENT,
+         NVL(e.LOCATION, 'Unknown') AS OFFICE_LOCATION,
+         r.REQUEST_DATE,
+         r.WORK_ABROAD_START_DATE,
+         r.WORK_ABROAD_END_DATE,
+         r.REMOTE_WORK_LOCATION_ADDRESS,
+         r.COUNTRY_OR_PROVINCE,
+         r.REASON,
+         r.WORK_SCHEDULE,
+         r.REQUEST_APPROVED,
+         r.APPROVED_DECLINED_BY
+       FROM TL_WORK_ABROAD_REQUESTS r
+       LEFT JOIN TL_EMPLOYEES e
+         ON LOWER(e.EMAIL) = LOWER(r.EMAIL)
+       WHERE r.WORK_ABROAD_START_DATE <= :ed
+         AND NVL(r.WORK_ABROAD_END_DATE, DATE '2999-12-31') >= :sd${emails && emails.length > 0
+           ? ` AND LOWER(r.EMAIL) IN (${emails.map((_, i) => `:wa${i}`).join(',')})`
+           : ''}
+       ORDER BY r.WORK_ABROAD_START_DATE DESC, LOWER(r.EMAIL), r.BAMBOO_ROW_ID DESC`,
+      {
+        sd: startDate,
+        ed: endDate,
+        ...(emails && emails.length > 0
+          ? Object.fromEntries(emails.map((email, i) => [`wa${i}`, email.toLowerCase()]))
+          : {}),
+      },
+    ),
   ]);
 
   const officeEmployeeEmails = [...new Set(
@@ -574,9 +633,19 @@ export async function getAttendanceReport(
   // --- Index PTO by email|week ---
   const ptoMap = new Map<string, number>();
   const ptoWeekDates = new Map<string, Set<string>>();
-  const approvedRemoteWorkEmails = new Set<string>();
+  const standingPolicyEmails = new Set(
+    empRows
+      .filter((employee) => employee.REMOTE_WORKDAY_POLICY_ASSIGNED === 1)
+      .map((employee) => employee.EMAIL.toLowerCase()),
+  );
+  const approvedRemoteRequestEmails = new Set<string>();
+  const approvedWorkAbroadRequestEmails = new Set<string>();
   const approvedRemoteWorkTypesByEmail = new Map<string, Set<string>>();
+  const approvedWorkAbroadCountriesByEmail = new Map<string, Set<string>>();
+  const approvedRemoteWorkDatesByEmailWeek = new Map<string, Set<string>>();
+  const approvedCoverageLabelsByEmailWeek = new Map<string, Set<string>>();
   const remoteWorkRequests: AttendanceRemoteWorkRequest[] = [];
+  const workAbroadRequests: AttendanceWorkAbroadRequest[] = [];
 
   // --- Index daily detail by email|week → DayDetail[] ---
   const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -596,11 +665,11 @@ export async function getAttendanceReport(
   ]);
 
   const ensureDailyEntry = (email: string, dateInput: Date | string) => {
-    const date = dateInput instanceof Date ? new Date(dateInput) : parseLocalDate(dateInput);
+    const date = dateInput instanceof Date ? new Date(dateInput.getTime()) : parseLocalDate(dateInput);
     const dateStr = toDateStr(date);
     const dayOfWeek = date.getDay();
     const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-    const monday = new Date(date);
+    const monday = new Date(date.getTime());
     monday.setDate(monday.getDate() + mondayOffset);
     const wk = toDateStr(monday);
     const key = `${email}|${wk}`;
@@ -623,6 +692,55 @@ export async function getAttendanceReport(
     return entry;
   };
 
+  const addValueToSetMap = (map: Map<string, Set<string>>, key: string, value: string) => {
+    const normalizedValue = value.trim();
+    if (!normalizedValue) return;
+    if (!map.has(key)) map.set(key, new Set());
+    map.get(key)!.add(normalizedValue);
+  };
+
+  const getWeekStartForDate = (dateInput: Date | string) => {
+    const date = dateInput instanceof Date ? new Date(dateInput.getTime()) : parseLocalDate(dateInput);
+    const dayOfWeek = date.getDay();
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monday = new Date(date.getTime());
+    monday.setDate(monday.getDate() + mondayOffset);
+    monday.setHours(0, 0, 0, 0);
+    return monday;
+  };
+
+  const getWeekKey = (email: string, weekStart: string) => `${email}|${weekStart}`;
+
+  const formatRemoteWorkTypes = (types?: Set<string>) => {
+    if (!types || types.size === 0) return '';
+    return ` (${[...types].sort((a, b) => a.localeCompare(b)).join(', ')})`;
+  };
+
+  const formatCoverageLabels = (labels?: Set<string>) => {
+    if (!labels || labels.size === 0) return '';
+    return [...labels].sort((a, b) => a.localeCompare(b)).join(' + ');
+  };
+
+  const createWeekCell = (
+    officeDays: number,
+    remoteDays: number,
+    ptoDays: number,
+    days: WeekCell['days'],
+  ): WeekCell => ({
+    officeDays,
+    remoteDays,
+    ptoDays,
+    days,
+    rawOfficeTarget: officeDaysRequired,
+    adjustedOfficeTarget: officeDaysRequired,
+    adjustedCompliant: officeDays >= officeDaysRequired,
+    isPtoExcused: false,
+    hasApprovedWfhCoverage: false,
+    wfhExceptionType: 'none',
+    approvedRemoteWeekdays: 0,
+    exceptionLabel: null,
+  });
+
   for (const r of dailyRows) {
     const email = r.EMAIL?.toLowerCase();
     if (!email) continue;
@@ -639,7 +757,7 @@ export async function getAttendanceReport(
     const dateStr = r.PTO_DATE.slice(0, 10);
     const dayOfWeek = d.getDay();
     const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-    const monday = new Date(d);
+    const monday = new Date(d.getTime());
     monday.setDate(monday.getDate() + mondayOffset);
     const wk = toDateStr(monday);
     const key = `${email}|${wk}`;
@@ -675,7 +793,7 @@ export async function getAttendanceReport(
     const isApprovedRemoteWork = approvalValue === 'YES' || approvalValue === 'APPROVED';
 
     if (email && isApprovedRemoteWork) {
-      approvedRemoteWorkEmails.add(email);
+      approvedRemoteRequestEmails.add(email);
     }
     const type = row.REMOTE_WORK_TYPE?.trim();
     if (email && type && isApprovedRemoteWork) {
@@ -701,6 +819,107 @@ export async function getAttendanceReport(
       managerApprovalReceived: row.MANAGER_APPROVAL_RECEIVED || null,
       managerName: row.MANAGER_NAME || null,
     });
+
+    if (!email || !isApprovedRemoteWork) continue;
+
+    const overlapStart = new Date(
+      Math.max(
+        startDate.getTime(),
+        (row.REMOTE_WORK_START_DATE instanceof Date ? row.REMOTE_WORK_START_DATE : new Date(row.REMOTE_WORK_START_DATE)).getTime(),
+      ),
+    );
+    const openEndedEnd = row.REMOTE_WORK_END_DATE instanceof Date
+      ? row.REMOTE_WORK_END_DATE
+      : row.REMOTE_WORK_END_DATE
+        ? new Date(row.REMOTE_WORK_END_DATE)
+        : endDate;
+    const overlapEnd = new Date(Math.min(endDate.getTime(), openEndedEnd.getTime()));
+    overlapStart.setHours(0, 0, 0, 0);
+    overlapEnd.setHours(0, 0, 0, 0);
+
+    if (overlapStart > overlapEnd) continue;
+
+    for (const current = new Date(overlapStart.getTime()); current <= overlapEnd; current.setDate(current.getDate() + 1)) {
+      const dayOfWeek = current.getDay();
+      if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+      const dateStr = toDateStr(current);
+      const weekStart = toDateStr(getWeekStartForDate(current));
+      const weekKey = getWeekKey(email, weekStart);
+      addValueToSetMap(approvedRemoteWorkDatesByEmailWeek, weekKey, dateStr);
+      addValueToSetMap(
+        approvedCoverageLabelsByEmailWeek,
+        weekKey,
+        `Temporary Remote Work${type ? ` (${type})` : ''}`,
+      );
+    }
+  }
+
+  for (const row of workAbroadRows) {
+    const email = row.EMAIL?.toLowerCase();
+    const approvalValue = (row.REQUEST_APPROVED || '').trim().toUpperCase();
+    const isApprovedWorkAbroad = approvalValue === 'YES' || approvalValue === 'APPROVED';
+    const countryOrProvince = row.COUNTRY_OR_PROVINCE?.trim();
+
+    if (email && isApprovedWorkAbroad) {
+      approvedWorkAbroadRequestEmails.add(email);
+    }
+    if (email && countryOrProvince && isApprovedWorkAbroad) {
+      if (!approvedWorkAbroadCountriesByEmail.has(email)) {
+        approvedWorkAbroadCountriesByEmail.set(email, new Set());
+      }
+      approvedWorkAbroadCountriesByEmail.get(email)!.add(countryOrProvince);
+    }
+
+    workAbroadRequests.push({
+      bambooRowId: row.BAMBOO_ROW_ID,
+      employeeId: row.EMPLOYEE_ID,
+      email: email || '',
+      employeeName: row.EMPLOYEE_NAME || email || 'Unknown',
+      department: row.DEPARTMENT || 'Unknown',
+      officeLocation: row.OFFICE_LOCATION || 'Unknown',
+      requestDate: row.REQUEST_DATE ? toDateStr(row.REQUEST_DATE) : null,
+      workAbroadStartDate: toDateStr(row.WORK_ABROAD_START_DATE),
+      workAbroadEndDate: row.WORK_ABROAD_END_DATE ? toDateStr(row.WORK_ABROAD_END_DATE) : null,
+      remoteWorkLocationAddress: row.REMOTE_WORK_LOCATION_ADDRESS || null,
+      countryOrProvince: row.COUNTRY_OR_PROVINCE || null,
+      reason: row.REASON || null,
+      workSchedule: row.WORK_SCHEDULE || null,
+      requestApproved: row.REQUEST_APPROVED || null,
+      approvedDeclinedBy: row.APPROVED_DECLINED_BY || null,
+    });
+
+    if (!email || !isApprovedWorkAbroad) continue;
+
+    const overlapStart = new Date(
+      Math.max(
+        startDate.getTime(),
+        (row.WORK_ABROAD_START_DATE instanceof Date ? row.WORK_ABROAD_START_DATE : new Date(row.WORK_ABROAD_START_DATE)).getTime(),
+      ),
+    );
+    const openEndedEnd = row.WORK_ABROAD_END_DATE instanceof Date
+      ? row.WORK_ABROAD_END_DATE
+      : row.WORK_ABROAD_END_DATE
+        ? new Date(row.WORK_ABROAD_END_DATE)
+        : endDate;
+    const overlapEnd = new Date(Math.min(endDate.getTime(), openEndedEnd.getTime()));
+    overlapStart.setHours(0, 0, 0, 0);
+    overlapEnd.setHours(0, 0, 0, 0);
+
+    if (overlapStart > overlapEnd) continue;
+
+    for (const current = new Date(overlapStart.getTime()); current <= overlapEnd; current.setDate(current.getDate() + 1)) {
+      const dayOfWeek = current.getDay();
+      if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+      const dateStr = toDateStr(current);
+      const weekStart = toDateStr(getWeekStartForDate(current));
+      const weekKey = getWeekKey(email, weekStart);
+      addValueToSetMap(approvedRemoteWorkDatesByEmailWeek, weekKey, dateStr);
+      addValueToSetMap(
+        approvedCoverageLabelsByEmailWeek,
+        weekKey,
+        `Work Abroad / Another Province${countryOrProvince ? ` (${countryOrProvince})` : ''}`,
+      );
+    }
   }
 
   for (const [key, days] of ptoWeekDates) {
@@ -713,11 +932,22 @@ export async function getAttendanceReport(
   }
 
   function getRemoteWorkStatusLabel(email: string): string {
-    const types = approvedRemoteWorkTypesByEmail.get(email);
-    if (!types || types.size === 0) {
-      return approvedRemoteWorkEmails.has(email) ? 'Approved Remote Work' : 'Standard Policy';
+    const hasStandingWfhPolicy = standingPolicyEmails.has(email);
+    const hasApprovedRemoteRequest = approvedRemoteRequestEmails.has(email);
+    const hasApprovedWorkAbroadRequest = approvedWorkAbroadRequestEmails.has(email);
+    const labels: string[] = [];
+    if (hasApprovedRemoteRequest) {
+      labels.push(`Temporary Remote Work${formatRemoteWorkTypes(approvedRemoteWorkTypesByEmail.get(email))}`);
     }
-    return `Approved (${[...types].sort((a, b) => a.localeCompare(b)).join(', ')})`;
+    if (hasApprovedWorkAbroadRequest) {
+      labels.push(`Work Abroad / Another Province${formatRemoteWorkTypes(approvedWorkAbroadCountriesByEmail.get(email))}`);
+    }
+    if (hasStandingWfhPolicy && labels.length > 0) {
+      return `Standing WFH Policy + ${labels.join(' + ')}`;
+    }
+    if (hasStandingWfhPolicy) return 'Standing WFH Policy';
+    if (labels.length > 0) return labels.join(' + ');
+    return 'Standard Policy';
   }
 
   // --- Index attendance by employee ---
@@ -725,6 +955,10 @@ export async function getAttendanceReport(
     name: string; department: string; managerName: string; managerEmail: string | null; officeLocation: string;
     hasActivTrakCoverage: boolean;
     approvedRemoteWorkRequest: boolean;
+    hasStandingWfhPolicy: boolean;
+    hasApprovedRemoteRequestInRange: boolean;
+    hasApprovedWorkAbroadRequestInRange: boolean;
+    hasAnyApprovedWfhCoverageInRange: boolean;
     remoteWorkStatusLabel: string;
     weeks: Record<string, WeekCell>;
   }>();
@@ -746,17 +980,21 @@ export async function getAttendanceReport(
         managerEmail: employeeMeta?.MANAGER_EMAIL || null,
         officeLocation: employeeMeta?.LOCATION || r.OFFICE_LOCATION || 'Unknown',
         hasActivTrakCoverage: employeeMeta ? employeeMeta.HAS_ACTIVTRAK_USER === 1 : true,
-        approvedRemoteWorkRequest: approvedRemoteWorkEmails.has(email),
+        approvedRemoteWorkRequest: approvedRemoteRequestEmails.has(email),
+        hasStandingWfhPolicy: standingPolicyEmails.has(email),
+        hasApprovedRemoteRequestInRange: approvedRemoteRequestEmails.has(email),
+        hasApprovedWorkAbroadRequestInRange: approvedWorkAbroadRequestEmails.has(email),
+        hasAnyApprovedWfhCoverageInRange: standingPolicyEmails.has(email) || approvedRemoteRequestEmails.has(email) || approvedWorkAbroadRequestEmails.has(email),
         remoteWorkStatusLabel: getRemoteWorkStatusLabel(email),
         weeks: {},
       });
     }
     const dailyDetails = dailyMap.get(`${email}|${wk}`) || [];
-    empWeeks.get(email)!.weeks[wk] = {
-      officeDays: r.OFFICE_DAYS || 0,
-      remoteDays: r.REMOTE_DAYS || 0,
-      ptoDays: ptoMap.get(`${email}|${wk}`) || 0,
-      days: dailyDetails.map((dd) => ({
+    empWeeks.get(email)!.weeks[wk] = createWeekCell(
+      r.OFFICE_DAYS || 0,
+      r.REMOTE_DAYS || 0,
+      ptoMap.get(`${email}|${wk}`) || 0,
+      dailyDetails.map((dd) => ({
         date: dd.date,
         dayLabel: dd.dayLabel,
         location: dd.location as 'Office' | 'Remote' | 'PTO' | 'Unknown',
@@ -764,7 +1002,7 @@ export async function getAttendanceReport(
         tbsReportedHours: dd.tbsReportedHours,
         activeHours: dd.activeHours,
       })),
-    };
+    );
   }
 
   for (const [key, ptoDays] of ptoMap) {
@@ -780,7 +1018,11 @@ export async function getAttendanceReport(
         managerEmail: employee?.MANAGER_EMAIL || null,
         officeLocation: employee?.LOCATION || 'Unknown',
         hasActivTrakCoverage: employee?.HAS_ACTIVTRAK_USER === 1,
-        approvedRemoteWorkRequest: approvedRemoteWorkEmails.has(email),
+        approvedRemoteWorkRequest: approvedRemoteRequestEmails.has(email),
+        hasStandingWfhPolicy: standingPolicyEmails.has(email),
+        hasApprovedRemoteRequestInRange: approvedRemoteRequestEmails.has(email),
+        hasApprovedWorkAbroadRequestInRange: approvedWorkAbroadRequestEmails.has(email),
+        hasAnyApprovedWfhCoverageInRange: standingPolicyEmails.has(email) || approvedRemoteRequestEmails.has(email) || approvedWorkAbroadRequestEmails.has(email),
         remoteWorkStatusLabel: getRemoteWorkStatusLabel(email),
         weeks: {},
       });
@@ -788,11 +1030,11 @@ export async function getAttendanceReport(
 
     const current = empWeeks.get(email)!.weeks[wk];
     const dailyDetails = dailyMap.get(`${email}|${wk}`) || [];
-    empWeeks.get(email)!.weeks[wk] = {
-      officeDays: current?.officeDays || 0,
-      remoteDays: current?.remoteDays || 0,
+    empWeeks.get(email)!.weeks[wk] = createWeekCell(
+      current?.officeDays || 0,
+      current?.remoteDays || 0,
       ptoDays,
-      days: dailyDetails.map((dd) => ({
+      dailyDetails.map((dd) => ({
         date: dd.date,
         dayLabel: dd.dayLabel,
         location: dd.location as 'Office' | 'Remote' | 'PTO' | 'Unknown',
@@ -800,7 +1042,7 @@ export async function getAttendanceReport(
         tbsReportedHours: dd.tbsReportedHours,
         activeHours: dd.activeHours,
       })),
-    };
+    );
   }
 
   // --- Seed employees with zero attendance (the "invisible absentees") ---
@@ -814,7 +1056,11 @@ export async function getAttendanceReport(
       managerEmail: emp.MANAGER_EMAIL || null,
       officeLocation: emp.LOCATION || 'Unknown',
       hasActivTrakCoverage: emp.HAS_ACTIVTRAK_USER === 1,
-      approvedRemoteWorkRequest: approvedRemoteWorkEmails.has(email),
+      approvedRemoteWorkRequest: approvedRemoteRequestEmails.has(email),
+      hasStandingWfhPolicy: standingPolicyEmails.has(email),
+      hasApprovedRemoteRequestInRange: approvedRemoteRequestEmails.has(email),
+      hasApprovedWorkAbroadRequestInRange: approvedWorkAbroadRequestEmails.has(email),
+      hasAnyApprovedWfhCoverageInRange: standingPolicyEmails.has(email) || approvedRemoteRequestEmails.has(email) || approvedWorkAbroadRequestEmails.has(email),
       remoteWorkStatusLabel: getRemoteWorkStatusLabel(email),
       weeks: {},
     });
@@ -824,11 +1070,11 @@ export async function getAttendanceReport(
   const now = new Date();
   const currentDow = now.getDay(); // 0=Sun
   const currentMondayOffset = currentDow === 0 ? -6 : 1 - currentDow;
-  const currentMonday = new Date(now);
+  const currentMonday = new Date(now.getTime());
   currentMonday.setDate(currentMonday.getDate() + currentMondayOffset);
   currentMonday.setHours(0, 0, 0, 0);
   const currentWeekStr = toDateStr(currentMonday);
-  const endWeek = new Date(endDate);
+  const endWeek = new Date(endDate.getTime());
   const endDow = endWeek.getDay();
   endWeek.setDate(endWeek.getDate() + (endDow === 0 ? -6 : 1 - endDow));
   endWeek.setHours(0, 0, 0, 0);
@@ -838,7 +1084,7 @@ export async function getAttendanceReport(
   // This ensures 16-week view always shows 16 columns regardless of data availability.
   const allIsoWeeks: string[] = [];
   {
-    const cur = new Date(startDate);
+    const cur = new Date(startDate.getTime());
     const dow = cur.getDay();
     cur.setDate(cur.getDate() + (dow === 0 ? -6 : 1 - dow)); // rewind to ISO Monday
     cur.setHours(0, 0, 0, 0);
@@ -854,6 +1100,21 @@ export async function getAttendanceReport(
   const completedDataWeeks = weeks.filter((w) => w !== currentWeekStr);
   const numCompletedWeeks = completedDataWeeks.length;
 
+  const getApprovedRemoteWeekdays = (email: string, weekStart: string) => (
+    approvedRemoteWorkDatesByEmailWeek.get(getWeekKey(email, weekStart))?.size ?? 0
+  );
+
+  const getWeekExceptionLabel = (email: string, weekStart: string, hasStandingWfhPolicy: boolean) => {
+    const labels = approvedCoverageLabelsByEmailWeek.get(getWeekKey(email, weekStart));
+    const hasTemporaryCoverage = getApprovedRemoteWeekdays(email, weekStart) > 0;
+    if (hasStandingWfhPolicy && hasTemporaryCoverage) {
+      return `Standing WFH Policy + ${formatCoverageLabels(labels)}`;
+    }
+    if (hasStandingWfhPolicy) return 'Standing WFH Policy';
+    if (hasTemporaryCoverage) return formatCoverageLabels(labels) || 'Approved Remote Coverage';
+    return null;
+  };
+
   // --- Build flat rows ---
   const rows: AttendanceRow[] = [];
   const deptSet = new Set<string>();
@@ -863,30 +1124,89 @@ export async function getAttendanceReport(
     let total = 0;          // all weeks including current (for Total column)
     let completedTotal = 0; // completed data weeks only (for Avg)
     let compliantWeekCount = 0;
-    let excusedWeekCount = 0;
+    let exemptWeekCount = 0;
+
+    for (const wk of weeks) {
+      const currentCell = data.weeks[wk];
+      const officeDays = currentCell?.officeDays ?? 0;
+      const remoteDays = currentCell?.remoteDays ?? 0;
+      const ptoDays = currentCell?.ptoDays ?? 0;
+      const days = currentCell?.days ?? [];
+      const availableDays = 5 - ptoDays;
+      const approvedRemoteWeekdays = getApprovedRemoteWeekdays(email, wk);
+      const hasStandingWfhPolicy = data.hasStandingWfhPolicy;
+      const hasApprovedWfhCoverage = data.hasActivTrakCoverage && (hasStandingWfhPolicy || approvedRemoteWeekdays > 0);
+      let wfhExceptionType: WfhExceptionType = 'none';
+      let adjustedOfficeTarget: number | null = officeDaysRequired;
+      let adjustedCompliant: boolean | null = officeDays >= officeDaysRequired;
+      let isPtoExcused = false;
+
+      if (!data.hasActivTrakCoverage) {
+        adjustedOfficeTarget = null;
+        adjustedCompliant = null;
+      } else {
+        let targetAfterWfh = officeDaysRequired;
+
+        if (hasStandingWfhPolicy) {
+          targetAfterWfh = 0;
+          wfhExceptionType = 'standing_policy';
+        } else if (approvedRemoteWeekdays > 0) {
+          targetAfterWfh = Math.max(0, officeDaysRequired - approvedRemoteWeekdays);
+          wfhExceptionType = targetAfterWfh === 0 ? 'temporary_full' : 'temporary_partial';
+        }
+
+        if (targetAfterWfh === 0) {
+          adjustedOfficeTarget = 0;
+          adjustedCompliant = true;
+        } else if (availableDays < targetAfterWfh) {
+          adjustedOfficeTarget = null;
+          adjustedCompliant = true;
+          isPtoExcused = true;
+        } else {
+          adjustedOfficeTarget = targetAfterWfh;
+          adjustedCompliant = officeDays >= targetAfterWfh;
+        }
+      }
+
+      if (hasApprovedWfhCoverage && adjustedOfficeTarget === 0) {
+        exemptWeekCount++;
+      }
+
+      data.weeks[wk] = {
+        officeDays,
+        remoteDays,
+        ptoDays,
+        days,
+        rawOfficeTarget: officeDaysRequired,
+        adjustedOfficeTarget,
+        adjustedCompliant,
+        isPtoExcused,
+        hasApprovedWfhCoverage,
+        wfhExceptionType,
+        approvedRemoteWeekdays,
+        exceptionLabel: getWeekExceptionLabel(email, wk, hasStandingWfhPolicy),
+      };
+    }
 
     // Total: sum over all display weeks (empty weeks contribute 0)
     for (const wk of weeks) {
       total += (data.weeks[wk]?.officeDays ?? 0);
     }
 
-    // Compliance + avg: only over completed data weeks (weeks with any actual records)
+    // Compliance + avg: only over completed data weeks
     for (const wk of completedDataWeeks) {
       const cell = data.weeks[wk];
       const officeDays = cell?.officeDays ?? 0;
       completedTotal += officeDays;
-      const ptoDays = cell?.ptoDays ?? 0;
-      const availableDays = 5 - ptoDays;
 
-      if (availableDays < officeDaysRequired) {
-        // Week excused: PTO left fewer working days than required
-        excusedWeekCount++;
-      } else if (officeDays >= officeDaysRequired) {
+      if (cell?.adjustedCompliant === true) {
         compliantWeekCount++;
       }
     }
 
-    const compliant = numCompletedWeeks > 0 && (compliantWeekCount + excusedWeekCount) === numCompletedWeeks;
+    const compliant = data.hasActivTrakCoverage
+      ? numCompletedWeeks > 0 && compliantWeekCount === numCompletedWeeks
+      : false;
 
     // Trend: compare last two completed data weeks
     let trend: 'up' | 'down' | 'flat' = 'flat';
@@ -909,12 +1229,17 @@ export async function getAttendanceReport(
       officeLocation: data.officeLocation,
       hasActivTrakCoverage: data.hasActivTrakCoverage,
       approvedRemoteWorkRequest: data.approvedRemoteWorkRequest,
+      hasStandingWfhPolicy: data.hasStandingWfhPolicy,
+      hasApprovedRemoteRequestInRange: data.hasApprovedRemoteRequestInRange,
+      hasApprovedWorkAbroadRequestInRange: data.hasApprovedWorkAbroadRequestInRange,
+      hasAnyApprovedWfhCoverageInRange: data.hasAnyApprovedWfhCoverageInRange,
       remoteWorkStatusLabel: data.remoteWorkStatusLabel,
       weeks: data.weeks,
       total,
       avgPerWeek: numCompletedWeeks > 0 ? Math.round((completedTotal / numCompletedWeeks) * 10) / 10 : 0,
       compliant,
       trend,
+      exemptWeekCount,
     });
   }
 
@@ -924,6 +1249,7 @@ export async function getAttendanceReport(
   let zeroOfficeDaysCount = 0;
   let sumCompletedOfficeDays = 0;
   let coveredEmployeesCount = 0;
+  let scoredEmployeesCount = 0;
   let unknownCoverageCount = 0;
   for (const r of rows) {
     if (!r.hasActivTrakCoverage) {
@@ -931,7 +1257,14 @@ export async function getAttendanceReport(
       continue;
     }
     coveredEmployeesCount++;
-    if (r.compliant) compliantCount++;
+    const hasScoredWeek = completedDataWeeks.some((wk) => {
+      const adjustedOfficeTarget = r.weeks[wk]?.adjustedOfficeTarget;
+      return adjustedOfficeTarget != null && adjustedOfficeTarget > 0;
+    });
+    if (hasScoredWeek) {
+      scoredEmployeesCount++;
+      if (r.compliant) compliantCount++;
+    }
     if (r.total === 0) zeroOfficeDaysCount++;
     for (const wk of completedDataWeeks) {
       sumCompletedOfficeDays += r.weeks[wk]?.officeDays ?? 0;
@@ -940,11 +1273,12 @@ export async function getAttendanceReport(
   const avgOfficeDays = coveredEmployeesCount > 0 && numCompletedWeeks > 0
     ? Math.round((sumCompletedOfficeDays / coveredEmployeesCount / numCompletedWeeks) * 10) / 10
     : 0;
-  const complianceRate = coveredEmployeesCount > 0 ? Math.round((compliantCount / coveredEmployeesCount) * 100) : 0;
+  const complianceRate = scoredEmployeesCount > 0 ? Math.round((compliantCount / scoredEmployeesCount) * 100) : 0;
 
   return {
     rows,
     remoteWorkRequests,
+    workAbroadRequests,
     weeks,
     dataWeeks: completedDataWeeks,
     currentWeek: isCurrentWeekInRange ? currentWeekStr : null,
@@ -1261,10 +1595,10 @@ export async function getTbsComparisonReport(
 
   // Generate all weekdays in range
   const allDays: Date[] = [];
-  const cur = new Date(startDate);
+  const cur = new Date(startDate.getTime());
   while (cur <= endDate) {
     const dow = cur.getDay();
-    if (dow !== 0 && dow !== 6) allDays.push(new Date(cur));
+    if (dow !== 0 && dow !== 6) allDays.push(new Date(cur.getTime()));
     cur.setDate(cur.getDate() + 1);
   }
 
@@ -1281,7 +1615,7 @@ export async function getTbsComparisonReport(
       const dateStr = toDateStr(day);
       const dow = day.getDay();
       const mondayOffset = dow === 0 ? -6 : 1 - dow;
-      const monday = new Date(day);
+      const monday = new Date(day.getTime());
       monday.setDate(monday.getDate() + mondayOffset);
       const wk = toDateStr(monday);
       weeksSet.add(wk);
@@ -1650,7 +1984,7 @@ export async function getWorkingHoursReport(
     const rangeStart = clampDate(record.START_DATE, startDate, endDate);
     const rangeEnd = clampDate(record.END_DATE, startDate, endDate);
 
-    for (const cursor = new Date(rangeStart); cursor <= rangeEnd; cursor.setDate(cursor.getDate() + 1)) {
+    for (const cursor = new Date(rangeStart.getTime()); cursor <= rangeEnd; cursor.setDate(cursor.getDate() + 1)) {
       const dayOfWeek = cursor.getDay();
       if (dayOfWeek === 0 || dayOfWeek === 6) continue;
 
@@ -1791,7 +2125,7 @@ function calculateWorkedVsReportedPct(
 }
 
 function toIsoWeekStart(date: Date | string): string {
-  const d = typeof date === 'string' ? new Date(`${date}T00:00:00`) : new Date(date);
+  const d = typeof date === 'string' ? new Date(`${date}T00:00:00`) : new Date(date.getTime());
   const dayOfWeek = d.getDay();
   const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
   d.setDate(d.getDate() + mondayOffset);
@@ -1883,9 +2217,9 @@ function getOrCreateWorkingHoursDay(
 }
 
 function clampDate(value: Date, min: Date, max: Date): Date {
-  const clamped = new Date(value);
-  if (clamped < min) return new Date(min);
-  if (clamped > max) return new Date(max);
+  const clamped = new Date(value.getTime());
+  if (clamped < min) return new Date(min.getTime());
+  if (clamped > max) return new Date(max.getTime());
   return clamped;
 }
 

@@ -236,6 +236,26 @@ export async function initializeSchema(): Promise<void> {
       )
     `);
     await safeExecuteDDL(conn, `
+      CREATE TABLE TL_WORK_ABROAD_REQUESTS (
+        BAMBOO_ROW_ID NUMBER PRIMARY KEY,
+        EMPLOYEE_ID VARCHAR2(50) NOT NULL,
+        EMAIL VARCHAR2(255),
+        EMPLOYEE_NAME VARCHAR2(255),
+        DEPARTMENT VARCHAR2(255),
+        REQUEST_DATE DATE,
+        WORK_ABROAD_START_DATE DATE NOT NULL,
+        WORK_ABROAD_END_DATE DATE,
+        REMOTE_WORK_LOCATION_ADDRESS VARCHAR2(4000),
+        COUNTRY_OR_PROVINCE VARCHAR2(255),
+        REASON VARCHAR2(4000),
+        WORK_SCHEDULE VARCHAR2(4000),
+        REQUEST_APPROVED VARCHAR2(100),
+        APPROVED_DECLINED_BY VARCHAR2(255),
+        CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UPDATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await safeExecuteDDL(conn, `
       CREATE TABLE TL_SYNC_LOG (
         ID NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         SYNC_TYPE VARCHAR2(50) NOT NULL,
@@ -308,6 +328,8 @@ export async function initializeSchema(): Promise<void> {
     await safeExecuteDDL(conn, `CREATE INDEX TL_PTO_DATE_IDX ON TL_TIME_OFF(START_DATE, END_DATE)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_RWR_EMAIL_IDX ON TL_REMOTE_WORK_REQUESTS(EMAIL)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_RWR_DATE_IDX ON TL_REMOTE_WORK_REQUESTS(REMOTE_WORK_START_DATE, REMOTE_WORK_END_DATE)`);
+    await safeExecuteDDL(conn, `CREATE INDEX TL_WAR_EMAIL_IDX ON TL_WORK_ABROAD_REQUESTS(EMAIL)`);
+    await safeExecuteDDL(conn, `CREATE INDEX TL_WAR_DATE_IDX ON TL_WORK_ABROAD_REQUESTS(WORK_ABROAD_START_DATE, WORK_ABROAD_END_DATE)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_EMP_DEPT_IDX ON TL_EMPLOYEES(DEPARTMENT)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_EMP_STATUS_IDX ON TL_EMPLOYEES(STATUS)`);
     await safeExecuteDDL(conn, `CREATE INDEX TL_TBS_MAP_EMAIL_IDX ON TL_TBS_EMPLOYEE_MAP(EMAIL)`);
@@ -718,6 +740,12 @@ export async function initializeSchema(): Promise<void> {
       );
       await conn.execute(
         `UPDATE TL_REMOTE_WORK_REQUESTS
+            SET EMAIL = :canonicalEmail
+          WHERE LOWER(EMAIL) = :sourceEmail`,
+        { sourceEmail, canonicalEmail },
+      );
+      await conn.execute(
+        `UPDATE TL_WORK_ABROAD_REQUESTS
             SET EMAIL = :canonicalEmail
           WHERE LOWER(EMAIL) = :sourceEmail`,
         { sourceEmail, canonicalEmail },

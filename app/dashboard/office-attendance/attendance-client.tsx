@@ -20,12 +20,13 @@ import {
   parsePageParam,
   type SearchParamReader,
 } from '@/lib/search-params';
-import type { AttendanceRemoteWorkRequest, AttendanceRow, AttendanceSummary, DayDetail, WeekCell } from '@/lib/types/attendance';
+import type { AttendanceRemoteWorkRequest, AttendanceRow, AttendanceSummary, AttendanceWorkAbroadRequest, DayDetail, WeekCell } from '@/lib/types/attendance';
 import { useUrlStateSync, type UrlStateField } from '@/lib/use-url-state-sync';
 
 interface Props {
   rows: AttendanceRow[];
   remoteWorkRequests: AttendanceRemoteWorkRequest[];
+  workAbroadRequests: AttendanceWorkAbroadRequest[];
   weeks: string[];
   /** Completed weeks with actual data — used for avg/compliance (subset of weeks) */
   dataWeeks?: string[];
@@ -41,6 +42,7 @@ type SortKey = 'name' | 'department' | 'officeLocation' | 'total' | 'avgPerWeek'
 type SortDir = 'asc' | 'desc';
 type ViewMode = OfficeAttendanceViewKey;
 type DateFilterMode = 'quick' | 'custom';
+type WfhFilterMode = 'all' | 'standard-only' | 'approved-only';
 const DEFAULT_EMPLOYEE_LOCATION = 'Quebec (Montreal Head Office)';
 
 function getInitialViewMode(searchParams: SearchParamReader): ViewMode {
@@ -64,6 +66,17 @@ function getDefaultLocationSelection(
   return locations.includes(DEFAULT_EMPLOYEE_LOCATION) ? [DEFAULT_EMPLOYEE_LOCATION] : [];
 }
 
+function getInitialWfhFilter(searchParams: SearchParamReader): WfhFilterMode {
+  const filter = searchParams.get('wfhFilter');
+  if (filter === 'standard-only' || filter === 'approved-only' || filter === 'all') {
+    return filter;
+  }
+  if (searchParams.get('approvedRemoteWork') === 'include') {
+    return 'all';
+  }
+  return 'all';
+}
+
 interface GroupRow {
   id: string;
   groupLabel: string;
@@ -75,14 +88,7 @@ interface GroupRow {
   managerEmail?: string | null;
   officeLocation: string;
   weeks: Record<string, WeekCell>;
-  weeklyCompliance: Record<string, {
-    compliantEmployees: number;
-    eligibleEmployees: number;
-    compliancePct: number;
-    compliantNames: string[];
-    nonCompliantNames: string[];
-    fullyRemoteNames: string[];
-  }>;
+  weeklyCompliance: Record<string, WeeklyCompliance>;
   total: number;
   avgPerWeek: number;
   scorePct: number;
@@ -96,6 +102,10 @@ interface DisplayRow {
   officeLocation: string;
   hasActivTrakCoverage: boolean;
   approvedRemoteWorkRequest: boolean;
+  hasStandingWfhPolicy: boolean;
+  hasApprovedRemoteRequestInRange: boolean;
+  hasApprovedWorkAbroadRequestInRange: boolean;
+  hasAnyApprovedWfhCoverageInRange: boolean;
   remoteWorkStatusLabel: string;
   weeks: Record<string, WeekCell>;
   total: number;
@@ -106,17 +116,11 @@ interface DisplayRow {
   quebecEmployeeCount?: number;
   remoteEmployeeCount?: number;
   unknownCoverageCount?: number;
-  weeklyCompliance?: Record<string, {
-    compliantEmployees: number;
-    eligibleEmployees: number;
-    compliancePct: number;
-    compliantNames: string[];
-    nonCompliantNames: string[];
-    fullyRemoteNames: string[];
-  }>;
+  weeklyCompliance?: Record<string, WeeklyCompliance>;
   managerName?: string;
   managerEmail?: string | null;
   email?: string;
+  exemptWeekCount?: number;
 }
 
 interface DetailState {
@@ -133,6 +137,41 @@ interface CalendarMonth {
   } | null>;
 }
 
+interface WeeklyCompliance {
+  compliantEmployees: number;
+  eligibleEmployees: number;
+  exemptEmployees: number;
+  excusedEmployees: number;
+  unknownEmployees: number;
+  compliancePct: number;
+  compliantNames: string[];
+  nonCompliantNames: string[];
+  exemptNames: string[];
+  excusedNames: string[];
+}
+
+interface ApprovalRequestRow {
+  source: 'remote-work' | 'work-abroad';
+  sourceLabel: string;
+  bambooRowId: number;
+  employeeId: string;
+  employeeName: string;
+  email: string;
+  department: string;
+  officeLocation: string;
+  requestDate: string | null;
+  startDate: string;
+  endDate: string | null;
+  category: string | null;
+  approvalStatus: string | null;
+  approver: string | null;
+  reason: string | null;
+  address: string | null;
+  schedule: string | null;
+  supportingDocumentationSubmitted: string | null;
+  alternateInOfficeWorkDate: string | null;
+}
+
 const PAGE_SIZE = 50;
 const UNKNOWN_DISPLAY_VALUE = '—';
 
@@ -142,23 +181,61 @@ function parseLocalDate(s: string): Date {
   return new Date(y!, m! - 1, d!);
 }
 
-function getCellColor(officeDays: number, ptoDays: number): string {
-  if (ptoDays > 0 && officeDays < OFFICE_DAYS_REQUIRED) return CELL_COLORS.pto;
-  if (officeDays >= OFFICE_DAYS_REQUIRED) return CELL_COLORS.compliant;
-  if (officeDays >= 1) return CELL_COLORS.partial;
+function getEmployeeCellColor(cell?: WeekCell): string {
+  if (cell?.isPtoExcused) return CELL_COLORS.pto;
+  if (cell?.adjustedCompliant) return CELL_COLORS.compliant;
+  if ((cell?.officeDays ?? 0) >= 1) return CELL_COLORS.partial;
   return CELL_COLORS.absent;
 }
 
-function getCellHex(officeDays: number, ptoDays: number): string {
-  if (ptoDays > 0 && officeDays < OFFICE_DAYS_REQUIRED) return CELL_HEX.pto;
-  if (officeDays >= OFFICE_DAYS_REQUIRED) return CELL_HEX.compliant;
-  if (officeDays >= 1) return CELL_HEX.partial;
+function getEmployeeCellHex(cell?: WeekCell): string {
+  if (cell?.isPtoExcused) return CELL_HEX.pto;
+  if (cell?.adjustedCompliant) return CELL_HEX.compliant;
+  if ((cell?.officeDays ?? 0) >= 1) return CELL_HEX.partial;
   return CELL_HEX.absent;
 }
 
+function formatEmployeeWeekValue(cell: WeekCell | undefined, isKnown: boolean): string {
+  if (!isKnown) return UNKNOWN_DISPLAY_VALUE;
+  const officeDays = cell?.officeDays ?? 0;
+  return `${officeDays}${cell?.hasApprovedWfhCoverage ? '*' : ''}`;
+}
+
+function createEmptyWeeklyCompliance(): WeeklyCompliance {
+  return {
+    compliantEmployees: 0,
+    eligibleEmployees: 0,
+    exemptEmployees: 0,
+    excusedEmployees: 0,
+    unknownEmployees: 0,
+    compliancePct: 0,
+    compliantNames: [],
+    nonCompliantNames: [],
+    exemptNames: [],
+    excusedNames: [],
+  };
+}
+
+function createEmptyWeekCell(): WeekCell {
+  return {
+    officeDays: 0,
+    remoteDays: 0,
+    ptoDays: 0,
+    days: [],
+    rawOfficeTarget: OFFICE_DAYS_REQUIRED,
+    adjustedOfficeTarget: OFFICE_DAYS_REQUIRED,
+    adjustedCompliant: false,
+    isPtoExcused: false,
+    hasApprovedWfhCoverage: false,
+    wfhExceptionType: 'none',
+    approvedRemoteWeekdays: 0,
+    exceptionLabel: null,
+  };
+}
+
 function getWeekPointCapacity(cell?: WeekCell): number {
-  const ptoDays = cell?.ptoDays ?? 0;
-  return Math.max(0, Math.min(OFFICE_DAYS_REQUIRED, 5 - ptoDays));
+  const adjustedOfficeTarget = cell?.adjustedOfficeTarget;
+  return adjustedOfficeTarget == null ? 0 : Math.max(0, adjustedOfficeTarget);
 }
 
 function getWeekPoints(cell?: WeekCell): number {
@@ -169,13 +246,30 @@ function getWeekPoints(cell?: WeekCell): number {
 function calculateScorePct(weeksByKey: Record<string, WeekCell>, scopedWeeks: string[]): number {
   let earned = 0;
   let capacity = 0;
+  let hadMeasuredWeek = false;
+  let allMeasuredWeeksCompliant = true;
   for (const week of scopedWeeks) {
     const cell = weeksByKey[week];
+    if (cell?.adjustedCompliant !== null && cell?.adjustedCompliant !== undefined) {
+      hadMeasuredWeek = true;
+      if (cell.adjustedCompliant === false) allMeasuredWeeksCompliant = false;
+    }
     earned += getWeekPoints(cell);
     capacity += getWeekPointCapacity(cell);
   }
-  if (capacity <= 0) return 0;
+  if (capacity <= 0) return hadMeasuredWeek && allMeasuredWeeksCompliant ? 100 : 0;
   return Math.round((earned / capacity) * 100);
+}
+
+function hasEligibleEmployeeWeek(row: Pick<AttendanceRow, 'weeks'>, scopedWeeks: string[]): boolean {
+  return scopedWeeks.some((week) => {
+    const adjustedOfficeTarget = row.weeks[week]?.adjustedOfficeTarget;
+    return adjustedOfficeTarget != null && adjustedOfficeTarget > 0;
+  });
+}
+
+function hasEligibleGroupWeek(row: Pick<GroupRow, 'weeklyCompliance'>, scopedWeeks: string[]): boolean {
+  return scopedWeeks.some((week) => (row.weeklyCompliance[week]?.eligibleEmployees ?? 0) > 0);
 }
 
 function scoreTone(scorePct: number): string {
@@ -259,7 +353,7 @@ function formatDayLabel(date: string): string {
 
 function getWeekLabel(week: string): string {
   const start = parseLocalDate(week);
-  const end = new Date(start);
+  const end = new Date(start.getTime());
   end.setDate(start.getDate() + 4);
   return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
 }
@@ -309,6 +403,7 @@ function getMonthCalendarDays(monthDate: Date): Array<Date | null> {
 export function AttendanceClient({
   rows,
   remoteWorkRequests,
+  workAbroadRequests,
   weeks,
   dataWeeks,
   currentWeek = null,
@@ -326,7 +421,7 @@ export function AttendanceClient({
   const [search, setSearch] = useState(() => searchParams.get('q') || '');
   const [selectedDepts, setSelectedDepts] = useState<string[]>(() => parseListParam(searchParams.get('departments')));
   const [selectedLocs, setSelectedLocs] = useState<string[]>(() => getDefaultLocationSelection(viewMode, searchParams, locations));
-  const [includeApprovedRemoteWork, setIncludeApprovedRemoteWork] = useState(() => searchParams.get('approvedRemoteWork') === 'include');
+  const [wfhFilter, setWfhFilter] = useState<WfhFilterMode>(() => getInitialWfhFilter(searchParams));
   const [deptOpen, setDeptOpen] = useState(false);
   const [locOpen, setLocOpen] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>(() => searchParams.get('sortKey') || 'name');
@@ -387,17 +482,16 @@ export function AttendanceClient({
       equals: (current, next) => arraysEqual(current as string[], next as string[]),
     },
     {
-      current: includeApprovedRemoteWork,
-      read: (params) => params.get('approvedRemoteWork') === 'include',
+      current: wfhFilter,
+      read: (params) => getInitialWfhFilter(params),
       sync: (nextValue) => {
-        const nextIncludeApprovedRemoteWork = nextValue as boolean;
-        setIncludeApprovedRemoteWork((previous) => (
-          previous === nextIncludeApprovedRemoteWork ? previous : nextIncludeApprovedRemoteWork
-        ));
+        const nextWfhFilter = nextValue as WfhFilterMode;
+        setWfhFilter((previous) => (previous === nextWfhFilter ? previous : nextWfhFilter));
       },
       write: (params) => {
-        if (includeApprovedRemoteWork) params.set('approvedRemoteWork', 'include');
-        else params.delete('approvedRemoteWork');
+        if (wfhFilter !== 'all') params.set('wfhFilter', wfhFilter);
+        else params.delete('wfhFilter');
+        params.delete('approvedRemoteWork');
         params.delete('remoteWork');
       },
     },
@@ -438,7 +532,6 @@ export function AttendanceClient({
       },
     },
   ]), [
-    includeApprovedRemoteWork,
     locations,
     page,
     search,
@@ -447,6 +540,7 @@ export function AttendanceClient({
     sortDir,
     sortKey,
     viewMode,
+    wfhFilter,
   ]);
   const buildStateParams = useUrlStateSync({
     pathname,
@@ -599,7 +693,7 @@ export function AttendanceClient({
     Boolean(search) ||
     selectedDepts.length > 0 ||
     selectedLocs.length > 0 ||
-    includeApprovedRemoteWork;
+    (!isAggregateView && !isApprovedRemoteWorkView && wfhFilter !== 'all');
   const quickRangeChanged =
     quickRangeDraft !== String(activeLookbackWeeks ?? DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS)
     || appliedDateFilterMode !== 'quick';
@@ -620,9 +714,13 @@ export function AttendanceClient({
       list = list.filter((r) => locSet.has(r.officeLocation));
     }
     if (isApprovedRemoteWorkView) {
-      list = list.filter((r) => r.approvedRemoteWorkRequest);
-    } else if (!isAggregateView && !includeApprovedRemoteWork) {
-      list = list.filter((r) => !r.approvedRemoteWorkRequest);
+      list = list.filter((r) => r.hasAnyApprovedWfhCoverageInRange);
+    } else if (!isAggregateView) {
+      if (wfhFilter === 'standard-only') {
+        list = list.filter((r) => !r.hasAnyApprovedWfhCoverageInRange);
+      } else if (wfhFilter === 'approved-only') {
+        list = list.filter((r) => r.hasAnyApprovedWfhCoverageInRange);
+      }
     }
     if (search) {
       const q = search.toLowerCase();
@@ -635,7 +733,7 @@ export function AttendanceClient({
       );
     }
     return list;
-  }, [includeApprovedRemoteWork, isApprovedRemoteWorkView, isAggregateView, rows, search, selectedDepts, selectedLocs]);
+  }, [isApprovedRemoteWorkView, isAggregateView, rows, search, selectedDepts, selectedLocs, wfhFilter]);
 
   const groupedRows = useMemo<GroupRow[]>(() => {
     const grouped = new Map<string, GroupRow>();
@@ -645,15 +743,15 @@ export function AttendanceClient({
     const addEmployeeToGroup = (group: GroupRow, row: AttendanceRow) => {
       const isQuebecEmployee = row.officeLocation === DEFAULT_EMPLOYEE_LOCATION;
       const hasCoverage = row.hasActivTrakCoverage;
-      const isEligibleEmployee = isQuebecEmployee && !row.approvedRemoteWorkRequest && hasCoverage;
 
       group.employeeCount += 1;
-      if (isEligibleEmployee) {
+      if (isQuebecEmployee && hasCoverage) {
         group.quebecEmployeeCount += 1;
         group.total += row.total;
-      } else if (isQuebecEmployee && !row.approvedRemoteWorkRequest && !hasCoverage) {
+      } else if (isQuebecEmployee && !hasCoverage) {
         group.unknownCoverageCount += 1;
-      } else {
+      }
+      if (!isQuebecEmployee || row.hasAnyApprovedWfhCoverageInRange) {
         group.remoteEmployeeCount += 1;
       }
       if (group.officeLocation !== row.officeLocation) {
@@ -663,39 +761,50 @@ export function AttendanceClient({
       for (const week of weeks) {
         const cell = row.weeks[week];
         if (!group.weeklyCompliance[week]) {
-          group.weeklyCompliance[week] = {
-            compliantEmployees: 0,
-            eligibleEmployees: 0,
-            compliancePct: 0,
-            compliantNames: [],
-            nonCompliantNames: [],
-            fullyRemoteNames: [],
-          };
+          group.weeklyCompliance[week] = createEmptyWeeklyCompliance();
         }
+        const compliance = group.weeklyCompliance[week]!;
 
-        if (!isEligibleEmployee) {
-          group.weeklyCompliance[week]!.fullyRemoteNames.push(row.name);
+        if (!isQuebecEmployee) {
           continue;
         }
 
-        group.weeklyCompliance[week]!.eligibleEmployees += 1;
-        if ((cell?.officeDays ?? 0) >= OFFICE_DAYS_REQUIRED) {
-          group.weeklyCompliance[week]!.compliantEmployees += 1;
-          group.weeklyCompliance[week]!.compliantNames.push(row.name);
-        } else {
-          group.weeklyCompliance[week]!.nonCompliantNames.push(row.name);
+        if (!hasCoverage) {
+          compliance.unknownEmployees += 1;
+          continue;
         }
 
-        const current = group.weeks[week] || {
-          officeDays: 0,
-          remoteDays: 0,
-          ptoDays: 0,
-          days: [],
-        };
-        current.officeDays += cell?.officeDays ?? 0;
-        current.remoteDays += cell?.remoteDays ?? 0;
-        current.ptoDays += cell?.ptoDays ?? 0;
+        const weekCell = cell || createEmptyWeekCell();
+        const current = group.weeks[week] || createEmptyWeekCell();
+        current.officeDays += weekCell.officeDays ?? 0;
+        current.remoteDays += weekCell.remoteDays ?? 0;
+        current.ptoDays += weekCell.ptoDays ?? 0;
         group.weeks[week] = current;
+
+        if (weekCell.adjustedOfficeTarget === 0 && weekCell.hasApprovedWfhCoverage) {
+          compliance.exemptEmployees += 1;
+          compliance.exemptNames.push(row.name);
+          continue;
+        }
+
+        if (weekCell.isPtoExcused) {
+          compliance.excusedEmployees += 1;
+          compliance.excusedNames.push(row.name);
+          continue;
+        }
+
+        if (weekCell.adjustedCompliant === null) {
+          compliance.unknownEmployees += 1;
+          continue;
+        }
+
+        compliance.eligibleEmployees += 1;
+        if (weekCell.adjustedCompliant) {
+          compliance.compliantEmployees += 1;
+          compliance.compliantNames.push(row.name);
+        } else {
+          compliance.nonCompliantNames.push(row.name);
+        }
       }
     };
 
@@ -756,16 +865,9 @@ export function AttendanceClient({
           group.remoteEmployeeCount += 1;
           for (const week of weeks) {
             if (!group.weeklyCompliance[week]) {
-              group.weeklyCompliance[week] = {
-                compliantEmployees: 0,
-                eligibleEmployees: 0,
-                compliancePct: 0,
-                compliantNames: [],
-                nonCompliantNames: [],
-                fullyRemoteNames: [],
-              };
+              group.weeklyCompliance[week] = createEmptyWeeklyCompliance();
             }
-            group.weeklyCompliance[week]!.fullyRemoteNames.push(group.groupLabel);
+            group.weeklyCompliance[week]!.exemptNames.push(group.groupLabel);
           }
         }
         grouped.set(key, group);
@@ -774,35 +876,35 @@ export function AttendanceClient({
 
     return [...grouped.values()].map((row) => {
       for (const week of weeks) {
-        const compliance = row.weeklyCompliance[week] || {
-          compliantEmployees: 0,
-          eligibleEmployees: 0,
-          compliancePct: 0,
-          compliantNames: [],
-          nonCompliantNames: [],
-          fullyRemoteNames: [],
-        };
+        const compliance = row.weeklyCompliance[week] || createEmptyWeeklyCompliance();
         compliance.compliancePct = compliance.eligibleEmployees > 0
           ? Math.round((compliance.compliantEmployees / compliance.eligibleEmployees) * 100)
           : 0;
         compliance.compliantNames.sort((a, b) => a.localeCompare(b));
         compliance.nonCompliantNames.sort((a, b) => a.localeCompare(b));
-        compliance.fullyRemoteNames.sort((a, b) => a.localeCompare(b));
+        compliance.exemptNames.sort((a, b) => a.localeCompare(b));
+        compliance.excusedNames.sort((a, b) => a.localeCompare(b));
         row.weeklyCompliance[week] = compliance;
       }
 
       const avgPerWeek = scoredWeeks.length > 0
         ? Math.round((row.total / Math.max(1, row.quebecEmployeeCount) / scoredWeeks.length) * 10) / 10
         : 0;
-      const scorePct = scoredWeeks.length > 0
+      const measuredWeeks = scoredWeeks.filter((week) => (row.weeklyCompliance[week]?.eligibleEmployees ?? 0) > 0);
+      const neutralOnlyWeeks = scoredWeeks.filter((week) => {
+        const compliance = row.weeklyCompliance[week];
+        return (compliance?.eligibleEmployees ?? 0) === 0
+          && (((compliance?.exemptEmployees ?? 0) > 0) || ((compliance?.excusedEmployees ?? 0) > 0));
+      });
+      const scorePct = measuredWeeks.length > 0
         ? Math.round(
-          scoredWeeks.reduce((sum, week) => sum + (row.weeklyCompliance[week]?.compliancePct ?? 0), 0) / scoredWeeks.length,
+          measuredWeeks.reduce((sum, week) => sum + (row.weeklyCompliance[week]?.compliancePct ?? 0), 0) / measuredWeeks.length,
         )
-        : 0;
+        : (neutralOnlyWeeks.length > 0 ? 100 : 0);
       let trend: 'up' | 'down' | 'flat' = 'flat';
-      if (scoredWeeks.length >= 2) {
-        const prevWeek = scoredWeeks[scoredWeeks.length - 2]!;
-        const lastWeek = scoredWeeks[scoredWeeks.length - 1]!;
+      if (measuredWeeks.length >= 2) {
+        const prevWeek = measuredWeeks[measuredWeeks.length - 2]!;
+        const lastWeek = measuredWeeks[measuredWeeks.length - 1]!;
         const prevCompliance = row.weeklyCompliance[prevWeek]?.compliancePct ?? 0;
         const lastCompliance = row.weeklyCompliance[lastWeek]?.compliancePct ?? 0;
         if (lastCompliance > prevCompliance) trend = 'up';
@@ -825,6 +927,10 @@ export function AttendanceClient({
       officeLocation: row.officeLocation,
       hasActivTrakCoverage: row.hasActivTrakCoverage,
       approvedRemoteWorkRequest: row.approvedRemoteWorkRequest,
+      hasStandingWfhPolicy: row.hasStandingWfhPolicy,
+      hasApprovedRemoteRequestInRange: row.hasApprovedRemoteRequestInRange,
+      hasApprovedWorkAbroadRequestInRange: row.hasApprovedWorkAbroadRequestInRange,
+      hasAnyApprovedWfhCoverageInRange: row.hasAnyApprovedWfhCoverageInRange,
       remoteWorkStatusLabel: row.remoteWorkStatusLabel,
       weeks: row.weeks,
       total: row.total,
@@ -834,6 +940,7 @@ export function AttendanceClient({
       managerName: row.managerName,
       managerEmail: row.managerEmail,
       email: row.email,
+      exemptWeekCount: row.exemptWeekCount,
     }));
 
     const aggregateDisplayRows: DisplayRow[] = groupedRows.map((row) => ({
@@ -843,17 +950,27 @@ export function AttendanceClient({
       officeLocation: row.officeLocation,
       hasActivTrakCoverage: true,
       approvedRemoteWorkRequest: false,
+      hasStandingWfhPolicy: false,
+      hasApprovedRemoteRequestInRange: false,
+      hasApprovedWorkAbroadRequestInRange: false,
+      hasAnyApprovedWfhCoverageInRange: false,
       remoteWorkStatusLabel: '—',
       weeks: Object.fromEntries(
         weeks.map((week) => {
-          const cell = row.weeks[week];
           const compliance = row.weeklyCompliance[week];
-          const employeeCount = Math.max(1, row.quebecEmployeeCount);
           return [week, {
             officeDays: compliance?.compliancePct ?? 0,
             remoteDays: compliance?.compliantEmployees ?? 0,
             ptoDays: compliance?.eligibleEmployees ?? 0,
             days: [],
+            rawOfficeTarget: OFFICE_DAYS_REQUIRED,
+            adjustedOfficeTarget: OFFICE_DAYS_REQUIRED,
+            adjustedCompliant: (compliance?.compliancePct ?? 0) >= 100,
+            isPtoExcused: false,
+            hasApprovedWfhCoverage: false,
+            wfhExceptionType: 'none',
+            approvedRemoteWeekdays: 0,
+            exceptionLabel: null,
           }];
         }),
       ),
@@ -866,6 +983,7 @@ export function AttendanceClient({
       remoteEmployeeCount: row.remoteEmployeeCount,
       unknownCoverageCount: row.unknownCoverageCount,
       weeklyCompliance: row.weeklyCompliance,
+      exemptWeekCount: 0,
     }));
 
     return isAggregateView ? aggregateDisplayRows : employeeRows;
@@ -924,11 +1042,12 @@ export function AttendanceClient({
 
   const filteredSummary = useMemo(() => {
     const totalEmployees = filtered.length;
-    const totalGroups = groupedRows.length;
     const numCompletedWeeks = scoredWeeks.length;
     const totalEligibleQuebecEmployees = groupedRows.reduce((sum, row) => sum + row.quebecEmployeeCount, 0);
     const unknownCoverageCount = filtered.filter((row) => !row.hasActivTrakCoverage).length;
-    const measurableEmployees = Math.max(0, totalEmployees - unknownCoverageCount);
+    const measurableEmployees = filtered.filter((row) => row.hasActivTrakCoverage && hasEligibleEmployeeWeek(row, scoredWeeks)).length;
+    const measurableGroups = groupedRows.filter((row) => hasEligibleGroupWeek(row, scoredWeeks)).length;
+    const coveredEmployees = Math.max(0, totalEmployees - unknownCoverageCount);
     let zeroCount = 0;
     let sumOfficeDays = 0;
     let sumScorePct = 0;
@@ -936,7 +1055,9 @@ export function AttendanceClient({
     if (isAggregateView) {
       for (const row of groupedRows) {
         if (row.total === 0) zeroCount++;
-        sumScorePct += row.scorePct;
+        if (hasEligibleGroupWeek(row, scoredWeeks)) {
+          sumScorePct += row.scorePct;
+        }
         for (const week of scoredWeeks) {
           sumOfficeDays += row.weeks[week]?.officeDays ?? 0;
         }
@@ -945,24 +1066,26 @@ export function AttendanceClient({
       for (const row of filtered) {
         if (!row.hasActivTrakCoverage) continue;
         if (row.total === 0) zeroCount++;
-        sumScorePct += calculateScorePct(row.weeks, scoredWeeks);
+        if (hasEligibleEmployeeWeek(row, scoredWeeks)) {
+          sumScorePct += calculateScorePct(row.weeks, scoredWeeks);
+        }
         for (const week of scoredWeeks) {
           sumOfficeDays += row.weeks[week]?.officeDays ?? 0;
         }
       }
     }
 
-    const avgOfficeDays = (isAggregateView ? totalEligibleQuebecEmployees : measurableEmployees) > 0 && numCompletedWeeks > 0
-      ? Math.round((sumOfficeDays / Math.max(1, isAggregateView ? totalEligibleQuebecEmployees : measurableEmployees) / numCompletedWeeks) * 10) / 10
+    const avgOfficeDays = (isAggregateView ? totalEligibleQuebecEmployees : coveredEmployees) > 0 && numCompletedWeeks > 0
+      ? Math.round((sumOfficeDays / Math.max(1, isAggregateView ? totalEligibleQuebecEmployees : coveredEmployees) / numCompletedWeeks) * 10) / 10
       : 0;
-    const complianceRate = (isAggregateView ? totalGroups : measurableEmployees) > 0
-      ? Math.round(sumScorePct / Math.max(1, isAggregateView ? totalGroups : measurableEmployees))
+    const complianceRate = (isAggregateView ? measurableGroups : measurableEmployees) > 0
+      ? Math.round(sumScorePct / Math.max(1, isAggregateView ? measurableGroups : measurableEmployees))
       : 0;
     const zeroOfficeDepartments = groupedRows.filter((row) => row.total === 0 && row.quebecEmployeeCount > 0).length;
 
     return {
       totalEmployees,
-      totalDepartments: totalGroups,
+      totalDepartments: groupedRows.length,
       measurableEmployees,
       unknownCoverageCount,
       avgOfficeDays,
@@ -986,8 +1109,10 @@ export function AttendanceClient({
       const q = search.toLowerCase();
       list = list.filter((request) =>
         request.employeeName.toLowerCase().includes(q) ||
+        request.email.toLowerCase().includes(q) ||
         request.department.toLowerCase().includes(q) ||
         (request.remoteWorkType || '').toLowerCase().includes(q) ||
+        (request.reason || '').toLowerCase().includes(q) ||
         (request.managerName || '').toLowerCase().includes(q),
       );
     }
@@ -1002,30 +1127,112 @@ export function AttendanceClient({
     return list;
   }, [remoteWorkRequests, search, selectedDepts, selectedLocs, sortDir]);
 
-  const remoteWorkSummary = useMemo(() => {
-    const uniqueEmployees = new Set(filteredRemoteWorkRequests.map((request) => request.email || request.employeeId));
-    const permanentRequests = filteredRemoteWorkRequests.filter((request) => (request.remoteWorkType || '').toLowerCase() === 'permanent').length;
-    const alternateOfficeDates = filteredRemoteWorkRequests.filter((request) =>
-      request.alternateInOfficeWorkDate &&
-      request.alternateInOfficeWorkDate !== 'Not Applicable',
-    ).length;
-    return {
-      totalRequests: filteredRemoteWorkRequests.length,
-      uniqueEmployees: uniqueEmployees.size,
-      permanentRequests,
-      alternateOfficeDates,
-    };
-  }, [filteredRemoteWorkRequests]);
+  const filteredWorkAbroadRequests = useMemo(() => {
+    let list = [...workAbroadRequests];
+    if (selectedDepts.length > 0) {
+      const deptSet = new Set(selectedDepts);
+      list = list.filter((request) => deptSet.has(request.department));
+    }
+    if (selectedLocs.length > 0) {
+      const locSet = new Set(selectedLocs);
+      list = list.filter((request) => locSet.has(request.officeLocation));
+    }
+    if (search) {
+      const q = search.toLowerCase();
+      list = list.filter((request) =>
+        request.employeeName.toLowerCase().includes(q) ||
+        request.email.toLowerCase().includes(q) ||
+        request.department.toLowerCase().includes(q) ||
+        (request.countryOrProvince || '').toLowerCase().includes(q) ||
+        (request.reason || '').toLowerCase().includes(q) ||
+        (request.approvedDeclinedBy || '').toLowerCase().includes(q) ||
+        (request.remoteWorkLocationAddress || '').toLowerCase().includes(q),
+      );
+    }
+    list.sort((a, b) => {
+      const aDate = a.workAbroadStartDate;
+      const bDate = b.workAbroadStartDate;
+      if (sortDir === 'asc') {
+        return aDate.localeCompare(bDate) || a.employeeName.localeCompare(b.employeeName);
+      }
+      return bDate.localeCompare(aDate) || a.employeeName.localeCompare(b.employeeName);
+    });
+    return list;
+  }, [workAbroadRequests, search, selectedDepts, selectedLocs, sortDir]);
 
-  const activeRowsCount = isApprovedRemoteWorkView ? filteredRemoteWorkRequests.length : sorted.length;
+  const requestSummary = useMemo(() => {
+    const allRequests = [
+      ...filteredRemoteWorkRequests.map((request) => request.email || request.employeeId),
+      ...filteredWorkAbroadRequests.map((request) => request.email || request.employeeId),
+    ];
+    const uniqueEmployees = new Set(allRequests);
+    return {
+      totalRequests: filteredRemoteWorkRequests.length + filteredWorkAbroadRequests.length,
+      uniqueEmployees: uniqueEmployees.size,
+      remoteWorkRequests: filteredRemoteWorkRequests.length,
+      workAbroadRequests: filteredWorkAbroadRequests.length,
+    };
+  }, [filteredRemoteWorkRequests, filteredWorkAbroadRequests]);
+
+  const combinedApprovalRequests = useMemo<ApprovalRequestRow[]>(() => ([
+    ...filteredRemoteWorkRequests.map((request) => ({
+      source: 'remote-work' as const,
+      sourceLabel: 'Remote Work',
+      bambooRowId: request.bambooRowId,
+      employeeId: request.employeeId,
+      employeeName: request.employeeName,
+      email: request.email,
+      department: request.department,
+      officeLocation: request.officeLocation,
+      requestDate: request.requestDate,
+      startDate: request.remoteWorkStartDate,
+      endDate: request.remoteWorkEndDate,
+      category: request.remoteWorkType,
+      approvalStatus: request.managerApprovalReceived,
+      approver: request.managerName,
+      reason: request.reason,
+      address: null,
+      schedule: null,
+      supportingDocumentationSubmitted: request.supportingDocumentationSubmitted,
+      alternateInOfficeWorkDate: request.alternateInOfficeWorkDate,
+    })),
+    ...filteredWorkAbroadRequests.map((request) => ({
+      source: 'work-abroad' as const,
+      sourceLabel: 'Work Abroad / Province',
+      bambooRowId: request.bambooRowId,
+      employeeId: request.employeeId,
+      employeeName: request.employeeName,
+      email: request.email,
+      department: request.department,
+      officeLocation: request.officeLocation,
+      requestDate: request.requestDate,
+      startDate: request.workAbroadStartDate,
+      endDate: request.workAbroadEndDate,
+      category: request.countryOrProvince,
+      approvalStatus: request.requestApproved,
+      approver: request.approvedDeclinedBy,
+      reason: request.reason,
+      address: request.remoteWorkLocationAddress,
+      schedule: request.workSchedule,
+      supportingDocumentationSubmitted: null,
+      alternateInOfficeWorkDate: null,
+    })),
+  ]).sort((a, b) => {
+    if (sortDir === 'asc') {
+      return a.startDate.localeCompare(b.startDate) || a.employeeName.localeCompare(b.employeeName);
+    }
+    return b.startDate.localeCompare(a.startDate) || a.employeeName.localeCompare(b.employeeName);
+  }), [filteredRemoteWorkRequests, filteredWorkAbroadRequests, sortDir]);
+  const hasRequestResults = filteredRemoteWorkRequests.length > 0 || filteredWorkAbroadRequests.length > 0;
+
+  const activeRowsCount = isApprovedRemoteWorkView ? combinedApprovalRequests.length : sorted.length;
   const totalPages = Math.max(1, Math.ceil(activeRowsCount / PAGE_SIZE));
   const pageRows = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-  const pageRemoteWorkRows = filteredRemoteWorkRequests.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   const activeFilterCount =
     (search ? 1 : 0) +
     (selectedDepts.length > 0 ? 1 : 0) +
     (selectedLocs.length > 0 ? 1 : 0) +
-    (includeApprovedRemoteWork ? 1 : 0);
+    (!isAggregateView && !isApprovedRemoteWorkView && wfhFilter !== 'all' ? 1 : 0);
 
   useEffect(() => {
     const tableNode = tableScrollRef.current;
@@ -1092,39 +1299,49 @@ export function AttendanceClient({
   const exportCSV = () => {
     if (isApprovedRemoteWorkView) {
       const headers = [
+        'Source',
         'Bamboo Row ID',
         'Employee ID',
         'Employee Name',
+        'Email',
         'Department',
         'Office Location',
         'Request Date',
-        'Remote Work Start Date',
-        'Remote Work End Date',
-        'Remote Work Type',
+        'Start Date',
+        'End Date',
+        'Category',
+        'Approval Status',
+        'Approver',
+        'Reason',
+        'Address',
+        'Work Schedule',
         'Supporting Documentation Submitted',
         'Alternate In-Office Work Date',
-        'Manager Approval Received',
-        'Manager Name',
       ];
 
-      const csvRows = filteredRemoteWorkRequests.map((request) => [
+      const csvRows = combinedApprovalRequests.map((request) => [
+        request.sourceLabel,
         String(request.bambooRowId),
         request.employeeId,
         request.employeeName,
+        request.email,
         request.department,
         request.officeLocation,
         request.requestDate || '',
-        request.remoteWorkStartDate,
-        request.remoteWorkEndDate || '',
-        request.remoteWorkType || '',
+        request.startDate,
+        request.endDate || '',
+        request.category || '',
+        request.approvalStatus || '',
+        request.approver || '',
+        request.reason || '',
+        request.address || '',
+        request.schedule || '',
         request.supportingDocumentationSubmitted || '',
         request.alternateInOfficeWorkDate || '',
-        request.managerApprovalReceived || '',
-        request.managerName || '',
       ]);
 
       const csv = [headers.join(','), ...csvRows.map((row) => row.map((c) => `"${String(c).replaceAll('"', '""')}"`).join(','))].join('\n');
-      downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), `office-attendance-approved-remote-work-${startDate}-${endDate}.csv`);
+      downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), `office-attendance-approved-coverage-requests-${startDate}-${endDate}.csv`);
       return;
     }
 
@@ -1134,7 +1351,7 @@ export function AttendanceClient({
       ...(isAggregateView ? ['Quebec Employees', 'Remote/Exempt Employees'] : []),
       'Location',
       'Remote Workday',
-      ...(isAggregateView ? [] : ['ActivTrak Coverage']),
+      ...(isAggregateView ? [] : ['Standing WFH Policy', 'Approved Remote Coverage In Range', 'ActivTrak Coverage']),
       ...weeks.map((w) => getWeekLabel(w)),
       isAggregateView ? 'Total Office Days' : 'Total',
       'Avg/Week',
@@ -1148,10 +1365,14 @@ export function AttendanceClient({
       ...(isAggregateView ? [String(r.quebecEmployeeCount ?? 0), String(r.remoteEmployeeCount ?? 0)] : []),
       r.officeLocation,
       isAggregateView ? '—' : r.remoteWorkStatusLabel,
-      ...(isAggregateView ? [] : [r.hasActivTrakCoverage ? 'Covered' : 'Unknown']),
+      ...(isAggregateView ? [] : [
+        r.hasStandingWfhPolicy ? 'Yes' : 'No',
+        r.hasAnyApprovedWfhCoverageInRange ? 'Yes' : 'No',
+        r.hasActivTrakCoverage ? 'Covered' : 'Unknown',
+      ]),
       ...weeks.map((w) => isAggregateView
         ? `${r.weeklyCompliance?.[w]?.compliancePct ?? 0}%`
-        : (r.hasActivTrakCoverage ? String(r.weeks[w]?.officeDays ?? 0) : '')),
+        : formatEmployeeWeekValue(r.weeks[w], r.hasActivTrakCoverage)),
       isAggregateView ? String(r.total) : (r.hasActivTrakCoverage ? String(r.total) : ''),
       isAggregateView ? String(r.avgPerWeek) : (r.hasActivTrakCoverage ? String(r.avgPerWeek) : ''),
       isAggregateView ? `${r.scorePct}%` : (r.hasActivTrakCoverage ? `${r.scorePct}%` : ''),
@@ -1163,7 +1384,19 @@ export function AttendanceClient({
     if (isAggregateView) {
       csvLines.push('');
       csvLines.push('Weekly Breakdown');
-      const detailHeaders = ['Group', 'Week', 'Compliance %', 'Eligible Quebec', 'Compliant Count', 'Compliant', 'Non-compliant', 'Fully remote'];
+      const detailHeaders = [
+        'Group',
+        'Week',
+        'Compliance %',
+        'Eligible Quebec',
+        'Compliant Count',
+        'Exempt Count',
+        'PTO Excused Count',
+        'Compliant',
+        'Non-compliant',
+        'Exempt this week',
+        'PTO Excused',
+      ];
       csvLines.push(detailHeaders.join(','));
       for (const row of sorted) {
         for (const week of weeks) {
@@ -1175,9 +1408,12 @@ export function AttendanceClient({
             `${compliance.compliancePct}%`,
             String(compliance.eligibleEmployees),
             String(compliance.compliantEmployees),
+            String(compliance.exemptEmployees),
+            String(compliance.excusedEmployees),
             formatNameBucket(compliance.compliantNames),
             formatNameBucket(compliance.nonCompliantNames),
-            formatNameBucket(compliance.fullyRemoteNames),
+            formatNameBucket(compliance.exemptNames),
+            formatNameBucket(compliance.excusedNames),
           ].map((value) => `"${String(value).replaceAll('"', '""')}"`).join(','));
         }
       }
@@ -1194,19 +1430,24 @@ export function AttendanceClient({
 
     if (isApprovedRemoteWorkView) {
       const headers = [
+        'Source',
         'Bamboo Row ID',
         'Employee ID',
         'Employee Name',
+        'Email',
         'Department',
         'Office Location',
         'Request Date',
-        'Remote Work Start Date',
-        'Remote Work End Date',
-        'Remote Work Type',
+        'Start Date',
+        'End Date',
+        'Category',
+        'Approval Status',
+        'Approver',
+        'Reason',
+        'Address',
+        'Work Schedule',
         'Supporting Documentation Submitted',
         'Alternate In-Office Work Date',
-        'Manager Approval Received',
-        'Manager Name',
       ];
       const headerRow = ws.addRow(headers);
       headerRow.font = { bold: true, size: 11 };
@@ -1214,30 +1455,35 @@ export function AttendanceClient({
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F3F4F6' } };
       });
 
-      for (const request of filteredRemoteWorkRequests) {
+      for (const request of combinedApprovalRequests) {
         ws.addRow([
+          request.sourceLabel,
           request.bambooRowId,
           request.employeeId,
           request.employeeName,
+          request.email,
           request.department,
           request.officeLocation,
           request.requestDate || '',
-          request.remoteWorkStartDate,
-          request.remoteWorkEndDate || '',
-          request.remoteWorkType || '',
+          request.startDate,
+          request.endDate || '',
+          request.category || '',
+          request.approvalStatus || '',
+          request.approver || '',
+          request.reason || '',
+          request.address || '',
+          request.schedule || '',
           request.supportingDocumentationSubmitted || '',
           request.alternateInOfficeWorkDate || '',
-          request.managerApprovalReceived || '',
-          request.managerName || '',
         ]);
       }
 
       ws.columns.forEach((col, index) => {
-        col.width = index === 2 || index === 3 || index === 11 ? 24 : 18;
+        col.width = index >= 13 ? 24 : 18;
       });
 
       const buffer = await wb.xlsx.writeBuffer();
-      downloadBlob(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `office-attendance-approved-remote-work-${startDate}-${endDate}.xlsx`);
+      downloadBlob(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `office-attendance-approved-coverage-requests-${startDate}-${endDate}.xlsx`);
       return;
     }
 
@@ -1247,7 +1493,7 @@ export function AttendanceClient({
       ...(isAggregateView ? ['Quebec Employees', 'Remote/Exempt Employees'] : []),
       'Location',
       'Remote Workday',
-      ...(isAggregateView ? [] : ['ActivTrak Coverage']),
+      ...(isAggregateView ? [] : ['Standing WFH Policy', 'Approved Remote Coverage In Range', 'ActivTrak Coverage']),
       ...weeks.map((w) => getWeekLabel(w)),
       isAggregateView ? 'Total Office Days' : 'Total',
       'Avg/Week',
@@ -1266,7 +1512,7 @@ export function AttendanceClient({
       isAggregateView ? `${filteredSummary.totalEmployees} employees` : '',
       ...(isAggregateView ? ['', ''] : []),
       '',
-      ...(isAggregateView ? [] : [filteredSummary.unknownCoverageCount > 0 ? `${filteredSummary.unknownCoverageCount} unknown` : '']),
+      ...(isAggregateView ? [] : ['', '', filteredSummary.unknownCoverageCount > 0 ? `${filteredSummary.unknownCoverageCount} unknown` : '']),
       `${filteredSummary.complianceRate}% score`,
       ...weeks.map(() => ''),
       '',
@@ -1285,10 +1531,14 @@ export function AttendanceClient({
         ...(isAggregateView ? [r.quebecEmployeeCount ?? 0, r.remoteEmployeeCount ?? 0] : []),
         r.officeLocation,
         isAggregateView ? '—' : r.remoteWorkStatusLabel,
-        ...(isAggregateView ? [] : [r.hasActivTrakCoverage ? 'Covered' : 'Unknown']),
+        ...(isAggregateView ? [] : [
+          r.hasStandingWfhPolicy ? 'Yes' : 'No',
+          r.hasAnyApprovedWfhCoverageInRange ? 'Yes' : 'No',
+          r.hasActivTrakCoverage ? 'Covered' : 'Unknown',
+        ]),
         ...weeks.map((w) => isAggregateView
           ? `${r.weeklyCompliance?.[w]?.compliancePct ?? 0}%`
-          : (r.hasActivTrakCoverage ? (r.weeks[w]?.officeDays ?? 0) : '')),
+          : formatEmployeeWeekValue(r.weeks[w], r.hasActivTrakCoverage)),
         isAggregateView ? r.total : (r.hasActivTrakCoverage ? r.total : ''),
         isAggregateView ? r.avgPerWeek : (r.hasActivTrakCoverage ? r.avgPerWeek : ''),
         isAggregateView ? r.scorePct : (r.hasActivTrakCoverage ? r.scorePct : ''),
@@ -1296,7 +1546,7 @@ export function AttendanceClient({
       ]);
 
       weeks.forEach((w, i) => {
-        const weekColumnIndex = (isAggregateView ? 7 : 5) + i;
+        const weekColumnIndex = (isAggregateView ? 6 : 7) + i + 1;
         const cell = row.getCell(weekColumnIndex);
         const wc = r.weeks[w];
         const compliance = r.weeklyCompliance?.[w];
@@ -1308,14 +1558,26 @@ export function AttendanceClient({
                   : (compliance?.compliancePct ?? 0) >= 50
                       ? 'FEF3C7'
                       : 'FEE2E2'
-          : (!r.hasActivTrakCoverage ? 'F3F4F6' : getCellHex(wc?.officeDays ?? 0, wc?.ptoDays ?? 0));
+          : (!r.hasActivTrakCoverage ? 'F3F4F6' : getEmployeeCellHex(wc));
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: hex } };
       });
     }
 
     if (isAggregateView) {
       const detailSheet = wb.addWorksheet('Weekly Breakdown');
-      const detailHeaders = ['Group', 'Week', 'Compliance %', 'Eligible Quebec', 'Compliant Count', 'Compliant', 'Non-compliant', 'Fully remote'];
+      const detailHeaders = [
+        'Group',
+        'Week',
+        'Compliance %',
+        'Eligible Quebec',
+        'Compliant Count',
+        'Exempt Count',
+        'PTO Excused Count',
+        'Compliant',
+        'Non-compliant',
+        'Exempt this week',
+        'PTO Excused',
+      ];
       const detailHeaderRow = detailSheet.addRow(detailHeaders);
       detailHeaderRow.font = { bold: true, size: 11 };
       detailHeaderRow.eachCell((cell) => {
@@ -1332,9 +1594,12 @@ export function AttendanceClient({
             `${compliance.compliancePct}%`,
             compliance.eligibleEmployees,
             compliance.compliantEmployees,
+            compliance.exemptEmployees,
+            compliance.excusedEmployees,
             formatNameBucket(compliance.compliantNames),
             formatNameBucket(compliance.nonCompliantNames),
-            formatNameBucket(compliance.fullyRemoteNames),
+            formatNameBucket(compliance.exemptNames),
+            formatNameBucket(compliance.excusedNames),
           ]);
         }
       }
@@ -1355,12 +1620,12 @@ export function AttendanceClient({
 
   const resultLabel = isApprovedRemoteWorkView ? 'requests' : isAggregateView ? aggregatePluralLabel : 'employees';
   const primaryMetricLabel = isApprovedRemoteWorkView
-    ? 'Approved Requests'
+    ? 'Request Records'
     : isAggregateView
       ? currentView.label
       : 'Employees';
   const averageMetricLabel = isApprovedRemoteWorkView ? 'Employees' : isAggregateView ? 'Avg Office Days/Emp/Week' : 'Avg Office Days/Week';
-  const zeroMetricLabel = isApprovedRemoteWorkView ? 'Permanent Requests' : isAggregateView ? `Zero-Office ${aggregateLabel}s` : 'Zero Office Days';
+  const zeroMetricLabel = isApprovedRemoteWorkView ? 'Work Abroad Requests' : isAggregateView ? `Zero-Office ${aggregateLabel}s` : 'Zero Office Days';
 
   const SortHeader = ({
     label,
@@ -1391,9 +1656,9 @@ export function AttendanceClient({
               <h2 className="text-[15px] font-semibold text-gray-900">{currentView.label}</h2>
               <p className="mt-0.5 text-[12px] text-gray-500">
                 {isApprovedRemoteWorkView
-                  ? 'All remote-work request records from Oracle. Use Manager Approval to see the request status.'
+                  ? 'Approved remote-work and work-abroad request records synced from Oracle. Use the approval fields to distinguish approved vs pending requests.'
                   : isAggregateView
-                    ? `Weekly compliance is based on Quebec, non-exempt employees meeting the ${OFFICE_DAYS_REQUIRED}-day target.`
+                    ? `Weekly compliance is based on Quebec employees meeting the adjusted office target after approved remote coverage and PTO exceptions.`
                     : `${currentView.description} Target ${OFFICE_DAYS_REQUIRED} office days per week.`}
               </p>
               <p className="mt-1 text-[11px] text-gray-400">
@@ -1671,17 +1936,18 @@ export function AttendanceClient({
             </div>
             {!isAggregateView && !isApprovedRemoteWorkView && (
               <div className="w-full md:w-56">
-                <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Approved Remote Work</label>
+                <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Approved Coverage</label>
                 <select
-                  value={includeApprovedRemoteWork ? 'include' : 'exclude'}
+                  value={wfhFilter}
                   onChange={(e) => {
-                    setIncludeApprovedRemoteWork(e.target.value === 'include');
+                    setWfhFilter(e.target.value as WfhFilterMode);
                     setPage(0);
                   }}
                   className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
                 >
-                  <option value="exclude">Exclude Approved Remote Work</option>
-                  <option value="include">Include Approved Remote Work</option>
+                  <option value="all">All Employees</option>
+                  <option value="standard-only">Only Standard Policy</option>
+                  <option value="approved-only">Only Approved Coverage</option>
                 </select>
               </div>
             )}
@@ -1691,7 +1957,7 @@ export function AttendanceClient({
                   setSearch('');
                   setSelectedDepts([]);
                   setSelectedLocs(viewMode === 'employees' && locations.includes(DEFAULT_EMPLOYEE_LOCATION) ? [DEFAULT_EMPLOYEE_LOCATION] : []);
-                  setIncludeApprovedRemoteWork(false);
+                  setWfhFilter('all');
                   setPage(0);
                 }}
                 className="rounded-lg border border-gray-200 px-3 py-2 text-[12px] text-gray-600 hover:bg-gray-50"
@@ -1706,13 +1972,13 @@ export function AttendanceClient({
               <p className="text-[11px] font-medium text-gray-500">{primaryMetricLabel}</p>
               <p className="mt-1 text-[22px] font-semibold text-gray-900">
                 {isApprovedRemoteWorkView
-                  ? remoteWorkSummary.totalRequests
+                  ? requestSummary.totalRequests
                   : isAggregateView
                     ? filteredSummary.totalDepartments
                     : filteredSummary.totalEmployees}
               </p>
               {isApprovedRemoteWorkView ? (
-                <p className="mt-1 text-[11px] text-gray-400">All remote-work request records from `TL_REMOTE_WORK_REQUESTS`. See `Manager Approval` for status.</p>
+                <p className="mt-1 text-[11px] text-gray-400">Combined remote-work and work-abroad request records from `TL_REMOTE_WORK_REQUESTS` and `TL_WORK_ABROAD_REQUESTS`.</p>
               ) : isAggregateView ? (
                 <p className="mt-1 text-[11px] text-gray-400">
                   {filteredSummary.measurableEmployees} measurable employee{filteredSummary.measurableEmployees === 1 ? '' : 's'}
@@ -1727,26 +1993,26 @@ export function AttendanceClient({
             <div className="rounded-xl border border-gray-200 bg-white p-4">
               <p className="text-[11px] font-medium text-gray-500">{averageMetricLabel}</p>
               <p className="mt-1 text-[22px] font-semibold text-gray-900">
-                {isApprovedRemoteWorkView ? remoteWorkSummary.uniqueEmployees : filteredSummary.avgOfficeDays}
+                {isApprovedRemoteWorkView ? requestSummary.uniqueEmployees : filteredSummary.avgOfficeDays}
               </p>
             </div>
             <div className="rounded-xl border border-gray-200 bg-white p-4">
-              <p className="text-[11px] font-medium text-gray-500">{isApprovedRemoteWorkView ? 'Alternate Office Dates' : 'Score'}</p>
+              <p className="text-[11px] font-medium text-gray-500">{isApprovedRemoteWorkView ? 'Remote Work Requests' : 'Score'}</p>
               {isApprovedRemoteWorkView ? (
-                <p className="mt-1 text-[22px] font-semibold text-gray-900">{remoteWorkSummary.alternateOfficeDates}</p>
+                <p className="mt-1 text-[22px] font-semibold text-gray-900">{requestSummary.remoteWorkRequests}</p>
               ) : (
                 <>
                   <p className={`mt-1 text-[22px] font-semibold ${filteredSummary.complianceRate >= 80 ? 'text-green-600' : filteredSummary.complianceRate >= 50 ? 'text-amber-600' : 'text-red-600'}`}>
                     {filteredSummary.complianceRate}%
                   </p>
-                  <p className="mt-1 text-[11px] text-gray-400">0 days = 0, 1 day = 50, 2+ days = 100</p>
+                  <p className="mt-1 text-[11px] text-gray-400">Scored against each week&apos;s adjusted office target after approved remote coverage and PTO exceptions.</p>
                 </>
               )}
             </div>
             <div className="rounded-xl border border-gray-200 bg-white p-4">
               <p className="text-[11px] font-medium text-gray-500">{zeroMetricLabel}</p>
               {isApprovedRemoteWorkView ? (
-                <p className="mt-1 text-[22px] font-semibold text-gray-900">{remoteWorkSummary.permanentRequests}</p>
+                <p className="mt-1 text-[22px] font-semibold text-gray-900">{requestSummary.workAbroadRequests}</p>
               ) : (
                 <p className={`mt-1 text-[22px] font-semibold ${
                   (isAggregateView ? filteredSummary.zeroOfficeDepartments : filteredSummary.zeroOfficeDaysCount) > 0
@@ -1761,7 +2027,7 @@ export function AttendanceClient({
 
           <div className="flex items-center justify-between text-[12px] text-gray-500">
             <span>{activeRowsCount} {resultLabel} {hasFilters ? '(filtered)' : ''}</span>
-            <span>Page {page + 1} of {totalPages}</span>
+            <span>{isApprovedRemoteWorkView ? 'Combined request tables' : `Page ${page + 1} of ${totalPages}`}</span>
           </div>
 
           {showScrollRail && !isApprovedRemoteWorkView ? (
@@ -1779,53 +2045,120 @@ export function AttendanceClient({
           ) : null}
 
           {isApprovedRemoteWorkView ? (
-            <div className="rounded-xl border border-gray-200 bg-white md:hidden">
-              {filteredRemoteWorkRequests.length === 0 ? (
-                <div className="p-12 text-center text-[13px] text-gray-500">No {resultLabel} match filters.</div>
+            <div className="space-y-4 md:hidden">
+              {!hasRequestResults ? (
+                <div className="rounded-xl border border-gray-200 bg-white p-12 text-center text-[13px] text-gray-500">No {resultLabel} match filters.</div>
               ) : (
-                <div className="divide-y divide-gray-100">
-                  {pageRemoteWorkRows.map((request) => (
-                    <article key={request.bambooRowId} className="space-y-4 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <h3 className="truncate text-[14px] font-semibold text-gray-900">{request.employeeName}</h3>
-                          <p className="mt-1 text-[12px] text-gray-500">{request.email}</p>
-                          <p className="mt-0.5 text-[12px] text-gray-500">{request.department}</p>
-                        </div>
-                        <span className="inline-flex rounded-full bg-sky-50 px-2 py-1 text-[10px] font-medium text-sky-700">
-                          {request.remoteWorkType || 'Approved'}
-                        </span>
-                      </div>
+                <>
+                  <section className="rounded-xl border border-gray-200 bg-white">
+                    <div className="border-b border-gray-100 px-4 py-3">
+                      <h3 className="text-[13px] font-semibold text-gray-900">Scheduled Office Day Remote Work</h3>
+                      <p className="mt-1 text-[11px] text-gray-500">{filteredRemoteWorkRequests.length} request{filteredRemoteWorkRequests.length === 1 ? '' : 's'}</p>
+                    </div>
+                    {filteredRemoteWorkRequests.length === 0 ? (
+                      <div className="p-6 text-center text-[12px] text-gray-500">No remote-work requests match filters.</div>
+                    ) : (
+                      <div className="divide-y divide-gray-100">
+                        {filteredRemoteWorkRequests.map((request) => (
+                          <article key={`remote-${request.bambooRowId}`} className="space-y-4 p-4">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <h3 className="truncate text-[14px] font-semibold text-gray-900">{request.employeeName}</h3>
+                                <p className="mt-1 text-[12px] text-gray-500">{request.email}</p>
+                                <p className="mt-0.5 text-[12px] text-gray-500">{request.department}</p>
+                              </div>
+                              <span className="inline-flex rounded-full bg-sky-50 px-2 py-1 text-[10px] font-medium text-sky-700">
+                                {request.remoteWorkType || 'Remote Work'}
+                              </span>
+                            </div>
 
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="rounded-lg bg-gray-50 px-3 py-2">
-                          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Request Date</p>
-                          <p className="mt-1 text-[12px] font-semibold text-gray-900">{formatOptionalDate(request.requestDate)}</p>
-                        </div>
-                        <div className="rounded-lg bg-gray-50 px-3 py-2">
-                          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Start</p>
-                          <p className="mt-1 text-[12px] font-semibold text-gray-900">{formatOptionalDate(request.remoteWorkStartDate)}</p>
-                        </div>
-                        <div className="rounded-lg bg-gray-50 px-3 py-2">
-                          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">End</p>
-                          <p className="mt-1 text-[12px] font-semibold text-gray-900">{formatOptionalDate(request.remoteWorkEndDate)}</p>
-                        </div>
-                        <div className="rounded-lg bg-gray-50 px-3 py-2">
-                          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Manager Approval</p>
-                          <p className="mt-1 text-[12px] font-semibold text-gray-900">{request.managerApprovalReceived || '—'}</p>
-                        </div>
-                      </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="rounded-lg bg-gray-50 px-3 py-2">
+                                <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Request Date</p>
+                                <p className="mt-1 text-[12px] font-semibold text-gray-900">{formatOptionalDate(request.requestDate)}</p>
+                              </div>
+                              <div className="rounded-lg bg-gray-50 px-3 py-2">
+                                <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Approval</p>
+                                <p className="mt-1 text-[12px] font-semibold text-gray-900">{request.managerApprovalReceived || '—'}</p>
+                              </div>
+                              <div className="rounded-lg bg-gray-50 px-3 py-2">
+                                <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Start</p>
+                                <p className="mt-1 text-[12px] font-semibold text-gray-900">{formatOptionalDate(request.remoteWorkStartDate)}</p>
+                              </div>
+                              <div className="rounded-lg bg-gray-50 px-3 py-2">
+                                <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">End</p>
+                                <p className="mt-1 text-[12px] font-semibold text-gray-900">{formatOptionalDate(request.remoteWorkEndDate)}</p>
+                              </div>
+                            </div>
 
-                      <div className="space-y-2 rounded-lg border border-gray-200 bg-gray-50/80 px-3 py-3 text-[12px] text-gray-600">
-                        <div><span className="font-medium text-gray-900">Supporting Docs:</span> {request.supportingDocumentationSubmitted || '—'}</div>
-                        <div><span className="font-medium text-gray-900">Alternate In-Office Date:</span> {request.alternateInOfficeWorkDate || '—'}</div>
-                        <div><span className="font-medium text-gray-900">Manager:</span> {request.managerName || '—'}</div>
-                        <div><span className="font-medium text-gray-900">Office Location:</span> {request.officeLocation}</div>
-                        <div><span className="font-medium text-gray-900">Bamboo Row ID:</span> {request.bambooRowId}</div>
+                            <div className="space-y-2 rounded-lg border border-gray-200 bg-gray-50/80 px-3 py-3 text-[12px] text-gray-600">
+                              <div><span className="font-medium text-gray-900">Supporting Docs:</span> {request.supportingDocumentationSubmitted || '—'}</div>
+                              <div><span className="font-medium text-gray-900">Alternate In-Office Date:</span> {request.alternateInOfficeWorkDate || '—'}</div>
+                              <div><span className="font-medium text-gray-900">Manager:</span> {request.managerName || '—'}</div>
+                              <div><span className="font-medium text-gray-900">Office Location:</span> {request.officeLocation}</div>
+                              <div><span className="font-medium text-gray-900">Bamboo Row ID:</span> {request.bambooRowId}</div>
+                            </div>
+                          </article>
+                        ))}
                       </div>
-                    </article>
-                  ))}
-                </div>
+                    )}
+                  </section>
+
+                  <section className="rounded-xl border border-gray-200 bg-white">
+                    <div className="border-b border-gray-100 px-4 py-3">
+                      <h3 className="text-[13px] font-semibold text-gray-900">Work Abroad / Another Province</h3>
+                      <p className="mt-1 text-[11px] text-gray-500">{filteredWorkAbroadRequests.length} request{filteredWorkAbroadRequests.length === 1 ? '' : 's'}</p>
+                    </div>
+                    {filteredWorkAbroadRequests.length === 0 ? (
+                      <div className="p-6 text-center text-[12px] text-gray-500">No work-abroad requests match filters.</div>
+                    ) : (
+                      <div className="divide-y divide-gray-100">
+                        {filteredWorkAbroadRequests.map((request) => (
+                          <article key={`abroad-${request.bambooRowId}`} className="space-y-4 p-4">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <h3 className="truncate text-[14px] font-semibold text-gray-900">{request.employeeName}</h3>
+                                <p className="mt-1 text-[12px] text-gray-500">{request.email}</p>
+                                <p className="mt-0.5 text-[12px] text-gray-500">{request.department}</p>
+                              </div>
+                              <span className="inline-flex rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-medium text-emerald-700">
+                                {request.countryOrProvince || 'Work Abroad'}
+                              </span>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="rounded-lg bg-gray-50 px-3 py-2">
+                                <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Request Date</p>
+                                <p className="mt-1 text-[12px] font-semibold text-gray-900">{formatOptionalDate(request.requestDate)}</p>
+                              </div>
+                              <div className="rounded-lg bg-gray-50 px-3 py-2">
+                                <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Approval</p>
+                                <p className="mt-1 text-[12px] font-semibold text-gray-900">{request.requestApproved || '—'}</p>
+                              </div>
+                              <div className="rounded-lg bg-gray-50 px-3 py-2">
+                                <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Start</p>
+                                <p className="mt-1 text-[12px] font-semibold text-gray-900">{formatOptionalDate(request.workAbroadStartDate)}</p>
+                              </div>
+                              <div className="rounded-lg bg-gray-50 px-3 py-2">
+                                <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">End</p>
+                                <p className="mt-1 text-[12px] font-semibold text-gray-900">{formatOptionalDate(request.workAbroadEndDate)}</p>
+                              </div>
+                            </div>
+
+                            <div className="space-y-2 rounded-lg border border-gray-200 bg-gray-50/80 px-3 py-3 text-[12px] text-gray-600">
+                              <div><span className="font-medium text-gray-900">Country/Province:</span> {request.countryOrProvince || '—'}</div>
+                              <div><span className="font-medium text-gray-900">Address:</span> {request.remoteWorkLocationAddress || '—'}</div>
+                              <div><span className="font-medium text-gray-900">Work Schedule:</span> {request.workSchedule || '—'}</div>
+                              <div><span className="font-medium text-gray-900">Approved/Declined By:</span> {request.approvedDeclinedBy || '—'}</div>
+                              <div><span className="font-medium text-gray-900">Office Location:</span> {request.officeLocation}</div>
+                              <div><span className="font-medium text-gray-900">Bamboo Row ID:</span> {request.bambooRowId}</div>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                </>
               )}
             </div>
           ) : null}
@@ -1863,7 +2196,7 @@ export function AttendanceClient({
 
                     {!isAggregateView ? (
                       <div className="flex flex-wrap gap-2">
-                        <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-medium ${row.approvedRemoteWorkRequest ? 'bg-sky-50 text-sky-700' : 'bg-gray-100 text-gray-600'}`}>
+                        <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-medium ${row.hasAnyApprovedWfhCoverageInRange ? 'bg-sky-50 text-sky-700' : 'bg-gray-100 text-gray-600'}`}>
                           {row.remoteWorkStatusLabel}
                         </span>
                         <span className="inline-flex rounded-full bg-gray-100 px-2 py-1 text-[10px] font-medium text-gray-600">
@@ -1929,14 +2262,14 @@ export function AttendanceClient({
                               <span className={`inline-flex min-h-6 min-w-12 items-center justify-center rounded px-2 text-[11px] font-medium ${
                                   isAggregateView
                                     ? complianceValueTone(departmentCompliance?.compliancePct ?? 0, departmentCompliance?.eligibleEmployees ?? 0)
-                                    : (row.hasActivTrakCoverage ? getCellColor(office, pto) : unknownTone())
+                                    : (row.hasActivTrakCoverage ? getEmployeeCellColor(cell) : unknownTone())
                                 }`}>
-                                  {isAggregateView ? `${departmentCompliance?.compliancePct ?? 0}%` : formatKnownValue(office, row.hasActivTrakCoverage)}
+                                  {isAggregateView ? `${departmentCompliance?.compliancePct ?? 0}%` : formatEmployeeWeekValue(cell, row.hasActivTrakCoverage)}
                                 </span>
                               </div>
                               {isAggregateView ? (
                                 <div className="mt-2 space-y-3 text-[11px] text-gray-500">
-                                  <div className="grid grid-cols-3 gap-2">
+                                  <div className="grid grid-cols-5 gap-2">
                                     <div>
                                       <p className="uppercase tracking-wider text-gray-400">Eligible</p>
                                       <p className="mt-1 font-medium text-gray-700">{departmentCompliance?.eligibleEmployees ?? 0}</p>
@@ -1944,6 +2277,14 @@ export function AttendanceClient({
                                     <div>
                                       <p className="uppercase tracking-wider text-gray-400">Compliant</p>
                                       <p className="mt-1 font-medium text-gray-700">{departmentCompliance?.compliantEmployees ?? 0}</p>
+                                    </div>
+                                    <div>
+                                      <p className="uppercase tracking-wider text-gray-400">Exempt</p>
+                                      <p className="mt-1 font-medium text-gray-700">{departmentCompliance?.exemptEmployees ?? 0}</p>
+                                    </div>
+                                    <div>
+                                      <p className="uppercase tracking-wider text-gray-400">Excused</p>
+                                      <p className="mt-1 font-medium text-gray-700">{departmentCompliance?.excusedEmployees ?? 0}</p>
                                     </div>
                                     <div>
                                       <p className="uppercase tracking-wider text-gray-400">Office Days</p>
@@ -1959,23 +2300,41 @@ export function AttendanceClient({
                                     <p className="mt-1 leading-5 text-gray-600">{formatNameBucket(departmentCompliance?.nonCompliantNames ?? [])}</p>
                                   </div>
                                   <div>
-                                    <p className="uppercase tracking-wider text-gray-400">Fully remote</p>
-                                    <p className="mt-1 leading-5 text-gray-600">{formatNameBucket(departmentCompliance?.fullyRemoteNames ?? [])}</p>
+                                    <p className="uppercase tracking-wider text-gray-400">Exempt this week</p>
+                                    <p className="mt-1 leading-5 text-gray-600">{formatNameBucket(departmentCompliance?.exemptNames ?? [])}</p>
+                                  </div>
+                                  <div>
+                                    <p className="uppercase tracking-wider text-gray-400">PTO-excused</p>
+                                    <p className="mt-1 leading-5 text-gray-600">{formatNameBucket(departmentCompliance?.excusedNames ?? [])}</p>
                                   </div>
                                 </div>
                               ) : row.hasActivTrakCoverage ? (
-                                <div className="mt-2 grid grid-cols-3 gap-2 text-[11px] text-gray-500">
-                                  <div>
-                                    <p className="uppercase tracking-wider text-gray-400">Office</p>
-                                    <p className="mt-1 font-medium text-gray-700">{office}</p>
+                                <div className="mt-2 space-y-3 text-[11px] text-gray-500">
+                                  <div className="grid grid-cols-4 gap-2">
+                                    <div>
+                                      <p className="uppercase tracking-wider text-gray-400">Office</p>
+                                      <p className="mt-1 font-medium text-gray-700">{office}</p>
+                                    </div>
+                                    <div>
+                                      <p className="uppercase tracking-wider text-gray-400">Remote</p>
+                                      <p className="mt-1 font-medium text-gray-700">{remote}</p>
+                                    </div>
+                                    <div>
+                                      <p className="uppercase tracking-wider text-gray-400">PTO</p>
+                                      <p className="mt-1 font-medium text-gray-700">{pto}</p>
+                                    </div>
+                                    <div>
+                                      <p className="uppercase tracking-wider text-gray-400">Target</p>
+                                      <p className="mt-1 font-medium text-gray-700">
+                                        {cell?.adjustedOfficeTarget == null ? (cell?.isPtoExcused ? 'Excused' : '—') : cell.adjustedOfficeTarget}
+                                      </p>
+                                    </div>
                                   </div>
                                   <div>
-                                    <p className="uppercase tracking-wider text-gray-400">Remote</p>
-                                    <p className="mt-1 font-medium text-gray-700">{remote}</p>
-                                  </div>
-                                  <div>
-                                    <p className="uppercase tracking-wider text-gray-400">PTO</p>
-                                    <p className="mt-1 font-medium text-gray-700">{pto}</p>
+                                    <p className="uppercase tracking-wider text-gray-400">Policy</p>
+                                    <p className="mt-1 leading-5 text-gray-600">
+                                      {cell?.exceptionLabel || (cell?.isPtoExcused ? 'PTO-excused week' : 'Standard Policy')}
+                                    </p>
                                   </div>
                                 </div>
                               ) : (
@@ -1996,47 +2355,108 @@ export function AttendanceClient({
           ) : null}
 
           {isApprovedRemoteWorkView ? (
-            <div className="hidden rounded-xl border border-gray-200 bg-white md:block">
-              <div className="max-h-[70vh] overflow-auto">
-                <table className="min-w-[1200px] border-collapse">
-                  <thead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:bg-white/95 [&_th]:backdrop-blur">
-                    <tr className="border-b border-gray-100">
-                      <th className="whitespace-nowrap px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Employee</th>
-                      <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Department</th>
-                      <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Request Date</th>
-                      <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Start Date</th>
-                      <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">End Date</th>
-                      <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Type</th>
-                      <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Supporting Docs</th>
-                      <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Alternate In-Office Date</th>
-                      <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Manager Approval</th>
-                      <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Manager</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {pageRemoteWorkRows.map((request) => (
-                      <tr key={request.bambooRowId} className="hover:bg-gray-50">
-                        <td className="whitespace-nowrap px-4 py-3 text-[13px] font-medium text-gray-900">
-                          <div>{request.employeeName}</div>
-                          <div className="mt-1 text-[11px] text-gray-400">Row {request.bambooRowId} • {request.officeLocation}</div>
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.department}</td>
-                        <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{formatOptionalDate(request.requestDate)}</td>
-                        <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-900">{formatOptionalDate(request.remoteWorkStartDate)}</td>
-                        <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{formatOptionalDate(request.remoteWorkEndDate)}</td>
-                        <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.remoteWorkType || '—'}</td>
-                        <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.supportingDocumentationSubmitted || '—'}</td>
-                        <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.alternateInOfficeWorkDate || '—'}</td>
-                        <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.managerApprovalReceived || '—'}</td>
-                        <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.managerName || '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {filteredRemoteWorkRequests.length === 0 ? (
-                  <div className="p-12 text-center text-[13px] text-gray-500">No {resultLabel} match filters.</div>
-                ) : null}
-              </div>
+            <div className="hidden space-y-4 md:block">
+              {!hasRequestResults ? (
+                <div className="rounded-xl border border-gray-200 bg-white p-12 text-center text-[13px] text-gray-500">No {resultLabel} match filters.</div>
+              ) : (
+                <>
+                  <section className="rounded-xl border border-gray-200 bg-white">
+                    <div className="border-b border-gray-100 px-4 py-3">
+                      <h3 className="text-[13px] font-semibold text-gray-900">Scheduled Office Day Remote Work</h3>
+                      <p className="mt-1 text-[11px] text-gray-500">Requests synced from `TL_REMOTE_WORK_REQUESTS`.</p>
+                    </div>
+                    <div className="max-h-[34vh] overflow-auto">
+                      <table className="min-w-[1200px] border-collapse">
+                        <thead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:bg-white/95 [&_th]:backdrop-blur">
+                          <tr className="border-b border-gray-100">
+                            <th className="whitespace-nowrap px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Employee</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Department</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Request Date</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Start Date</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">End Date</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Type</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Supporting Docs</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Alternate In-Office Date</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Approval</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Approver</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {filteredRemoteWorkRequests.map((request) => (
+                            <tr key={`remote-${request.bambooRowId}`} className="hover:bg-gray-50">
+                              <td className="whitespace-nowrap px-4 py-3 text-[13px] font-medium text-gray-900">
+                                <div>{request.employeeName}</div>
+                                <div className="mt-1 text-[11px] text-gray-400">Row {request.bambooRowId} • {request.officeLocation}</div>
+                              </td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.department}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{formatOptionalDate(request.requestDate)}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-900">{formatOptionalDate(request.remoteWorkStartDate)}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{formatOptionalDate(request.remoteWorkEndDate)}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.remoteWorkType || '—'}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.supportingDocumentationSubmitted || '—'}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.alternateInOfficeWorkDate || '—'}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.managerApprovalReceived || '—'}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.managerName || '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {filteredRemoteWorkRequests.length === 0 ? (
+                        <div className="p-8 text-center text-[13px] text-gray-500">No remote-work requests match filters.</div>
+                      ) : null}
+                    </div>
+                  </section>
+
+                  <section className="rounded-xl border border-gray-200 bg-white">
+                    <div className="border-b border-gray-100 px-4 py-3">
+                      <h3 className="text-[13px] font-semibold text-gray-900">Work Abroad / Another Province</h3>
+                      <p className="mt-1 text-[11px] text-gray-500">Requests synced from `TL_WORK_ABROAD_REQUESTS`.</p>
+                    </div>
+                    <div className="max-h-[34vh] overflow-auto">
+                      <table className="min-w-[1500px] border-collapse">
+                        <thead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:bg-white/95 [&_th]:backdrop-blur">
+                          <tr className="border-b border-gray-100">
+                            <th className="whitespace-nowrap px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Employee</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Department</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Request Date</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Start Date</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">End Date</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Country/Province</th>
+                            <th className="px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Address</th>
+                            <th className="px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Reason</th>
+                            <th className="px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Work Schedule</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Approval</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Approved/Declined By</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {filteredWorkAbroadRequests.map((request) => (
+                            <tr key={`abroad-${request.bambooRowId}`} className="hover:bg-gray-50 align-top">
+                              <td className="whitespace-nowrap px-4 py-3 text-[13px] font-medium text-gray-900">
+                                <div>{request.employeeName}</div>
+                                <div className="mt-1 text-[11px] text-gray-400">Row {request.bambooRowId} • {request.officeLocation}</div>
+                              </td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.department}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{formatOptionalDate(request.requestDate)}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-900">{formatOptionalDate(request.workAbroadStartDate)}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{formatOptionalDate(request.workAbroadEndDate)}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.countryOrProvince || '—'}</td>
+                              <td className="px-3 py-3 text-[12px] text-gray-600">{request.remoteWorkLocationAddress || '—'}</td>
+                              <td className="px-3 py-3 text-[12px] text-gray-600">{request.reason || '—'}</td>
+                              <td className="px-3 py-3 text-[12px] text-gray-600">{request.workSchedule || '—'}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.requestApproved || '—'}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.approvedDeclinedBy || '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {filteredWorkAbroadRequests.length === 0 ? (
+                        <div className="p-8 text-center text-[13px] text-gray-500">No work-abroad requests match filters.</div>
+                      ) : null}
+                    </div>
+                  </section>
+                </>
+              )}
             </div>
           ) : null}
 
@@ -2065,7 +2485,7 @@ export function AttendanceClient({
                           onClick={() => handleSort(w)}
                         >
                           {getWeekLabel(w)}
-                          {isCurrent && <span className="ml-0.5 normal-case tracking-normal">*</span>}
+                          {isCurrent ? <span className="ml-1 normal-case tracking-normal text-[10px] text-gray-400">Current</span> : null}
                           {sortKey === w ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ''}
                         </th>
                       );
@@ -2113,12 +2533,12 @@ export function AttendanceClient({
                         const departmentCompliance = row.weeklyCompliance?.[w];
                         const color = isAggregateView
                           ? complianceValueTone(departmentCompliance?.compliancePct ?? 0, departmentCompliance?.eligibleEmployees ?? 0)
-                          : (row.hasActivTrakCoverage ? getCellColor(office, pto) : unknownTone());
+                          : (row.hasActivTrakCoverage ? getEmployeeCellColor(cell) : unknownTone());
                         return (
                           <td key={w} className="px-2 py-1.5 text-center">
                             <div className="group relative inline-flex">
                               <span className={`inline-flex min-h-6 min-w-8 cursor-default items-center justify-center rounded px-1 text-[11px] font-medium ${color}`}>
-                                {isAggregateView ? `${departmentCompliance?.compliancePct ?? 0}%` : formatKnownValue(office, row.hasActivTrakCoverage)}
+                                {isAggregateView ? `${departmentCompliance?.compliancePct ?? 0}%` : formatEmployeeWeekValue(cell, row.hasActivTrakCoverage)}
                               </span>
                               <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-80 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-3 py-2.5 opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
                                 <div className="text-left text-[11px]">
@@ -2127,6 +2547,8 @@ export function AttendanceClient({
                                       <div className="grid grid-cols-2 gap-x-4 gap-y-1">
                                         <div className="flex justify-between gap-3"><span>Eligible Quebec</span><span className="font-medium text-gray-900">{departmentCompliance?.eligibleEmployees ?? 0}</span></div>
                                         <div className="flex justify-between gap-3"><span>Compliant</span><span className="font-medium text-gray-900">{departmentCompliance?.compliantEmployees ?? 0}</span></div>
+                                        <div className="flex justify-between gap-3"><span>Exempt</span><span className="font-medium text-gray-900">{departmentCompliance?.exemptEmployees ?? 0}</span></div>
+                                        <div className="flex justify-between gap-3"><span>PTO Excused</span><span className="font-medium text-gray-900">{departmentCompliance?.excusedEmployees ?? 0}</span></div>
                                         <div className="flex justify-between gap-3"><span>Compliance</span><span className="font-medium text-gray-900">{departmentCompliance?.compliancePct ?? 0}%</span></div>
                                         <div className="flex justify-between gap-3"><span>Office Days</span><span className="font-medium text-gray-900">{office}</span></div>
                                       </div>
@@ -2139,37 +2561,58 @@ export function AttendanceClient({
                                         <p className="mt-1 leading-5">{formatNameBucket(departmentCompliance?.nonCompliantNames ?? [])}</p>
                                       </div>
                                       <div>
-                                        <p className="uppercase tracking-wider text-gray-400">Fully remote</p>
-                                        <p className="mt-1 leading-5">{formatNameBucket(departmentCompliance?.fullyRemoteNames ?? [])}</p>
+                                        <p className="uppercase tracking-wider text-gray-400">Exempt this week</p>
+                                        <p className="mt-1 leading-5">{formatNameBucket(departmentCompliance?.exemptNames ?? [])}</p>
+                                      </div>
+                                      <div>
+                                        <p className="uppercase tracking-wider text-gray-400">PTO-excused</p>
+                                        <p className="mt-1 leading-5">{formatNameBucket(departmentCompliance?.excusedNames ?? [])}</p>
                                       </div>
                                     </div>
                                   ) : !row.hasActivTrakCoverage ? (
                                     <div className="text-gray-500">
                                       No ActivTrak coverage. Office attendance is unknown for this employee.
                                     </div>
-                                  ) : cell && cell.days.length > 0 ? (
-                                    <div className="space-y-0.5">
-                                      {cell.days.map((d) => (
-                                        <div key={d.date} className="flex items-center gap-2">
-                                          <span className={`inline-block h-2 w-2 rounded-full ${
-                                            d.location === 'Office' ? 'bg-green-500' :
-                                            d.location === 'Remote' ? 'bg-gray-400' :
-                                            d.location === 'PTO' ? 'bg-blue-500' : 'bg-amber-400'
-                                          }`} />
-                                          <span className="w-7 font-medium text-gray-500">{d.dayLabel}</span>
-                                          <span className="text-gray-400">{d.date.slice(5)}</span>
-                                          <span className={`ml-auto font-semibold ${
-                                            d.location === 'Office' ? 'text-green-700' :
-                                            d.location === 'Remote' ? 'text-gray-500' :
-                                            d.location === 'PTO' ? 'text-blue-600' : 'text-amber-600'
-                                          }`}>
-                                            {d.location === 'PTO' && d.ptoType ? `${d.location} • ${d.ptoType}` : d.location}
-                                          </span>
-                                        </div>
-                                      ))}
-                                    </div>
                                   ) : (
-                                    <div className="text-gray-400">No activity</div>
+                                    <div className="space-y-3 text-gray-600">
+                                      <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                                        <div className="flex justify-between gap-3"><span>Office days</span><span className="font-medium text-gray-900">{office}</span></div>
+                                        <div className="flex justify-between gap-3"><span>Remote days</span><span className="font-medium text-gray-900">{remote}</span></div>
+                                        <div className="flex justify-between gap-3"><span>PTO days</span><span className="font-medium text-gray-900">{pto}</span></div>
+                                        <div className="flex justify-between gap-3"><span>Adjusted target</span><span className="font-medium text-gray-900">{cell?.adjustedOfficeTarget == null ? (cell?.isPtoExcused ? 'Excused' : '—') : cell.adjustedOfficeTarget}</span></div>
+                                        <div className="flex justify-between gap-3"><span>Approved Coverage</span><span className="font-medium text-gray-900">{cell?.hasApprovedWfhCoverage ? 'Yes' : 'No'}</span></div>
+                                        <div className="flex justify-between gap-3"><span>Approved weekdays</span><span className="font-medium text-gray-900">{cell?.approvedRemoteWeekdays ?? 0}</span></div>
+                                      </div>
+                                      <div>
+                                        <p className="uppercase tracking-wider text-gray-400">Policy</p>
+                                        <p className="mt-1">{cell?.exceptionLabel || (cell?.isPtoExcused ? 'PTO-excused week' : 'Standard Policy')}</p>
+                                      </div>
+                                      {cell && cell.days.length > 0 ? (
+                                        <div className="space-y-0.5">
+                                          <p className="uppercase tracking-wider text-gray-400">Daily activity</p>
+                                          {cell.days.map((d) => (
+                                            <div key={d.date} className="flex items-center gap-2">
+                                              <span className={`inline-block h-2 w-2 rounded-full ${
+                                                d.location === 'Office' ? 'bg-green-500' :
+                                                d.location === 'Remote' ? 'bg-gray-400' :
+                                                d.location === 'PTO' ? 'bg-blue-500' : 'bg-amber-400'
+                                              }`} />
+                                              <span className="w-7 font-medium text-gray-500">{d.dayLabel}</span>
+                                              <span className="text-gray-400">{d.date.slice(5)}</span>
+                                              <span className={`ml-auto font-semibold ${
+                                                d.location === 'Office' ? 'text-green-700' :
+                                                d.location === 'Remote' ? 'text-gray-500' :
+                                                d.location === 'PTO' ? 'text-blue-600' : 'text-amber-600'
+                                              }`}>
+                                                {d.location === 'PTO' && d.ptoType ? `${d.location} • ${d.ptoType}` : d.location}
+                                              </span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      ) : (
+                                        <div className="text-gray-400">No activity</div>
+                                      )}
+                                    </div>
                                   )}
                                 </div>
                               </div>
@@ -2241,11 +2684,12 @@ export function AttendanceClient({
       {/* Legend */}
       {!isApprovedRemoteWorkView ? (
         <div className="flex flex-wrap gap-4 text-[11px] text-gray-500">
-          <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.compliant}`} /> {OFFICE_DAYS_REQUIRED}+ days</span>
-          <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.partial}`} /> 1 day</span>
-          <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.absent}`} /> 0 days</span>
-          <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.pto}`} /> PTO week overlay</span>
-          {currentWeek && <span className="flex items-center gap-1.5"><span className="text-gray-400">*</span> Current week (in progress, excluded from score)</span>}
+          <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.compliant}`} /> Compliant under adjusted policy</span>
+          <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.partial}`} /> Below adjusted target</span>
+          <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.absent}`} /> No office days</span>
+          <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.pto}`} /> PTO-excused week</span>
+          <span className="flex items-center gap-1.5"><span className="font-semibold text-gray-600">*</span> Approved remote coverage affected this week</span>
+          {currentWeek ? <span className="flex items-center gap-1.5"><span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-300" /> Current week is excluded from score</span> : null}
         </div>
       ) : null}
 
@@ -2337,17 +2781,18 @@ export function AttendanceClient({
 
               {!isAggregateView && !isApprovedRemoteWorkView ? (
                 <div>
-                  <label className="mb-2 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Approved Remote Work</label>
+                  <label className="mb-2 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Approved Coverage</label>
                   <select
-                    value={includeApprovedRemoteWork ? 'include' : 'exclude'}
+                    value={wfhFilter}
                     onChange={(e) => {
-                      setIncludeApprovedRemoteWork(e.target.value === 'include');
+                      setWfhFilter(e.target.value as WfhFilterMode);
                       setPage(0);
                     }}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
                   >
-                    <option value="exclude">Exclude Approved Remote Work</option>
-                    <option value="include">Include Approved Remote Work</option>
+                    <option value="all">All Employees</option>
+                    <option value="standard-only">Only Standard Policy</option>
+                    <option value="approved-only">Only Approved Coverage</option>
                   </select>
                 </div>
               ) : null}
@@ -2361,7 +2806,7 @@ export function AttendanceClient({
                     setSearch('');
                     setSelectedDepts([]);
                     setSelectedLocs(viewMode === 'employees' && locations.includes(DEFAULT_EMPLOYEE_LOCATION) ? [DEFAULT_EMPLOYEE_LOCATION] : []);
-                    setIncludeApprovedRemoteWork(false);
+                    setWfhFilter('all');
                     setPage(0);
                   }}
                   className="rounded-lg border border-gray-200 px-3 py-2 text-[12px] font-medium text-gray-700 hover:bg-gray-50"
@@ -2399,13 +2844,19 @@ function AttendanceDetailModal({
 }) {
   const hasActivTrakCoverage = row.hasActivTrakCoverage;
   const weekSummaries = weeks.map((week) => {
-    const cell = row.weeks[week] || { officeDays: 0, remoteDays: 0, ptoDays: 0, days: [] };
+    const cell = row.weeks[week] || createEmptyWeekCell();
     return {
       week,
       label: getWeekLabel(week),
       officeDays: cell.officeDays ?? 0,
       remoteDays: cell.remoteDays ?? 0,
       ptoDays: cell.ptoDays ?? 0,
+      adjustedOfficeTarget: cell.adjustedOfficeTarget,
+      adjustedCompliant: cell.adjustedCompliant,
+      isPtoExcused: cell.isPtoExcused,
+      hasApprovedWfhCoverage: cell.hasApprovedWfhCoverage,
+      approvedRemoteWeekdays: cell.approvedRemoteWeekdays ?? 0,
+      exceptionLabel: cell.exceptionLabel,
       scorePct: getWeekPointCapacity(cell) > 0
         ? Math.round((getWeekPoints(cell) / getWeekPointCapacity(cell)) * 100)
         : 0,
@@ -2437,7 +2888,7 @@ function AttendanceDetailModal({
     lastDate.setDate(lastDate.getDate() + 4);
 
     while (cursor <= lastDate) {
-      monthStarts.push(new Date(cursor));
+      monthStarts.push(new Date(cursor.getTime()));
       cursor.setMonth(cursor.getMonth() + 1, 1);
     }
 
@@ -2468,13 +2919,23 @@ function AttendanceDetailModal({
             <h3 className="mt-1 text-[24px] font-semibold text-gray-900">{row.label}</h3>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-[13px] text-gray-500">
               <span>{row.secondary} • {row.officeLocation}</span>
-              {row.approvedRemoteWorkRequest ? (
+              {row.hasStandingWfhPolicy ? (
                 <span className="inline-flex rounded-full bg-green-50 px-2 py-0.5 text-[10px] font-medium text-green-700">
-                  Approved Remote Work Request
+                  Standing WFH Policy
+                </span>
+              ) : null}
+              {row.hasApprovedRemoteRequestInRange ? (
+                <span className="inline-flex rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700">
+                  Temporary Remote Work
+                </span>
+              ) : null}
+              {row.hasApprovedWorkAbroadRequestInRange ? (
+                <span className="inline-flex rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
+                  Work Abroad / Province
                 </span>
               ) : null}
               <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                row.approvedRemoteWorkRequest ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-600'
+                row.hasAnyApprovedWfhCoverageInRange ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-600'
               }`}>
                 {row.remoteWorkStatusLabel}
               </span>
@@ -2598,35 +3059,57 @@ function AttendanceDetailModal({
             <section className="space-y-4">
               <div>
                 <h4 className="text-[13px] font-semibold uppercase tracking-wider text-gray-500">Weekly Compliance</h4>
-                <p className="mt-1 text-[12px] text-gray-400">Weeks with at least 2 office days get a green check.</p>
+                <p className="mt-1 text-[12px] text-gray-400">Weeks are scored against the adjusted office target after approved remote coverage and PTO exceptions.</p>
               </div>
               <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
                 <div className="divide-y divide-gray-100">
                   {weekSummaries.map((weekSummary) => {
-                    const compliantWeek = hasActivTrakCoverage && weekSummary.officeDays >= OFFICE_DAYS_REQUIRED;
+                    const compliantWeek = hasActivTrakCoverage && weekSummary.adjustedCompliant === true;
+                    const exemptWeek = hasActivTrakCoverage && weekSummary.hasApprovedWfhCoverage && weekSummary.adjustedOfficeTarget === 0;
+                    const excusedWeek = hasActivTrakCoverage && weekSummary.isPtoExcused;
                     return (
                       <div key={weekSummary.week} className="flex items-center justify-between gap-4 px-4 py-3">
                         <div className="min-w-0">
                           <p className="text-[13px] font-medium text-gray-900">{weekSummary.label}</p>
                           <p className="mt-1 text-[11px] text-gray-400">
                             {hasActivTrakCoverage
-                              ? `${weekSummary.officeDays} office • ${weekSummary.remoteDays} remote • ${weekSummary.ptoDays} PTO`
+                              ? `${weekSummary.officeDays}${weekSummary.hasApprovedWfhCoverage ? '*' : ''} office • ${weekSummary.remoteDays} remote • ${weekSummary.ptoDays} PTO`
                               : `Attendance unknown • ${weekSummary.ptoDays} PTO`}
                           </p>
+                          {hasActivTrakCoverage ? (
+                            <p className="mt-1 text-[11px] text-gray-500">
+                              {weekSummary.adjustedOfficeTarget == null
+                                ? (weekSummary.isPtoExcused ? 'Adjusted target: PTO-excused' : 'Adjusted target: —')
+                                : `Adjusted target: ${weekSummary.adjustedOfficeTarget}`}
+                              {weekSummary.exceptionLabel ? ` • ${weekSummary.exceptionLabel}` : ''}
+                            </p>
+                          ) : null}
                         </div>
                         <div className="flex items-center gap-3">
                           {compliantWeek ? (
                             <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-green-100 text-[14px] font-semibold text-green-700">
-                              ✓
+                              {excusedWeek ? 'P' : exemptWeek ? 'E' : '✓'}
                             </span>
                           ) : (
                             <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full text-[14px] font-semibold ${hasActivTrakCoverage ? 'bg-gray-100 text-gray-400' : 'bg-amber-50 text-amber-700'}`}>
                               {hasActivTrakCoverage ? '—' : '?'}
                             </span>
                           )}
-                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${employeeMetricTone(hasActivTrakCoverage, weekSummary.scorePct)}`}>
-                            {formatKnownValue(`${weekSummary.scorePct}%`, hasActivTrakCoverage)}
-                          </span>
+                          {hasActivTrakCoverage ? (
+                            <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                              excusedWeek
+                                ? 'bg-blue-50 text-blue-700'
+                                : exemptWeek
+                                  ? 'bg-green-50 text-green-700'
+                                  : employeeMetricTone(hasActivTrakCoverage, weekSummary.scorePct)
+                            }`}>
+                              {excusedWeek ? 'Excused' : exemptWeek ? 'Exempt' : `${weekSummary.scorePct}%`}
+                            </span>
+                          ) : (
+                            <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${employeeMetricTone(hasActivTrakCoverage, weekSummary.scorePct)}`}>
+                              {formatKnownValue(`${weekSummary.scorePct}%`, hasActivTrakCoverage)}
+                            </span>
+                          )}
                         </div>
                       </div>
                     );

@@ -1,4 +1,4 @@
-import { fetchActiveEmployees, fetchRemoteWorkRequests, fetchTimeOffRequests } from './bamboohr';
+import { fetchActiveEmployees, fetchRemoteWorkRequests, fetchTimeOffRequests, fetchWorkAbroadRequests } from './bamboohr';
 import { fetchActivTrakIdentifiers, fetchActivTrakUserStats, fetchOfficeAttendanceData, fetchOfficeIpActivity, fetchProductivityData } from './bigquery';
 import { execute, executeMany, initializeSchema, query } from './oracle';
 import { normalizeEmailNullable } from './email';
@@ -12,6 +12,7 @@ export interface SyncSummary {
   productivitySynced: number;
   timeOffSynced: number;
   remoteWorkRequestsSynced: number;
+  workAbroadRequestsSynced: number;
   tbsMapped: number;
   errors: string[];
 }
@@ -132,6 +133,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
   let productivitySynced = 0;
   let timeOffSynced = 0;
   let remoteWorkRequestsSynced = 0;
+  let workAbroadRequestsSynced = 0;
   let tbsMapped = 0;
 
   try {
@@ -674,6 +676,82 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     errors.push(`Remote work request sync failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  try {
+    const workAbroadRequests = await fetchWorkAbroadRequests();
+    const workAbroadBinds = workAbroadRequests
+      .filter((row) => row.rowId && row.employeeId && row.workAbroadStartDate)
+      .map((row) => ({
+        BAMBOO_ROW_ID: Number(row.rowId),
+        EMPLOYEE_ID: row.employeeId,
+        EMAIL: normalizeEmailNullable(row.employeeEmail),
+        EMPLOYEE_NAME: row.employeeName || null,
+        DEPARTMENT: row.department || null,
+        REQUEST_DATE: row.requestDate ? parseDateOnly(row.requestDate) : null,
+        WORK_ABROAD_START_DATE: parseDateOnly(row.workAbroadStartDate),
+        WORK_ABROAD_END_DATE: row.workAbroadEndDate ? parseDateOnly(row.workAbroadEndDate) : null,
+        REMOTE_WORK_LOCATION_ADDRESS: row.remoteWorkLocationAddress || null,
+        COUNTRY_OR_PROVINCE: row.countryOrProvince || null,
+        REASON: row.reason || null,
+        WORK_SCHEDULE: row.workSchedule || null,
+        REQUEST_APPROVED: row.requestApproved || null,
+        APPROVED_DECLINED_BY: row.approvedDeclinedBy || null,
+      }));
+
+    if (workAbroadBinds.length > 0) {
+      await executeMany(
+        `MERGE INTO TL_WORK_ABROAD_REQUESTS t
+         USING (SELECT
+           :BAMBOO_ROW_ID AS BAMBOO_ROW_ID,
+           :EMPLOYEE_ID AS EMPLOYEE_ID,
+           :EMAIL AS EMAIL,
+           :EMPLOYEE_NAME AS EMPLOYEE_NAME,
+           :DEPARTMENT AS DEPARTMENT,
+           :REQUEST_DATE AS REQUEST_DATE,
+           :WORK_ABROAD_START_DATE AS WORK_ABROAD_START_DATE,
+           :WORK_ABROAD_END_DATE AS WORK_ABROAD_END_DATE,
+           :REMOTE_WORK_LOCATION_ADDRESS AS REMOTE_WORK_LOCATION_ADDRESS,
+           :COUNTRY_OR_PROVINCE AS COUNTRY_OR_PROVINCE,
+           :REASON AS REASON,
+           :WORK_SCHEDULE AS WORK_SCHEDULE,
+           :REQUEST_APPROVED AS REQUEST_APPROVED,
+           :APPROVED_DECLINED_BY AS APPROVED_DECLINED_BY
+         FROM DUAL) s
+         ON (t.BAMBOO_ROW_ID = s.BAMBOO_ROW_ID)
+         WHEN MATCHED THEN UPDATE SET
+           t.EMPLOYEE_ID = s.EMPLOYEE_ID,
+           t.EMAIL = s.EMAIL,
+           t.EMPLOYEE_NAME = s.EMPLOYEE_NAME,
+           t.DEPARTMENT = s.DEPARTMENT,
+           t.REQUEST_DATE = s.REQUEST_DATE,
+           t.WORK_ABROAD_START_DATE = s.WORK_ABROAD_START_DATE,
+           t.WORK_ABROAD_END_DATE = s.WORK_ABROAD_END_DATE,
+           t.REMOTE_WORK_LOCATION_ADDRESS = s.REMOTE_WORK_LOCATION_ADDRESS,
+           t.COUNTRY_OR_PROVINCE = s.COUNTRY_OR_PROVINCE,
+           t.REASON = s.REASON,
+           t.WORK_SCHEDULE = s.WORK_SCHEDULE,
+           t.REQUEST_APPROVED = s.REQUEST_APPROVED,
+           t.APPROVED_DECLINED_BY = s.APPROVED_DECLINED_BY,
+           t.UPDATED_AT = CURRENT_TIMESTAMP
+         WHEN NOT MATCHED THEN INSERT (
+           BAMBOO_ROW_ID, EMPLOYEE_ID, EMAIL, EMPLOYEE_NAME, DEPARTMENT,
+           REQUEST_DATE, WORK_ABROAD_START_DATE, WORK_ABROAD_END_DATE,
+           REMOTE_WORK_LOCATION_ADDRESS, COUNTRY_OR_PROVINCE, REASON, WORK_SCHEDULE,
+           REQUEST_APPROVED, APPROVED_DECLINED_BY
+         ) VALUES (
+           s.BAMBOO_ROW_ID, s.EMPLOYEE_ID, s.EMAIL, s.EMPLOYEE_NAME, s.DEPARTMENT,
+           s.REQUEST_DATE, s.WORK_ABROAD_START_DATE, s.WORK_ABROAD_END_DATE,
+           s.REMOTE_WORK_LOCATION_ADDRESS, s.COUNTRY_OR_PROVINCE, s.REASON, s.WORK_SCHEDULE,
+           s.REQUEST_APPROVED, s.APPROVED_DECLINED_BY
+         )`,
+        workAbroadBinds,
+      );
+    }
+
+    workAbroadRequestsSynced = workAbroadBinds.length;
+  } catch (error) {
+    errors.push(`Work abroad request sync failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   // Step 4: Auto-map BambooHR employees to TBS employee numbers
   try {
     tbsMapped = await syncTbsEmployeeMap();
@@ -688,6 +766,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     productivitySynced +
     timeOffSynced +
     remoteWorkRequestsSynced +
+    workAbroadRequestsSynced +
     tbsMapped;
 
   try {
@@ -722,6 +801,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     productivitySynced,
     timeOffSynced,
     remoteWorkRequestsSynced,
+    workAbroadRequestsSynced,
     tbsMapped,
     errors,
   };
