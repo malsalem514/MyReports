@@ -13,7 +13,28 @@ export function arraysEqual(a: string[], b: string[]): boolean {
 
 export function parseListParam(value: string | null | undefined): string[] {
   if (!value) return [];
-  return value.split(',').map((part) => part.trim()).filter(Boolean);
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((part) => String(part).trim())
+          .filter(Boolean);
+      }
+    } catch {
+      // Fall back to legacy comma-separated parsing below.
+    }
+  }
+
+  return trimmed.split(',').map((part) => part.trim()).filter(Boolean);
+}
+
+export function serializeListParam(values: string[]): string | null {
+  if (values.length === 0) return null;
+  return JSON.stringify(values);
 }
 
 export function parseEnumParam<T extends string>(

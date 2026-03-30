@@ -12,6 +12,7 @@ import {
   parseEnumParam,
   parseListParam,
   parsePageParam,
+  serializeListParam,
 } from '@/lib/search-params';
 import { useUrlStateSync, type UrlStateField } from '@/lib/use-url-state-sync';
 
@@ -110,7 +111,8 @@ export function CompareClient({
         setSelectedDepts((previous) => (arraysEqual(previous, nextDepts) ? previous : nextDepts));
       },
       write: (params) => {
-        if (selectedDepts.length > 0) params.set('departments', selectedDepts.join(','));
+        const serialized = serializeListParam(selectedDepts);
+        if (serialized) params.set('departments', serialized);
         else params.delete('departments');
       },
       equals: (current, next) => arraysEqual(current as string[], next as string[]),

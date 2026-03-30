@@ -18,6 +18,7 @@ import {
   parseEnumParam,
   parseListParam,
   parsePageParam,
+  serializeListParam,
   type SearchParamReader,
 } from '@/lib/search-params';
 import type { AttendanceRemoteWorkRequest, AttendanceRow, AttendanceSummary, AttendanceWorkAbroadRequest, DayDetail, WeekCell } from '@/lib/types/attendance';
@@ -505,7 +506,8 @@ export function AttendanceClient({
         setSelectedDepts((previous) => (arraysEqual(previous, nextDepts) ? previous : nextDepts));
       },
       write: (params) => {
-        if (selectedDepts.length > 0) params.set('departments', selectedDepts.join(','));
+        const serialized = serializeListParam(selectedDepts);
+        if (serialized) params.set('departments', serialized);
         else params.delete('departments');
       },
       equals: (current, next) => arraysEqual(current as string[], next as string[]),
@@ -518,7 +520,8 @@ export function AttendanceClient({
         setSelectedLocs((previous) => (arraysEqual(previous, nextLocs) ? previous : nextLocs));
       },
       write: (params) => {
-        if (selectedLocs.length > 0) params.set('locations', selectedLocs.join(','));
+        const serialized = serializeListParam(selectedLocs);
+        if (serialized) params.set('locations', serialized);
         else params.delete('locations');
       },
       equals: (current, next) => arraysEqual(current as string[], next as string[]),
