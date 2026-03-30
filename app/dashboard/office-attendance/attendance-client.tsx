@@ -1939,7 +1939,7 @@ export function AttendanceClient({
             )}
           </div>
 
-          <div className="hidden flex-col gap-3 md:flex md:flex-row md:items-end">
+          <div className="relative z-30 hidden flex-col gap-3 md:flex md:flex-row md:items-end">
             <div className="flex-1">
               <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Search</label>
               <input
@@ -1950,7 +1950,7 @@ export function AttendanceClient({
                 className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[13px] focus:border-gray-300 focus:outline-none"
               />
             </div>
-            <div className="relative w-full md:w-52" ref={locRef}>
+            <div className="relative z-40 w-full md:w-52" ref={locRef}>
               <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Location</label>
               <button
                 type="button"
@@ -1963,7 +1963,7 @@ export function AttendanceClient({
                 <span className="text-[10px] text-gray-400">▼</span>
               </button>
               {locOpen && (
-                <div className="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-gray-200 bg-white shadow-lg">
+                <div className="absolute z-50 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-gray-200 bg-white shadow-lg">
                   {locations.map((l) => (
                     <label key={l} className="flex cursor-pointer items-center gap-2 px-3 py-2 hover:bg-gray-50">
                       <input type="checkbox" checked={selectedLocs.includes(l)} onChange={() => toggleLoc(l)}
@@ -1975,7 +1975,7 @@ export function AttendanceClient({
                 </div>
               )}
             </div>
-            <div className="relative w-full md:w-52" ref={deptRef}>
+            <div className="relative z-40 w-full md:w-52" ref={deptRef}>
               <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Department</label>
               <button
                 type="button"
@@ -1988,7 +1988,7 @@ export function AttendanceClient({
                 <span className="text-[10px] text-gray-400">▼</span>
               </button>
               {deptOpen && (
-                <div className="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-gray-200 bg-white shadow-lg">
+                <div className="absolute z-50 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-gray-200 bg-white shadow-lg">
                   {departments.map((d) => (
                     <label key={d} className="flex cursor-pointer items-center gap-2 px-3 py-2 hover:bg-gray-50">
                       <input type="checkbox" checked={selectedDepts.includes(d)} onChange={() => toggleDept(d)}

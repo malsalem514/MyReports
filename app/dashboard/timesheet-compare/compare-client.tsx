@@ -411,7 +411,7 @@ export function CompareClient({
       )}
 
       {/* Filters */}
-      <div className="flex flex-col gap-3 md:flex-row md:items-end">
+      <div className="relative z-30 flex flex-col gap-3 md:flex-row md:items-end">
         <div className="flex-1">
           <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Search</label>
           <input
@@ -437,7 +437,7 @@ export function CompareClient({
           </select>
         </div>
         {/* Department multiselect */}
-        <div className="relative w-full md:w-52" ref={deptRef}>
+        <div className="relative z-40 w-full md:w-52" ref={deptRef}>
           <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Department</label>
           <button
             type="button"
@@ -450,7 +450,7 @@ export function CompareClient({
             <span className="text-[10px] text-gray-400">▼</span>
           </button>
           {deptOpen && (
-            <div className="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-gray-200 bg-white shadow-lg">
+            <div className="absolute z-50 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-gray-200 bg-white shadow-lg">
               {departments.map((d) => (
                 <label key={d} className="flex cursor-pointer items-center gap-2 px-3 py-2 hover:bg-gray-50">
                   <input type="checkbox" checked={selectedDepts.includes(d)} onChange={() => toggleDept(d)}
