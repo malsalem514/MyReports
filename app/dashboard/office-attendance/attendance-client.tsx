@@ -6,11 +6,16 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import {
   CELL_COLORS,
-  CELL_HEX,
   DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS,
   LOOKBACK_OPTIONS,
   OFFICE_DAYS_REQUIRED,
 } from '@/lib/constants';
+import {
+  buildApprovalRequestCsvContent,
+  buildApprovalRequestExportData,
+  buildAttendanceCsvContent,
+  buildAttendanceExportData,
+} from '@/lib/office-attendance-export';
 import { OFFICE_ATTENDANCE_VIEW_OPTIONS, type OfficeAttendanceViewKey } from '@/lib/dashboard-nav-config';
 import { getOfficeAttendanceDefaultRange, toDateParam } from '@/lib/report-date-defaults';
 import {
@@ -22,6 +27,32 @@ import {
   type SearchParamReader,
 } from '@/lib/search-params';
 import type { AttendanceRemoteWorkRequest, AttendanceRow, AttendanceSummary, AttendanceWorkAbroadRequest, DayDetail, WeekCell } from '@/lib/types/attendance';
+import {
+  buildApprovalRequestSummary,
+  buildCombinedApprovalRequests,
+  buildDisplayRows,
+  buildFilteredAttendanceSummary,
+  buildGroupedRows,
+  createEmptyWeekCell,
+  filterAttendanceRows,
+  filterRemoteWorkRequests,
+  filterWorkAbroadRequests,
+  getDefaultSortDirectionForKey,
+  getEmployeeCellColor,
+  getWeekPointCapacity,
+  getWeekPoints,
+  getWeekCoverageKinds,
+  getWeekLabel,
+  formatNameBucket,
+  sortDisplayRows,
+  type ApprovalRequestRow,
+  type DisplayRow,
+  type GroupRow,
+  type SortDir,
+  type SortKey,
+  type WeeklyCompliance,
+  type WfhFilterMode,
+} from '@/lib/office-attendance-view';
 import { useUrlStateSync, type UrlStateField } from '@/lib/use-url-state-sync';
 
 interface Props {
@@ -39,11 +70,8 @@ interface Props {
   endDate: string;
 }
 
-type SortKey = 'name' | 'department' | 'officeLocation' | 'total' | 'avgPerWeek' | 'trend' | string;
-type SortDir = 'asc' | 'desc';
 type ViewMode = OfficeAttendanceViewKey;
 type DateFilterMode = 'quick' | 'custom';
-type WfhFilterMode = 'all' | 'standard-only' | 'approved-only';
 const DEFAULT_EMPLOYEE_LOCATION = 'Quebec (Montreal Head Office)';
 
 function getInitialViewMode(searchParams: SearchParamReader): ViewMode {
@@ -78,52 +106,6 @@ function getInitialWfhFilter(searchParams: SearchParamReader): WfhFilterMode {
   return 'all';
 }
 
-interface GroupRow {
-  id: string;
-  groupLabel: string;
-  employeeCount: number;
-  quebecEmployeeCount: number;
-  remoteEmployeeCount: number;
-  unknownCoverageCount: number;
-  managerName?: string;
-  managerEmail?: string | null;
-  officeLocation: string;
-  weeks: Record<string, WeekCell>;
-  weeklyCompliance: Record<string, WeeklyCompliance>;
-  total: number;
-  avgPerWeek: number;
-  scorePct: number;
-  trend: 'up' | 'down' | 'flat';
-}
-
-interface DisplayRow {
-  id: string;
-  label: string;
-  secondary: string;
-  officeLocation: string;
-  hasActivTrakCoverage: boolean;
-  approvedRemoteWorkRequest: boolean;
-  hasStandingWfhPolicy: boolean;
-  hasApprovedRemoteRequestInRange: boolean;
-  hasApprovedWorkAbroadRequestInRange: boolean;
-  hasAnyApprovedWfhCoverageInRange: boolean;
-  remoteWorkStatusLabel: string;
-  weeks: Record<string, WeekCell>;
-  total: number;
-  avgPerWeek: number;
-  scorePct: number;
-  trend: 'up' | 'down' | 'flat';
-  employeeCount?: number;
-  quebecEmployeeCount?: number;
-  remoteEmployeeCount?: number;
-  unknownCoverageCount?: number;
-  weeklyCompliance?: Record<string, WeeklyCompliance>;
-  managerName?: string;
-  managerEmail?: string | null;
-  email?: string;
-  exemptWeekCount?: number;
-}
-
 interface DetailState {
   row: DisplayRow;
 }
@@ -138,41 +120,6 @@ interface CalendarMonth {
   } | null>;
 }
 
-interface WeeklyCompliance {
-  compliantEmployees: number;
-  eligibleEmployees: number;
-  exemptEmployees: number;
-  excusedEmployees: number;
-  unknownEmployees: number;
-  compliancePct: number;
-  compliantNames: string[];
-  nonCompliantNames: string[];
-  exemptNames: string[];
-  excusedNames: string[];
-}
-
-interface ApprovalRequestRow {
-  source: 'remote-work' | 'work-abroad';
-  sourceLabel: string;
-  bambooRowId: number;
-  employeeId: string;
-  employeeName: string;
-  email: string;
-  department: string;
-  officeLocation: string;
-  requestDate: string | null;
-  startDate: string;
-  endDate: string | null;
-  category: string | null;
-  approvalStatus: string | null;
-  approver: string | null;
-  reason: string | null;
-  address: string | null;
-  schedule: string | null;
-  supportingDocumentationSubmitted: string | null;
-  alternateInOfficeWorkDate: string | null;
-}
-
 const PAGE_SIZE = 50;
 const UNKNOWN_DISPLAY_VALUE = '—';
 
@@ -180,27 +127,6 @@ const UNKNOWN_DISPLAY_VALUE = '—';
 function parseLocalDate(s: string): Date {
   const [y, m, d] = s.split('-').map(Number);
   return new Date(y!, m! - 1, d!);
-}
-
-type EmployeeCellToneKey = keyof typeof CELL_COLORS;
-
-function hasWeekPto(cell?: Pick<WeekCell, 'ptoDays'>): boolean {
-  return (cell?.ptoDays ?? 0) > 0;
-}
-
-function getEmployeeCellToneKey(cell?: WeekCell): EmployeeCellToneKey {
-  if (hasWeekPto(cell)) return 'pto';
-  if (cell?.adjustedCompliant) return 'compliant';
-  if ((cell?.officeDays ?? 0) >= 1) return 'partial';
-  return 'absent';
-}
-
-function getEmployeeCellColor(cell?: WeekCell): string {
-  return CELL_COLORS[getEmployeeCellToneKey(cell)];
-}
-
-function getEmployeeCellHex(cell?: WeekCell): string {
-  return CELL_HEX[getEmployeeCellToneKey(cell)];
 }
 
 function getAdjustedTargetDisplay(cell?: Pick<WeekCell, 'adjustedOfficeTarget' | 'isPtoExcused'>): string {
@@ -212,13 +138,6 @@ function getWeekPolicyLabel(cell?: Pick<WeekCell, 'exceptionLabel' | 'isPtoExcus
   if (cell?.exceptionLabel && cell?.isPtoExcused) return `${cell.exceptionLabel} · PTO-excused`;
   if (cell?.exceptionLabel) return cell.exceptionLabel;
   return cell?.isPtoExcused ? 'PTO-excused week' : 'Standard Policy';
-}
-
-function getWeekCoverageKinds(cell?: Pick<WeekCell, 'hasApprovedRemoteCoverage' | 'hasApprovedWorkAbroadCoverage'>): Array<'remote' | 'abroad'> {
-  const kinds: Array<'remote' | 'abroad'> = [];
-  if (cell?.hasApprovedRemoteCoverage) kinds.push('remote');
-  if (cell?.hasApprovedWorkAbroadCoverage) kinds.push('abroad');
-  return kinds;
 }
 
 function getCoverageSummaryLabel(cell?: Pick<WeekCell, 'hasApprovedRemoteCoverage' | 'hasApprovedWorkAbroadCoverage'>): string {
@@ -241,14 +160,6 @@ function renderWeekCoverageMarkers(cell?: Pick<WeekCell, 'hasApprovedRemoteCover
   );
 }
 
-function formatEmployeeWeekValue(cell: WeekCell | undefined, isKnown: boolean): string {
-  if (!isKnown) return UNKNOWN_DISPLAY_VALUE;
-  const officeDays = cell?.officeDays ?? 0;
-  const kinds = getWeekCoverageKinds(cell);
-  const markers = kinds.map((kind) => kind === 'remote' ? '[House]' : '[Plane]').join(' ');
-  return markers ? `${officeDays} ${markers}` : String(officeDays);
-}
-
 function renderEmployeeWeekValue(cell: WeekCell | undefined, isKnown: boolean) {
   if (!isKnown) return UNKNOWN_DISPLAY_VALUE;
   const officeDays = cell?.officeDays ?? 0;
@@ -258,79 +169,6 @@ function renderEmployeeWeekValue(cell: WeekCell | undefined, isKnown: boolean) {
       {renderWeekCoverageMarkers(cell)}
     </span>
   );
-}
-
-function createEmptyWeeklyCompliance(): WeeklyCompliance {
-  return {
-    compliantEmployees: 0,
-    eligibleEmployees: 0,
-    exemptEmployees: 0,
-    excusedEmployees: 0,
-    unknownEmployees: 0,
-    compliancePct: 0,
-    compliantNames: [],
-    nonCompliantNames: [],
-    exemptNames: [],
-    excusedNames: [],
-  };
-}
-
-function createEmptyWeekCell(): WeekCell {
-  return {
-    officeDays: 0,
-    remoteDays: 0,
-    ptoDays: 0,
-    days: [],
-    rawOfficeTarget: OFFICE_DAYS_REQUIRED,
-    adjustedOfficeTarget: OFFICE_DAYS_REQUIRED,
-    adjustedCompliant: false,
-    isPtoExcused: false,
-    hasApprovedWfhCoverage: false,
-    hasApprovedRemoteCoverage: false,
-    hasApprovedWorkAbroadCoverage: false,
-    wfhExceptionType: 'none',
-    approvedCoverageWeekdays: 0,
-    exceptionLabel: null,
-  };
-}
-
-function getWeekPointCapacity(cell?: WeekCell): number {
-  const adjustedOfficeTarget = cell?.adjustedOfficeTarget;
-  return adjustedOfficeTarget == null ? 0 : Math.max(0, adjustedOfficeTarget);
-}
-
-function getWeekPoints(cell?: WeekCell): number {
-  const officeDays = cell?.officeDays ?? 0;
-  return Math.min(officeDays, getWeekPointCapacity(cell));
-}
-
-function calculateScorePct(weeksByKey: Record<string, WeekCell>, scopedWeeks: string[]): number {
-  let earned = 0;
-  let capacity = 0;
-  let hadMeasuredWeek = false;
-  let allMeasuredWeeksCompliant = true;
-  for (const week of scopedWeeks) {
-    const cell = weeksByKey[week];
-    if (cell?.adjustedCompliant !== null && cell?.adjustedCompliant !== undefined) {
-      hadMeasuredWeek = true;
-      if (cell.adjustedCompliant === false) allMeasuredWeeksCompliant = false;
-    }
-    earned += getWeekPoints(cell);
-    capacity += getWeekPointCapacity(cell);
-  }
-  if (capacity <= 0) return hadMeasuredWeek && allMeasuredWeeksCompliant ? 100 : 0;
-  return Math.round((earned / capacity) * 100);
-}
-
-function hasEligibleEmployeeWeek(row: Pick<AttendanceRow, 'weeks'>, scopedWeeks: string[]): boolean {
-  return scopedWeeks.some((week) => {
-    const adjustedOfficeTarget = row.weeks[week]?.adjustedOfficeTarget;
-    return adjustedOfficeTarget != null && adjustedOfficeTarget > 0;
-  });
-}
-
-function hasEligibleGroupWeek(row: Pick<GroupRow, 'weeklyCompliance'>, scopedWeeks: string[]): boolean {
-  return scopedWeeks.some((week) => (row.weeklyCompliance[week]?.eligibleEmployees ?? 0) > 0);
 }
 
 function scoreTone(scorePct: number): string {
@@ -348,23 +186,12 @@ function complianceValueTone(scorePct: number, eligibleEmployees: number): strin
   return scoreTone(scorePct);
 }
 
-function formatNameBucket(names: string[]): string {
-  return names.length > 0 ? names.join(', ') : '—';
-}
-
 function formatKnownValue(value: number | string, isKnown: boolean): string {
   return isKnown ? String(value) : UNKNOWN_DISPLAY_VALUE;
 }
 
 function employeeMetricTone(isKnown: boolean, scorePct: number): string {
   return isKnown ? scoreTone(scorePct) : unknownTone();
-}
-
-function compareMaybeNumber(a: number | null, b: number | null, dir: number): number {
-  if (a === null && b === null) return 0;
-  if (a === null) return 1;
-  if (b === null) return -1;
-  return dir * (a - b);
 }
 
 function formatRangeLabel(startDate: string, endDate: string): string {
@@ -410,13 +237,6 @@ function formatDayLabel(date: string): string {
     month: 'short',
     day: 'numeric',
   });
-}
-
-function getWeekLabel(week: string): string {
-  const start = parseLocalDate(week);
-  const end = new Date(start.getTime());
-  end.setDate(start.getDate() + 4);
-  return `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
 }
 
 function formatOptionalDate(date: string | null): string {
@@ -723,7 +543,7 @@ export function AttendanceClient({
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-    else { setSortKey(key); setSortDir(key === 'name' || key === 'department' || key === 'officeLocation' ? 'asc' : 'desc'); }
+    else { setSortKey(key); setSortDir(getDefaultSortDirectionForKey(key)); }
     setPage(0);
   };
 
@@ -766,528 +586,96 @@ export function AttendanceClient({
     || appliedDateFilterMode !== 'custom';
 
   // Filter
-  const filtered = useMemo(() => {
-    let list = rows;
-    if (selectedDepts.length > 0) {
-      const deptSet = new Set(selectedDepts);
-      list = list.filter((r) => deptSet.has(r.department));
-    }
-    if (selectedLocs.length > 0) {
-      const locSet = new Set(selectedLocs);
-      list = list.filter((r) => locSet.has(r.officeLocation));
-    }
-    if (isApprovedRemoteWorkView) {
-      list = list.filter((r) => r.hasAnyApprovedWfhCoverageInRange);
-    } else if (!isAggregateView) {
-      if (wfhFilter === 'standard-only') {
-        list = list.filter((r) => !r.hasAnyApprovedWfhCoverageInRange);
-      } else if (wfhFilter === 'approved-only') {
-        list = list.filter((r) => r.hasAnyApprovedWfhCoverageInRange);
-      }
-    }
-    if (search) {
-      const q = search.toLowerCase();
-      list = list.filter((r) =>
-        r.name.toLowerCase().includes(q) ||
-        r.email.toLowerCase().includes(q) ||
-        r.department.toLowerCase().includes(q) ||
-        r.managerName.toLowerCase().includes(q) ||
-        (r.managerEmail || '').toLowerCase().includes(q),
-      );
-    }
-    return list;
-  }, [isApprovedRemoteWorkView, isAggregateView, rows, search, selectedDepts, selectedLocs, wfhFilter]);
+  const filtered = useMemo(
+    () => filterAttendanceRows({
+      rows,
+      selectedDepartments: selectedDepts,
+      selectedLocations: selectedLocs,
+      isAggregateView,
+      isApprovedRemoteWorkView,
+      search,
+      wfhFilter,
+    }),
+    [isAggregateView, isApprovedRemoteWorkView, rows, search, selectedDepts, selectedLocs, wfhFilter],
+  );
 
-  const groupedRows = useMemo<GroupRow[]>(() => {
-    const grouped = new Map<string, GroupRow>();
-    const groupMembersByKey = new Map<string, Set<string>>();
-    const normalizeEmail = (email: string | null | undefined) => email?.toLowerCase().trim() || null;
+  const groupedRows = useMemo<GroupRow[]>(
+    () => buildGroupedRows({
+      filteredRows: filtered,
+      isManagerView,
+      weeks,
+      scoredWeeks,
+      defaultEmployeeLocation: DEFAULT_EMPLOYEE_LOCATION,
+    }),
+    [filtered, isManagerView, scoredWeeks, weeks],
+  );
 
-    const addEmployeeToGroup = (group: GroupRow, row: AttendanceRow) => {
-      const isQuebecEmployee = row.officeLocation === DEFAULT_EMPLOYEE_LOCATION;
-      const hasCoverage = row.hasActivTrakCoverage;
+  const displayRows = useMemo<DisplayRow[]>(
+    () => buildDisplayRows({
+      filteredRows: filtered,
+      groupedRows,
+      isAggregateView,
+      scoredWeeks,
+      weeks,
+    }),
+    [filtered, groupedRows, isAggregateView, scoredWeeks, weeks],
+  );
 
-      group.employeeCount += 1;
-      if (isQuebecEmployee && hasCoverage) {
-        group.quebecEmployeeCount += 1;
-        group.total += row.total;
-      } else if (isQuebecEmployee && !hasCoverage) {
-        group.unknownCoverageCount += 1;
-      }
-      if (!isQuebecEmployee || row.hasAnyApprovedWfhCoverageInRange) {
-        group.remoteEmployeeCount += 1;
-      }
-      if (group.officeLocation !== row.officeLocation) {
-        group.officeLocation = 'Mixed';
-      }
+  const sorted = useMemo(
+    () => sortDisplayRows({
+      rows: displayRows,
+      sortKey,
+      sortDir,
+      isAggregateView,
+    }),
+    [displayRows, isAggregateView, sortDir, sortKey],
+  );
 
-      for (const week of weeks) {
-        const cell = row.weeks[week];
-        if (!group.weeklyCompliance[week]) {
-          group.weeklyCompliance[week] = createEmptyWeeklyCompliance();
-        }
-        const compliance = group.weeklyCompliance[week]!;
+  const filteredSummary = useMemo(
+    () => buildFilteredAttendanceSummary({
+      filteredRows: filtered,
+      groupedRows,
+      isAggregateView,
+      scoredWeeks,
+    }),
+    [filtered, groupedRows, isAggregateView, scoredWeeks],
+  );
 
-        if (!isQuebecEmployee) {
-          continue;
-        }
+  const filteredRemoteWorkRequests = useMemo(
+    () => filterRemoteWorkRequests({
+      requests: remoteWorkRequests,
+      selectedDepartments: selectedDepts,
+      selectedLocations: selectedLocs,
+      search,
+      sortDir,
+    }),
+    [remoteWorkRequests, search, selectedDepts, selectedLocs, sortDir],
+  );
 
-        if (!hasCoverage) {
-          compliance.unknownEmployees += 1;
-          continue;
-        }
+  const filteredWorkAbroadRequests = useMemo(
+    () => filterWorkAbroadRequests({
+      requests: workAbroadRequests,
+      selectedDepartments: selectedDepts,
+      selectedLocations: selectedLocs,
+      search,
+      sortDir,
+    }),
+    [workAbroadRequests, search, selectedDepts, selectedLocs, sortDir],
+  );
 
-        const weekCell = cell || createEmptyWeekCell();
-        const current = group.weeks[week] || createEmptyWeekCell();
-        current.officeDays += weekCell.officeDays ?? 0;
-        current.remoteDays += weekCell.remoteDays ?? 0;
-        current.ptoDays += weekCell.ptoDays ?? 0;
-        group.weeks[week] = current;
+  const requestSummary = useMemo(
+    () => buildApprovalRequestSummary(filteredRemoteWorkRequests, filteredWorkAbroadRequests),
+    [filteredRemoteWorkRequests, filteredWorkAbroadRequests],
+  );
 
-        if (weekCell.adjustedOfficeTarget === 0 && weekCell.hasApprovedWfhCoverage) {
-          compliance.exemptEmployees += 1;
-          compliance.exemptNames.push(row.name);
-          continue;
-        }
-
-        if (weekCell.isPtoExcused) {
-          compliance.excusedEmployees += 1;
-          compliance.excusedNames.push(row.name);
-          continue;
-        }
-
-        if (weekCell.adjustedCompliant === null) {
-          compliance.unknownEmployees += 1;
-          continue;
-        }
-
-        compliance.eligibleEmployees += 1;
-        if (weekCell.adjustedCompliant) {
-          compliance.compliantEmployees += 1;
-          compliance.compliantNames.push(row.name);
-        } else {
-          compliance.nonCompliantNames.push(row.name);
-        }
-      }
-    };
-
-    for (const row of filtered) {
-      const key = isManagerView
-        ? (row.managerEmail || `manager:${row.managerName || 'Unassigned'}`)
-        : (row.department || 'Unknown');
-      const groupLabel = isManagerView ? (row.managerName || 'Unassigned') : (row.department || 'Unknown');
-      const existing = grouped.get(key) || {
-        id: key,
-        groupLabel,
-        employeeCount: 0,
-        quebecEmployeeCount: 0,
-        remoteEmployeeCount: 0,
-        unknownCoverageCount: 0,
-        managerName: isManagerView ? groupLabel : undefined,
-        managerEmail: isManagerView ? (row.managerEmail || null) : undefined,
-        officeLocation: row.officeLocation || 'Unknown',
-        weeks: {},
-        weeklyCompliance: {},
-        total: 0,
-        avgPerWeek: 0,
-        scorePct: 0,
-        trend: 'flat',
-      };
-
-      addEmployeeToGroup(existing, row);
-      grouped.set(key, existing);
-      if (!groupMembersByKey.has(key)) groupMembersByKey.set(key, new Set());
-      const normalizedRowEmail = normalizeEmail(row.email);
-      if (normalizedRowEmail) {
-        groupMembersByKey.get(key)!.add(normalizedRowEmail);
-      }
-    }
-
-    if (isManagerView) {
-      const employeeByEmail = new Map<string, AttendanceRow>();
-      for (const row of filtered) {
-        const normalizedEmail = normalizeEmail(row.email);
-        if (!normalizedEmail) continue;
-        if (!employeeByEmail.has(normalizedEmail)) {
-          employeeByEmail.set(normalizedEmail, row);
-        }
-      }
-      for (const [key, group] of grouped) {
-        const managerEmail = normalizeEmail(group.managerEmail);
-        const managerEmployee = managerEmail ? employeeByEmail.get(managerEmail) : null;
-        if (!groupMembersByKey.has(key)) groupMembersByKey.set(key, new Set());
-        if (managerEmployee) {
-          const normalizedManagerEmail = normalizeEmail(managerEmployee.email);
-          if (normalizedManagerEmail && groupMembersByKey.get(key)!.has(normalizedManagerEmail)) continue;
-          addEmployeeToGroup(group, managerEmployee);
-          if (normalizedManagerEmail) {
-            groupMembersByKey.get(key)!.add(normalizedManagerEmail);
-          }
-        } else if (managerEmail) {
-          group.employeeCount += 1;
-          group.remoteEmployeeCount += 1;
-          for (const week of weeks) {
-            if (!group.weeklyCompliance[week]) {
-              group.weeklyCompliance[week] = createEmptyWeeklyCompliance();
-            }
-            group.weeklyCompliance[week]!.exemptNames.push(group.groupLabel);
-          }
-        }
-        grouped.set(key, group);
-      }
-    }
-
-    return [...grouped.values()].map((row) => {
-      for (const week of weeks) {
-        const compliance = row.weeklyCompliance[week] || createEmptyWeeklyCompliance();
-        compliance.compliancePct = compliance.eligibleEmployees > 0
-          ? Math.round((compliance.compliantEmployees / compliance.eligibleEmployees) * 100)
-          : 0;
-        compliance.compliantNames.sort((a, b) => a.localeCompare(b));
-        compliance.nonCompliantNames.sort((a, b) => a.localeCompare(b));
-        compliance.exemptNames.sort((a, b) => a.localeCompare(b));
-        compliance.excusedNames.sort((a, b) => a.localeCompare(b));
-        row.weeklyCompliance[week] = compliance;
-      }
-
-      const avgPerWeek = scoredWeeks.length > 0
-        ? Math.round((row.total / Math.max(1, row.quebecEmployeeCount) / scoredWeeks.length) * 10) / 10
-        : 0;
-      const measuredWeeks = scoredWeeks.filter((week) => (row.weeklyCompliance[week]?.eligibleEmployees ?? 0) > 0);
-      const neutralOnlyWeeks = scoredWeeks.filter((week) => {
-        const compliance = row.weeklyCompliance[week];
-        return (compliance?.eligibleEmployees ?? 0) === 0
-          && (((compliance?.exemptEmployees ?? 0) > 0) || ((compliance?.excusedEmployees ?? 0) > 0));
-      });
-      const scorePct = measuredWeeks.length > 0
-        ? Math.round(
-          measuredWeeks.reduce((sum, week) => sum + (row.weeklyCompliance[week]?.compliancePct ?? 0), 0) / measuredWeeks.length,
-        )
-        : (neutralOnlyWeeks.length > 0 ? 100 : 0);
-      let trend: 'up' | 'down' | 'flat' = 'flat';
-      if (measuredWeeks.length >= 2) {
-        const prevWeek = measuredWeeks[measuredWeeks.length - 2]!;
-        const lastWeek = measuredWeeks[measuredWeeks.length - 1]!;
-        const prevCompliance = row.weeklyCompliance[prevWeek]?.compliancePct ?? 0;
-        const lastCompliance = row.weeklyCompliance[lastWeek]?.compliancePct ?? 0;
-        if (lastCompliance > prevCompliance) trend = 'up';
-        else if (lastCompliance < prevCompliance) trend = 'down';
-      }
-      return {
-        ...row,
-        avgPerWeek,
-        scorePct,
-        trend,
-      };
-    });
-  }, [filtered, isManagerView, scoredWeeks, weeks]);
-
-  const displayRows = useMemo<DisplayRow[]>(() => {
-    const employeeRows: DisplayRow[] = filtered.map((row) => ({
-      id: row.email,
-      label: row.name,
-      secondary: row.department,
-      officeLocation: row.officeLocation,
-      hasActivTrakCoverage: row.hasActivTrakCoverage,
-      approvedRemoteWorkRequest: row.approvedRemoteWorkRequest,
-      hasStandingWfhPolicy: row.hasStandingWfhPolicy,
-      hasApprovedRemoteRequestInRange: row.hasApprovedRemoteRequestInRange,
-      hasApprovedWorkAbroadRequestInRange: row.hasApprovedWorkAbroadRequestInRange,
-      hasAnyApprovedWfhCoverageInRange: row.hasAnyApprovedWfhCoverageInRange,
-      remoteWorkStatusLabel: row.remoteWorkStatusLabel,
-      weeks: row.weeks,
-      total: row.total,
-      avgPerWeek: row.avgPerWeek,
-      scorePct: row.hasActivTrakCoverage ? calculateScorePct(row.weeks, scoredWeeks) : 0,
-      trend: row.trend,
-      managerName: row.managerName,
-      managerEmail: row.managerEmail,
-      email: row.email,
-      exemptWeekCount: row.exemptWeekCount,
-    }));
-
-    const aggregateDisplayRows: DisplayRow[] = groupedRows.map((row) => ({
-      id: row.id,
-      label: row.groupLabel,
-      secondary: String(row.employeeCount),
-      officeLocation: row.officeLocation,
-      hasActivTrakCoverage: true,
-      approvedRemoteWorkRequest: false,
-      hasStandingWfhPolicy: false,
-      hasApprovedRemoteRequestInRange: false,
-      hasApprovedWorkAbroadRequestInRange: false,
-      hasAnyApprovedWfhCoverageInRange: false,
-      remoteWorkStatusLabel: '—',
-      weeks: Object.fromEntries(
-        weeks.map((week) => {
-          const compliance = row.weeklyCompliance[week];
-          return [week, {
-            officeDays: compliance?.compliancePct ?? 0,
-            remoteDays: compliance?.compliantEmployees ?? 0,
-            ptoDays: compliance?.eligibleEmployees ?? 0,
-            days: [],
-            rawOfficeTarget: OFFICE_DAYS_REQUIRED,
-            adjustedOfficeTarget: OFFICE_DAYS_REQUIRED,
-            adjustedCompliant: (compliance?.compliancePct ?? 0) >= 100,
-            isPtoExcused: false,
-            hasApprovedWfhCoverage: false,
-            hasApprovedRemoteCoverage: false,
-            hasApprovedWorkAbroadCoverage: false,
-            wfhExceptionType: 'none',
-            approvedCoverageWeekdays: 0,
-            exceptionLabel: null,
-          }];
-        }),
-      ),
-      total: row.total,
-      avgPerWeek: row.avgPerWeek,
-      scorePct: row.scorePct,
-      trend: row.trend,
-      employeeCount: row.employeeCount,
-      quebecEmployeeCount: row.quebecEmployeeCount,
-      remoteEmployeeCount: row.remoteEmployeeCount,
-      unknownCoverageCount: row.unknownCoverageCount,
-      weeklyCompliance: row.weeklyCompliance,
-      exemptWeekCount: 0,
-    }));
-
-    return isAggregateView ? aggregateDisplayRows : employeeRows;
-  }, [filtered, groupedRows, isAggregateView, scoredWeeks, weeks]);
-
-  const sorted = useMemo(() => {
-    const arr = [...displayRows];
-    const dir = sortDir === 'asc' ? 1 : -1;
-    arr.sort((a, b) => {
-      if (sortKey === 'name') return dir * a.label.localeCompare(b.label);
-      if (sortKey === 'department') {
-        if (isAggregateView) return dir * ((Number(a.secondary) || 0) - (Number(b.secondary) || 0));
-        return dir * a.secondary.localeCompare(b.secondary);
-      }
-      if (sortKey === 'quebecEmployeeCount') return dir * ((a.quebecEmployeeCount ?? 0) - (b.quebecEmployeeCount ?? 0));
-      if (sortKey === 'remoteEmployeeCount') return dir * ((a.remoteEmployeeCount ?? 0) - (b.remoteEmployeeCount ?? 0));
-      if (sortKey === 'officeLocation') return dir * a.officeLocation.localeCompare(b.officeLocation);
-      if (sortKey === 'total') {
-        return compareMaybeNumber(
-          !isAggregateView && !a.hasActivTrakCoverage ? null : a.total,
-          !isAggregateView && !b.hasActivTrakCoverage ? null : b.total,
-          dir,
-        );
-      }
-      if (sortKey === 'avgPerWeek') {
-        return compareMaybeNumber(
-          !isAggregateView && !a.hasActivTrakCoverage ? null : a.avgPerWeek,
-          !isAggregateView && !b.hasActivTrakCoverage ? null : b.avgPerWeek,
-          dir,
-        );
-      }
-      if (sortKey === 'status') {
-        return compareMaybeNumber(
-          !isAggregateView && !a.hasActivTrakCoverage ? null : a.scorePct,
-          !isAggregateView && !b.hasActivTrakCoverage ? null : b.scorePct,
-          dir,
-        );
-      }
-      if (sortKey === 'trend') {
-        const order = { up: 2, flat: 1, down: 0 };
-        if (!isAggregateView) {
-          if (!a.hasActivTrakCoverage && !b.hasActivTrakCoverage) return 0;
-          if (!a.hasActivTrakCoverage) return 1;
-          if (!b.hasActivTrakCoverage) return -1;
-        }
-        return dir * (order[a.trend] - order[b.trend]);
-      }
-      return compareMaybeNumber(
-        !isAggregateView && !a.hasActivTrakCoverage ? null : (a.weeks[sortKey]?.officeDays ?? 0),
-        !isAggregateView && !b.hasActivTrakCoverage ? null : (b.weeks[sortKey]?.officeDays ?? 0),
-        dir,
-      );
-    });
-    return arr;
-  }, [displayRows, isAggregateView, sortDir, sortKey]);
-
-  const filteredSummary = useMemo(() => {
-    const totalEmployees = filtered.length;
-    const numCompletedWeeks = scoredWeeks.length;
-    const totalEligibleQuebecEmployees = groupedRows.reduce((sum, row) => sum + row.quebecEmployeeCount, 0);
-    const unknownCoverageCount = filtered.filter((row) => !row.hasActivTrakCoverage).length;
-    const measurableEmployees = filtered.filter((row) => row.hasActivTrakCoverage && hasEligibleEmployeeWeek(row, scoredWeeks)).length;
-    const measurableGroups = groupedRows.filter((row) => hasEligibleGroupWeek(row, scoredWeeks)).length;
-    const coveredEmployees = Math.max(0, totalEmployees - unknownCoverageCount);
-    let zeroCount = 0;
-    let sumOfficeDays = 0;
-    let sumScorePct = 0;
-
-    if (isAggregateView) {
-      for (const row of groupedRows) {
-        if (row.total === 0) zeroCount++;
-        if (hasEligibleGroupWeek(row, scoredWeeks)) {
-          sumScorePct += row.scorePct;
-        }
-        for (const week of scoredWeeks) {
-          sumOfficeDays += row.weeks[week]?.officeDays ?? 0;
-        }
-      }
-    } else {
-      for (const row of filtered) {
-        if (!row.hasActivTrakCoverage) continue;
-        if (row.total === 0) zeroCount++;
-        if (hasEligibleEmployeeWeek(row, scoredWeeks)) {
-          sumScorePct += calculateScorePct(row.weeks, scoredWeeks);
-        }
-        for (const week of scoredWeeks) {
-          sumOfficeDays += row.weeks[week]?.officeDays ?? 0;
-        }
-      }
-    }
-
-    const avgOfficeDays = (isAggregateView ? totalEligibleQuebecEmployees : coveredEmployees) > 0 && numCompletedWeeks > 0
-      ? Math.round((sumOfficeDays / Math.max(1, isAggregateView ? totalEligibleQuebecEmployees : coveredEmployees) / numCompletedWeeks) * 10) / 10
-      : 0;
-    const complianceRate = (isAggregateView ? measurableGroups : measurableEmployees) > 0
-      ? Math.round(sumScorePct / Math.max(1, isAggregateView ? measurableGroups : measurableEmployees))
-      : 0;
-    const zeroOfficeDepartments = groupedRows.filter((row) => row.total === 0 && row.quebecEmployeeCount > 0).length;
-
-    return {
-      totalEmployees,
-      totalDepartments: groupedRows.length,
-      measurableEmployees,
-      unknownCoverageCount,
-      avgOfficeDays,
-      complianceRate,
-      zeroOfficeDaysCount: zeroCount,
-      zeroOfficeDepartments,
-    };
-  }, [filtered, groupedRows, isAggregateView, scoredWeeks]);
-
-  const filteredRemoteWorkRequests = useMemo(() => {
-    let list = [...remoteWorkRequests];
-    if (selectedDepts.length > 0) {
-      const deptSet = new Set(selectedDepts);
-      list = list.filter((request) => deptSet.has(request.department));
-    }
-    if (selectedLocs.length > 0) {
-      const locSet = new Set(selectedLocs);
-      list = list.filter((request) => locSet.has(request.officeLocation));
-    }
-    if (search) {
-      const q = search.toLowerCase();
-      list = list.filter((request) =>
-        request.employeeName.toLowerCase().includes(q) ||
-        request.email.toLowerCase().includes(q) ||
-        request.department.toLowerCase().includes(q) ||
-        (request.remoteWorkType || '').toLowerCase().includes(q) ||
-        (request.reason || '').toLowerCase().includes(q) ||
-        (request.managerName || '').toLowerCase().includes(q),
-      );
-    }
-    list.sort((a, b) => {
-      const aDate = a.remoteWorkStartDate;
-      const bDate = b.remoteWorkStartDate;
-      if (sortDir === 'asc') {
-        return aDate.localeCompare(bDate) || a.employeeName.localeCompare(b.employeeName);
-      }
-      return bDate.localeCompare(aDate) || a.employeeName.localeCompare(b.employeeName);
-    });
-    return list;
-  }, [remoteWorkRequests, search, selectedDepts, selectedLocs, sortDir]);
-
-  const filteredWorkAbroadRequests = useMemo(() => {
-    let list = [...workAbroadRequests];
-    if (selectedDepts.length > 0) {
-      const deptSet = new Set(selectedDepts);
-      list = list.filter((request) => deptSet.has(request.department));
-    }
-    if (selectedLocs.length > 0) {
-      const locSet = new Set(selectedLocs);
-      list = list.filter((request) => locSet.has(request.officeLocation));
-    }
-    if (search) {
-      const q = search.toLowerCase();
-      list = list.filter((request) =>
-        request.employeeName.toLowerCase().includes(q) ||
-        request.email.toLowerCase().includes(q) ||
-        request.department.toLowerCase().includes(q) ||
-        (request.countryOrProvince || '').toLowerCase().includes(q) ||
-        (request.reason || '').toLowerCase().includes(q) ||
-        (request.approvedDeclinedBy || '').toLowerCase().includes(q) ||
-        (request.remoteWorkLocationAddress || '').toLowerCase().includes(q),
-      );
-    }
-    list.sort((a, b) => {
-      const aDate = a.workAbroadStartDate;
-      const bDate = b.workAbroadStartDate;
-      if (sortDir === 'asc') {
-        return aDate.localeCompare(bDate) || a.employeeName.localeCompare(b.employeeName);
-      }
-      return bDate.localeCompare(aDate) || a.employeeName.localeCompare(b.employeeName);
-    });
-    return list;
-  }, [workAbroadRequests, search, selectedDepts, selectedLocs, sortDir]);
-
-  const requestSummary = useMemo(() => {
-    const allRequests = [
-      ...filteredRemoteWorkRequests.map((request) => request.email || request.employeeId),
-      ...filteredWorkAbroadRequests.map((request) => request.email || request.employeeId),
-    ];
-    const uniqueEmployees = new Set(allRequests);
-    return {
-      totalRequests: filteredRemoteWorkRequests.length + filteredWorkAbroadRequests.length,
-      uniqueEmployees: uniqueEmployees.size,
-      remoteWorkRequests: filteredRemoteWorkRequests.length,
-      workAbroadRequests: filteredWorkAbroadRequests.length,
-    };
-  }, [filteredRemoteWorkRequests, filteredWorkAbroadRequests]);
-
-  const combinedApprovalRequests = useMemo<ApprovalRequestRow[]>(() => ([
-    ...filteredRemoteWorkRequests.map((request) => ({
-      source: 'remote-work' as const,
-      sourceLabel: 'Remote Work',
-      bambooRowId: request.bambooRowId,
-      employeeId: request.employeeId,
-      employeeName: request.employeeName,
-      email: request.email,
-      department: request.department,
-      officeLocation: request.officeLocation,
-      requestDate: request.requestDate,
-      startDate: request.remoteWorkStartDate,
-      endDate: request.remoteWorkEndDate,
-      category: request.remoteWorkType,
-      approvalStatus: request.managerApprovalReceived,
-      approver: request.managerName,
-      reason: request.reason,
-      address: null,
-      schedule: null,
-      supportingDocumentationSubmitted: request.supportingDocumentationSubmitted,
-      alternateInOfficeWorkDate: request.alternateInOfficeWorkDate,
-    })),
-    ...filteredWorkAbroadRequests.map((request) => ({
-      source: 'work-abroad' as const,
-      sourceLabel: 'Work Abroad / Province',
-      bambooRowId: request.bambooRowId,
-      employeeId: request.employeeId,
-      employeeName: request.employeeName,
-      email: request.email,
-      department: request.department,
-      officeLocation: request.officeLocation,
-      requestDate: request.requestDate,
-      startDate: request.workAbroadStartDate,
-      endDate: request.workAbroadEndDate,
-      category: request.countryOrProvince,
-      approvalStatus: request.requestApproved,
-      approver: request.approvedDeclinedBy,
-      reason: request.reason,
-      address: request.remoteWorkLocationAddress,
-      schedule: request.workSchedule,
-      supportingDocumentationSubmitted: null,
-      alternateInOfficeWorkDate: null,
-    })),
-  ]).sort((a, b) => {
-    if (sortDir === 'asc') {
-      return a.startDate.localeCompare(b.startDate) || a.employeeName.localeCompare(b.employeeName);
-    }
-    return b.startDate.localeCompare(a.startDate) || a.employeeName.localeCompare(b.employeeName);
-  }), [filteredRemoteWorkRequests, filteredWorkAbroadRequests, sortDir]);
+  const combinedApprovalRequests = useMemo<ApprovalRequestRow[]>(
+    () => buildCombinedApprovalRequests({
+      filteredRemoteWorkRequests,
+      filteredWorkAbroadRequests,
+      sortDir,
+    }),
+    [filteredRemoteWorkRequests, filteredWorkAbroadRequests, sortDir],
+  );
   const hasRequestResults = filteredRemoteWorkRequests.length > 0 || filteredWorkAbroadRequests.length > 0;
 
   const activeRowsCount = isApprovedRemoteWorkView ? combinedApprovalRequests.length : sorted.length;
@@ -1351,6 +739,23 @@ export function AttendanceClient({
     };
   }, [pageRows.length, viewMode, weeks.length]);
 
+  const approvalExportData = useMemo(
+    () => buildApprovalRequestExportData(combinedApprovalRequests),
+    [combinedApprovalRequests],
+  );
+
+  const attendanceExportData = useMemo(
+    () => buildAttendanceExportData({
+      rows: sorted,
+      weeks,
+      isAggregateView,
+      aggregateLabel,
+      aggregatePluralLabel,
+      filteredSummary,
+    }),
+    [aggregateLabel, aggregatePluralLabel, filteredSummary, isAggregateView, sorted, weeks],
+  );
+
   // --- Export helpers ---
   const downloadBlob = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -1363,128 +768,12 @@ export function AttendanceClient({
 
   const exportCSV = () => {
     if (isApprovedRemoteWorkView) {
-      const headers = [
-        'Source',
-        'Bamboo Row ID',
-        'Employee ID',
-        'Employee Name',
-        'Email',
-        'Department',
-        'Office Location',
-        'Request Date',
-        'Start Date',
-        'End Date',
-        'Category',
-        'Approval Status',
-        'Approver',
-        'Reason',
-        'Address',
-        'Work Schedule',
-        'Supporting Documentation Submitted',
-        'Alternate In-Office Work Date',
-      ];
-
-      const csvRows = combinedApprovalRequests.map((request) => [
-        request.sourceLabel,
-        String(request.bambooRowId),
-        request.employeeId,
-        request.employeeName,
-        request.email,
-        request.department,
-        request.officeLocation,
-        request.requestDate || '',
-        request.startDate,
-        request.endDate || '',
-        request.category || '',
-        request.approvalStatus || '',
-        request.approver || '',
-        request.reason || '',
-        request.address || '',
-        request.schedule || '',
-        request.supportingDocumentationSubmitted || '',
-        request.alternateInOfficeWorkDate || '',
-      ]);
-
-      const csv = [headers.join(','), ...csvRows.map((row) => row.map((c) => `"${String(c).replaceAll('"', '""')}"`).join(','))].join('\n');
+      const csv = buildApprovalRequestCsvContent(approvalExportData);
       downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), `office-attendance-approved-coverage-requests-${startDate}-${endDate}.csv`);
       return;
     }
 
-    const headers = [
-      isAggregateView ? aggregateLabel : 'Employee',
-      isAggregateView ? 'Employees' : 'Department',
-      ...(isAggregateView ? ['Quebec Employees', 'Remote/Exempt Employees'] : []),
-      'Location',
-      'Coverage Status',
-      ...(isAggregateView ? [] : ['Standing WFH Policy', 'Approved Coverage In Range', 'ActivTrak Coverage']),
-      ...weeks.map((w) => getWeekLabel(w)),
-      isAggregateView ? 'Total Office Days' : 'Total',
-      'Avg/Week',
-      'Score %',
-      'Trend',
-    ];
-
-    const csvRows = sorted.map((r) => [
-      r.label,
-      r.secondary,
-      ...(isAggregateView ? [String(r.quebecEmployeeCount ?? 0), String(r.remoteEmployeeCount ?? 0)] : []),
-      r.officeLocation,
-      isAggregateView ? '—' : r.remoteWorkStatusLabel,
-      ...(isAggregateView ? [] : [
-        r.hasStandingWfhPolicy ? 'Yes' : 'No',
-        r.hasAnyApprovedWfhCoverageInRange ? 'Yes' : 'No',
-        r.hasActivTrakCoverage ? 'Covered' : 'Unknown',
-      ]),
-      ...weeks.map((w) => isAggregateView
-        ? `${r.weeklyCompliance?.[w]?.compliancePct ?? 0}%`
-        : formatEmployeeWeekValue(r.weeks[w], r.hasActivTrakCoverage)),
-      isAggregateView ? String(r.total) : (r.hasActivTrakCoverage ? String(r.total) : ''),
-      isAggregateView ? String(r.avgPerWeek) : (r.hasActivTrakCoverage ? String(r.avgPerWeek) : ''),
-      isAggregateView ? `${r.scorePct}%` : (r.hasActivTrakCoverage ? `${r.scorePct}%` : ''),
-      isAggregateView ? r.trend : (r.hasActivTrakCoverage ? r.trend : ''),
-    ]);
-
-    const csvLines = [headers.join(','), ...csvRows.map((row) => row.map((c) => `"${c}"`).join(','))];
-
-    if (isAggregateView) {
-      csvLines.push('');
-      csvLines.push('Weekly Breakdown');
-      const detailHeaders = [
-        'Group',
-        'Week',
-        'Compliance %',
-        'Eligible Quebec',
-        'Compliant Count',
-        'Exempt Count',
-        'PTO Excused Count',
-        'Compliant',
-        'Non-compliant',
-        'Exempt this week',
-        'PTO Excused',
-      ];
-      csvLines.push(detailHeaders.join(','));
-      for (const row of sorted) {
-        for (const week of weeks) {
-          const compliance = row.weeklyCompliance?.[week];
-          if (!compliance) continue;
-          csvLines.push([
-            row.label,
-            getWeekLabel(week),
-            `${compliance.compliancePct}%`,
-            String(compliance.eligibleEmployees),
-            String(compliance.compliantEmployees),
-            String(compliance.exemptEmployees),
-            String(compliance.excusedEmployees),
-            formatNameBucket(compliance.compliantNames),
-            formatNameBucket(compliance.nonCompliantNames),
-            formatNameBucket(compliance.exemptNames),
-            formatNameBucket(compliance.excusedNames),
-          ].map((value) => `"${String(value).replaceAll('"', '""')}"`).join(','));
-        }
-      }
-    }
-
-    const csv = csvLines.join('\n');
+    const csv = buildAttendanceCsvContent(attendanceExportData);
     downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), `office-attendance-${startDate}-${endDate}-${viewMode}.csv`);
   };
 
@@ -1492,192 +781,52 @@ export function AttendanceClient({
     const ExcelJS = await import('exceljs');
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Office Attendance');
-
-    if (isApprovedRemoteWorkView) {
-      const headers = [
-        'Source',
-        'Bamboo Row ID',
-        'Employee ID',
-        'Employee Name',
-        'Email',
-        'Department',
-        'Office Location',
-        'Request Date',
-        'Start Date',
-        'End Date',
-        'Category',
-        'Approval Status',
-        'Approver',
-        'Reason',
-        'Address',
-        'Work Schedule',
-        'Supporting Documentation Submitted',
-        'Alternate In-Office Work Date',
-      ];
-      const headerRow = ws.addRow(headers);
-      headerRow.font = { bold: true, size: 11 };
-      headerRow.eachCell((cell) => {
+    const styleHeaderRow = (row: any) => {
+      row.font = { bold: true, size: 11 };
+      row.eachCell((cell: any) => {
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F3F4F6' } };
       });
-
-      for (const request of combinedApprovalRequests) {
-        ws.addRow([
-          request.sourceLabel,
-          request.bambooRowId,
-          request.employeeId,
-          request.employeeName,
-          request.email,
-          request.department,
-          request.officeLocation,
-          request.requestDate || '',
-          request.startDate,
-          request.endDate || '',
-          request.category || '',
-          request.approvalStatus || '',
-          request.approver || '',
-          request.reason || '',
-          request.address || '',
-          request.schedule || '',
-          request.supportingDocumentationSubmitted || '',
-          request.alternateInOfficeWorkDate || '',
-        ]);
-      }
-
-      ws.columns.forEach((col, index) => {
-        col.width = index >= 13 ? 24 : 18;
+    };
+    const applyColumnWidths = (worksheet: any, widths: number[]) => {
+      widths.forEach((width, index) => {
+        worksheet.getColumn(index + 1).width = width;
       });
+    };
+
+    if (isApprovedRemoteWorkView) {
+      styleHeaderRow(ws.addRow(approvalExportData.sheet.headers));
+      approvalExportData.sheet.rows.forEach((row) => {
+        ws.addRow(row);
+      });
+      applyColumnWidths(ws, approvalExportData.sheet.columnWidths);
 
       const buffer = await wb.xlsx.writeBuffer();
       downloadBlob(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `office-attendance-approved-coverage-requests-${startDate}-${endDate}.xlsx`);
       return;
     }
 
-    const headers = [
-      isAggregateView ? aggregateLabel : 'Employee',
-      isAggregateView ? 'Employees' : 'Department',
-      ...(isAggregateView ? ['Quebec Employees', 'Remote/Exempt Employees'] : []),
-      'Location',
-      'Coverage Status',
-      ...(isAggregateView ? [] : ['Standing WFH Policy', 'Approved Coverage In Range', 'ActivTrak Coverage']),
-      ...weeks.map((w) => getWeekLabel(w)),
-      isAggregateView ? 'Total Office Days' : 'Total',
-      'Avg/Week',
-      'Score %',
-      'Trend',
-    ];
-
-    const headerRow = ws.addRow(headers);
-    headerRow.font = { bold: true, size: 11 };
-    headerRow.eachCell((cell) => {
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F3F4F6' } };
-    });
-
-    const summaryRow = ws.addRow([
-      isAggregateView ? `${filteredSummary.totalDepartments} ${aggregatePluralLabel}` : `${filteredSummary.totalEmployees} employees`,
-      isAggregateView ? `${filteredSummary.totalEmployees} employees` : '',
-      ...(isAggregateView ? ['', ''] : []),
-      '',
-      ...(isAggregateView ? [] : ['', '', filteredSummary.unknownCoverageCount > 0 ? `${filteredSummary.unknownCoverageCount} unknown` : '']),
-      `${filteredSummary.complianceRate}% score`,
-      ...weeks.map(() => ''),
-      '',
-      String(filteredSummary.avgOfficeDays),
-      isAggregateView
-        ? `${filteredSummary.zeroOfficeDepartments} zero-office ${aggregatePluralLabel}`
-        : `${filteredSummary.zeroOfficeDaysCount} zero office days`,
-      '',
-    ]);
+    styleHeaderRow(ws.addRow(attendanceExportData.mainSheet.headers));
+    const summaryRow = ws.addRow(attendanceExportData.mainSheet.summaryRow);
     summaryRow.font = { italic: true, size: 10, color: { argb: '6B7280' } };
 
-    for (const r of sorted) {
-      const row = ws.addRow([
-        r.label,
-        r.secondary,
-        ...(isAggregateView ? [r.quebecEmployeeCount ?? 0, r.remoteEmployeeCount ?? 0] : []),
-        r.officeLocation,
-        isAggregateView ? '—' : r.remoteWorkStatusLabel,
-        ...(isAggregateView ? [] : [
-          r.hasStandingWfhPolicy ? 'Yes' : 'No',
-          r.hasAnyApprovedWfhCoverageInRange ? 'Yes' : 'No',
-          r.hasActivTrakCoverage ? 'Covered' : 'Unknown',
-        ]),
-        ...weeks.map((w) => isAggregateView
-          ? `${r.weeklyCompliance?.[w]?.compliancePct ?? 0}%`
-          : formatEmployeeWeekValue(r.weeks[w], r.hasActivTrakCoverage)),
-        isAggregateView ? r.total : (r.hasActivTrakCoverage ? r.total : ''),
-        isAggregateView ? r.avgPerWeek : (r.hasActivTrakCoverage ? r.avgPerWeek : ''),
-        isAggregateView ? r.scorePct : (r.hasActivTrakCoverage ? r.scorePct : ''),
-        isAggregateView ? r.trend : (r.hasActivTrakCoverage ? r.trend : ''),
-      ]);
-
-      weeks.forEach((w, i) => {
-        const weekColumnIndex = (isAggregateView ? 6 : 7) + i + 1;
-        const cell = row.getCell(weekColumnIndex);
-        const wc = r.weeks[w];
-        const compliance = r.weeklyCompliance?.[w];
-        const hex = isAggregateView
-          ? (compliance?.eligibleEmployees ?? 0) <= 0
-              ? 'F3F4F6'
-              : (compliance?.compliancePct ?? 0) >= 80
-                  ? 'DCFCE7'
-                  : (compliance?.compliancePct ?? 0) >= 50
-                      ? 'FEF3C7'
-                      : 'FEE2E2'
-          : (!r.hasActivTrakCoverage ? 'F3F4F6' : getEmployeeCellHex(wc));
+    attendanceExportData.mainSheet.rows.forEach((rowValues, rowIndex) => {
+      const row = ws.addRow(rowValues);
+      attendanceExportData.mainSheet.weekFillHexes[rowIndex]?.forEach((hex, weekIndex) => {
+        const cell = row.getCell(attendanceExportData.mainSheet.weekColumnStartIndex + weekIndex + 1);
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: hex } };
       });
-    }
-
-    if (isAggregateView) {
-      const detailSheet = wb.addWorksheet('Weekly Breakdown');
-      const detailHeaders = [
-        'Group',
-        'Week',
-        'Compliance %',
-        'Eligible Quebec',
-        'Compliant Count',
-        'Exempt Count',
-        'PTO Excused Count',
-        'Compliant',
-        'Non-compliant',
-        'Exempt this week',
-        'PTO Excused',
-      ];
-      const detailHeaderRow = detailSheet.addRow(detailHeaders);
-      detailHeaderRow.font = { bold: true, size: 11 };
-      detailHeaderRow.eachCell((cell) => {
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F3F4F6' } };
-      });
-
-      for (const row of sorted) {
-        for (const week of weeks) {
-          const compliance = row.weeklyCompliance?.[week];
-          if (!compliance) continue;
-          detailSheet.addRow([
-            row.label,
-            getWeekLabel(week),
-            `${compliance.compliancePct}%`,
-            compliance.eligibleEmployees,
-            compliance.compliantEmployees,
-            compliance.exemptEmployees,
-            compliance.excusedEmployees,
-            formatNameBucket(compliance.compliantNames),
-            formatNameBucket(compliance.nonCompliantNames),
-            formatNameBucket(compliance.exemptNames),
-            formatNameBucket(compliance.excusedNames),
-          ]);
-        }
-      }
-
-      detailSheet.columns.forEach((col, index) => {
-        col.width = index >= 5 ? 42 : index === 0 ? 28 : 18;
-      });
-    }
-
-    ws.columns.forEach((col) => {
-      col.width = 14;
     });
-    if (ws.columns[0]) ws.columns[0].width = 24;
+
+    if (attendanceExportData.detailSheet) {
+      const detailSheet = wb.addWorksheet(attendanceExportData.detailSheet.title);
+      styleHeaderRow(detailSheet.addRow(attendanceExportData.detailSheet.headers));
+      attendanceExportData.detailSheet.rows.forEach((row) => {
+        detailSheet.addRow(row);
+      });
+      applyColumnWidths(detailSheet, attendanceExportData.detailSheet.columnWidths);
+    }
+
+    applyColumnWidths(ws, attendanceExportData.mainSheet.columnWidths);
 
     const buffer = await wb.xlsx.writeBuffer();
     downloadBlob(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `office-attendance-${startDate}-${endDate}-${viewMode}.xlsx`);

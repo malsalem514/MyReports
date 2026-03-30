@@ -1,11 +1,20 @@
 import { query } from './oracle';
+import {
+  calculateAttendanceWeekCell,
+  createAttendanceEmployeeAccumulator,
+  ensureAttendanceEmployeeAccumulator,
+  toWeekDayDetails,
+  type AttendanceApprovalIndex,
+  type AttendanceDayAccumulator,
+  type AttendanceEmployeeAccumulator,
+  type AttendanceEmployeeMetaRow,
+} from './attendance-report-logic';
 import type {
   AttendanceRemoteWorkRequest,
   AttendanceWorkAbroadRequest,
   AttendanceRow,
   AttendanceSummary,
   WeekCell,
-  WfhExceptionType,
 } from './types/attendance';
 
 // ============================================================================
@@ -418,16 +427,7 @@ export async function getAttendanceReport(
       `SELECT * FROM V_ATTENDANCE_WEEKLY WHERE WEEK_START BETWEEN TRUNC(:sd, 'IW') AND TRUNC(:ed, 'IW')${emailFilter}`,
       params,
     ),
-    query<{
-      EMAIL: string;
-      DISPLAY_NAME: string;
-      DEPARTMENT: string;
-      LOCATION: string;
-      MANAGER_NAME: string;
-      MANAGER_EMAIL: string | null;
-      HAS_ACTIVTRAK_USER: number;
-      REMOTE_WORKDAY_POLICY_ASSIGNED: number;
-    }>(
+    query<AttendanceEmployeeMetaRow>(
       `SELECT
          m.EMAIL,
          NVL(m.DISPLAY_NAME, m.EMAIL) AS DISPLAY_NAME,
@@ -657,15 +657,8 @@ export async function getAttendanceReport(
 
   // --- Index daily detail by email|week → DayDetail[] ---
   const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  type AttendanceDayAccumulator = {
-    date: string;
-    dayLabel: string;
-    location: string;
-    ptoType: string | null;
-    tbsReportedHours: number;
-    activeHours: number;
-  };
   const dailyMap = new Map<string, AttendanceDayAccumulator[]>();
+  const dailyEntriesByKey = new Map<string, Map<string, AttendanceDayAccumulator>>();
   const tbsToEmail = new Map(tbsMapRows.map((row) => [row.TBS_EMPLOYEE_NO, row.EMAIL.toLowerCase()]));
   const tbsAbsenceCodes = new Set([
     'VACATION', 'ILLNESS', 'MISC. ABS./APPTS', 'ALTERNATE DAY',
@@ -683,8 +676,9 @@ export async function getAttendanceReport(
     const key = `${email}|${wk}`;
 
     if (!dailyMap.has(key)) dailyMap.set(key, []);
+    if (!dailyEntriesByKey.has(key)) dailyEntriesByKey.set(key, new Map());
 
-    let entry = dailyMap.get(key)!.find((day) => day.date === dateStr);
+    let entry = dailyEntriesByKey.get(key)!.get(dateStr);
     if (!entry) {
       entry = {
         date: dateStr,
@@ -695,6 +689,7 @@ export async function getAttendanceReport(
         activeHours: 0,
       };
       dailyMap.get(key)!.push(entry);
+      dailyEntriesByKey.get(key)!.set(dateStr, entry);
     }
 
     return entry;
@@ -719,37 +714,10 @@ export async function getAttendanceReport(
 
   const getWeekKey = (email: string, weekStart: string) => `${email}|${weekStart}`;
 
-  const formatRemoteWorkTypes = (types?: Set<string>) => {
-    if (!types || types.size === 0) return '';
-    return ` (${[...types].sort((a, b) => a.localeCompare(b)).join(', ')})`;
-  };
-
   const formatCoverageLabels = (labels?: Set<string>) => {
     if (!labels || labels.size === 0) return '';
     return [...labels].sort((a, b) => a.localeCompare(b)).join(' + ');
   };
-
-  const createWeekCell = (
-    officeDays: number,
-    remoteDays: number,
-    ptoDays: number,
-    days: WeekCell['days'],
-  ): WeekCell => ({
-    officeDays,
-    remoteDays,
-    ptoDays,
-    days,
-    rawOfficeTarget: officeDaysRequired,
-    adjustedOfficeTarget: officeDaysRequired,
-    adjustedCompliant: officeDays >= officeDaysRequired,
-    isPtoExcused: false,
-    hasApprovedWfhCoverage: false,
-    hasApprovedRemoteCoverage: false,
-    hasApprovedWorkAbroadCoverage: false,
-    wfhExceptionType: 'none',
-    approvedCoverageWeekdays: 0,
-    exceptionLabel: null,
-  });
 
   for (const r of dailyRows) {
     const email = r.EMAIL?.toLowerCase();
@@ -943,37 +911,16 @@ export async function getAttendanceReport(
     days.sort((a, b) => a.date.localeCompare(b.date));
   }
 
-  function getRemoteWorkStatusLabel(email: string): string {
-    const hasStandingWfhPolicy = standingPolicyEmails.has(email);
-    const hasApprovedRemoteRequest = approvedRemoteRequestEmails.has(email);
-    const hasApprovedWorkAbroadRequest = approvedWorkAbroadRequestEmails.has(email);
-    const labels: string[] = [];
-    if (hasApprovedRemoteRequest) {
-      labels.push(`Temporary Remote Work${formatRemoteWorkTypes(approvedRemoteWorkTypesByEmail.get(email))}`);
-    }
-    if (hasApprovedWorkAbroadRequest) {
-      labels.push(`Work Abroad / Another Province${formatRemoteWorkTypes(approvedWorkAbroadCountriesByEmail.get(email))}`);
-    }
-    if (hasStandingWfhPolicy && labels.length > 0) {
-      return `Standing WFH Policy + ${labels.join(' + ')}`;
-    }
-    if (hasStandingWfhPolicy) return 'Standing WFH Policy';
-    if (labels.length > 0) return labels.join(' + ');
-    return 'Standard Policy';
-  }
+  const approvalIndex: AttendanceApprovalIndex = {
+    standingPolicyEmails,
+    approvedRemoteRequestEmails,
+    approvedWorkAbroadRequestEmails,
+    approvedRemoteWorkTypesByEmail,
+    approvedWorkAbroadCountriesByEmail,
+  };
 
   // --- Index attendance by employee ---
-  const empWeeks = new Map<string, {
-    name: string; department: string; managerName: string; managerEmail: string | null; officeLocation: string;
-    hasActivTrakCoverage: boolean;
-    approvedRemoteWorkRequest: boolean;
-    hasStandingWfhPolicy: boolean;
-    hasApprovedRemoteRequestInRange: boolean;
-    hasApprovedWorkAbroadRequestInRange: boolean;
-    hasAnyApprovedWfhCoverageInRange: boolean;
-    remoteWorkStatusLabel: string;
-    weeks: Record<string, WeekCell>;
-  }>();
+  const empWeeks = new Map<string, AttendanceEmployeeAccumulator>();
   const employeeMetaByEmail = new Map(
     empRows.map((employee) => [employee.EMAIL.toLowerCase(), employee]),
   );
@@ -984,37 +931,38 @@ export async function getAttendanceReport(
     const wk = toDateStr(r.WEEK_START);
     const employeeMeta = employeeMetaByEmail.get(email);
 
-    if (!empWeeks.has(email)) {
-      empWeeks.set(email, {
-        name: r.DISPLAY_NAME || email,
-        department: employeeMeta?.DEPARTMENT || r.DEPARTMENT || 'Unknown',
-        managerName: employeeMeta?.MANAGER_NAME || 'Unassigned',
-        managerEmail: employeeMeta?.MANAGER_EMAIL || null,
-        officeLocation: employeeMeta?.LOCATION || r.OFFICE_LOCATION || 'Unknown',
-        hasActivTrakCoverage: employeeMeta ? employeeMeta.HAS_ACTIVTRAK_USER === 1 : true,
-        approvedRemoteWorkRequest: approvedRemoteRequestEmails.has(email),
-        hasStandingWfhPolicy: standingPolicyEmails.has(email),
-        hasApprovedRemoteRequestInRange: approvedRemoteRequestEmails.has(email),
-        hasApprovedWorkAbroadRequestInRange: approvedWorkAbroadRequestEmails.has(email),
-        hasAnyApprovedWfhCoverageInRange: standingPolicyEmails.has(email) || approvedRemoteRequestEmails.has(email) || approvedWorkAbroadRequestEmails.has(email),
-        remoteWorkStatusLabel: getRemoteWorkStatusLabel(email),
-        weeks: {},
-      });
-    }
-    const dailyDetails = dailyMap.get(`${email}|${wk}`) || [];
-    empWeeks.get(email)!.weeks[wk] = createWeekCell(
-      r.OFFICE_DAYS || 0,
-      r.REMOTE_DAYS || 0,
-      ptoMap.get(`${email}|${wk}`) || 0,
-      dailyDetails.map((dd) => ({
-        date: dd.date,
-        dayLabel: dd.dayLabel,
-        location: dd.location as 'Office' | 'Remote' | 'PTO' | 'Unknown',
-        ptoType: dd.ptoType,
-        tbsReportedHours: dd.tbsReportedHours,
-        activeHours: dd.activeHours,
-      })),
+    const employee = ensureAttendanceEmployeeAccumulator(
+      empWeeks,
+      email,
+      employeeMeta
+        ? employeeMeta
+        : {
+            EMAIL: email,
+            DISPLAY_NAME: r.DISPLAY_NAME || email,
+            DEPARTMENT: r.DEPARTMENT || 'Unknown',
+            LOCATION: r.OFFICE_LOCATION || 'Unknown',
+            MANAGER_NAME: 'Unassigned',
+            MANAGER_EMAIL: null,
+            HAS_ACTIVTRAK_USER: 1,
+            REMOTE_WORKDAY_POLICY_ASSIGNED: 0,
+          },
+      approvalIndex,
     );
+    const dailyDetails = dailyMap.get(`${email}|${wk}`) || [];
+    employee.weeks[wk] = calculateAttendanceWeekCell({
+      officeDaysRequired,
+      currentCell: {
+        officeDays: r.OFFICE_DAYS || 0,
+        remoteDays: r.REMOTE_DAYS || 0,
+        ptoDays: ptoMap.get(`${email}|${wk}`) || 0,
+        days: toWeekDayDetails(dailyDetails),
+      },
+      hasActivTrakCoverage: employee.hasActivTrakCoverage,
+      approvedCoverageWeekdays: 0,
+      hasApprovedRemoteCoverage: false,
+      hasApprovedWorkAbroadCoverage: false,
+      exceptionLabel: null,
+    });
   }
 
   for (const [key, ptoDays] of ptoMap) {
@@ -1022,60 +970,30 @@ export async function getAttendanceReport(
     if (!email || !wk) continue;
     const employee = employeeMetaByEmail.get(email);
 
-    if (!empWeeks.has(email)) {
-      empWeeks.set(email, {
-        name: employee?.DISPLAY_NAME || email,
-        department: employee?.DEPARTMENT || 'Unknown',
-        managerName: employee?.MANAGER_NAME || 'Unassigned',
-        managerEmail: employee?.MANAGER_EMAIL || null,
-        officeLocation: employee?.LOCATION || 'Unknown',
-        hasActivTrakCoverage: employee?.HAS_ACTIVTRAK_USER === 1,
-        approvedRemoteWorkRequest: approvedRemoteRequestEmails.has(email),
-        hasStandingWfhPolicy: standingPolicyEmails.has(email),
-        hasApprovedRemoteRequestInRange: approvedRemoteRequestEmails.has(email),
-        hasApprovedWorkAbroadRequestInRange: approvedWorkAbroadRequestEmails.has(email),
-        hasAnyApprovedWfhCoverageInRange: standingPolicyEmails.has(email) || approvedRemoteRequestEmails.has(email) || approvedWorkAbroadRequestEmails.has(email),
-        remoteWorkStatusLabel: getRemoteWorkStatusLabel(email),
-        weeks: {},
-      });
-    }
-
-    const current = empWeeks.get(email)!.weeks[wk];
+    const empData = ensureAttendanceEmployeeAccumulator(empWeeks, email, employee, approvalIndex);
+    const current = empData.weeks[wk];
     const dailyDetails = dailyMap.get(`${email}|${wk}`) || [];
-    empWeeks.get(email)!.weeks[wk] = createWeekCell(
-      current?.officeDays || 0,
-      current?.remoteDays || 0,
-      ptoDays,
-      dailyDetails.map((dd) => ({
-        date: dd.date,
-        dayLabel: dd.dayLabel,
-        location: dd.location as 'Office' | 'Remote' | 'PTO' | 'Unknown',
-        ptoType: dd.ptoType,
-        tbsReportedHours: dd.tbsReportedHours,
-        activeHours: dd.activeHours,
-      })),
-    );
+    empData.weeks[wk] = calculateAttendanceWeekCell({
+      officeDaysRequired,
+      currentCell: {
+        officeDays: current?.officeDays || 0,
+        remoteDays: current?.remoteDays || 0,
+        ptoDays,
+        days: toWeekDayDetails(dailyDetails),
+      },
+      hasActivTrakCoverage: empData.hasActivTrakCoverage,
+      approvedCoverageWeekdays: current?.approvedCoverageWeekdays ?? 0,
+      hasApprovedRemoteCoverage: current?.hasApprovedRemoteCoverage ?? false,
+      hasApprovedWorkAbroadCoverage: current?.hasApprovedWorkAbroadCoverage ?? false,
+      exceptionLabel: current?.exceptionLabel ?? null,
+    });
   }
 
   // --- Seed employees with zero attendance (the "invisible absentees") ---
   for (const emp of empRows) {
     const email = emp.EMAIL?.toLowerCase();
     if (!email || empWeeks.has(email)) continue;
-    empWeeks.set(email, {
-      name: emp.DISPLAY_NAME || email,
-      department: emp.DEPARTMENT || 'Unknown',
-      managerName: emp.MANAGER_NAME || 'Unassigned',
-      managerEmail: emp.MANAGER_EMAIL || null,
-      officeLocation: emp.LOCATION || 'Unknown',
-      hasActivTrakCoverage: emp.HAS_ACTIVTRAK_USER === 1,
-      approvedRemoteWorkRequest: approvedRemoteRequestEmails.has(email),
-      hasStandingWfhPolicy: standingPolicyEmails.has(email),
-      hasApprovedRemoteRequestInRange: approvedRemoteRequestEmails.has(email),
-      hasApprovedWorkAbroadRequestInRange: approvedWorkAbroadRequestEmails.has(email),
-      hasAnyApprovedWfhCoverageInRange: standingPolicyEmails.has(email) || approvedRemoteRequestEmails.has(email) || approvedWorkAbroadRequestEmails.has(email),
-      remoteWorkStatusLabel: getRemoteWorkStatusLabel(email),
-      weeks: {},
-    });
+    empWeeks.set(email, createAttendanceEmployeeAccumulator(email, emp, approvalIndex));
   }
 
   // --- Current-week detection (partial week — exclude from compliance/avg) ---
@@ -1143,65 +1061,24 @@ export async function getAttendanceReport(
     let exemptWeekCount = 0;
 
     for (const wk of weeks) {
-      const currentCell = data.weeks[wk];
-      const officeDays = currentCell?.officeDays ?? 0;
-      const remoteDays = currentCell?.remoteDays ?? 0;
-      const ptoDays = currentCell?.ptoDays ?? 0;
-      const days = currentCell?.days ?? [];
-      const availableDays = 5 - ptoDays;
       const approvedCoverageWeekdays = getApprovedCoverageWeekdays(email, wk);
       const hasApprovedRemoteCoverage = hasApprovedRemoteCoverageForWeek(email, wk);
       const hasApprovedWorkAbroadCoverage = hasApprovedWorkAbroadCoverageForWeek(email, wk);
-      const hasApprovedWfhCoverage = data.hasActivTrakCoverage && approvedCoverageWeekdays > 0;
-      let wfhExceptionType: WfhExceptionType = 'none';
-      let adjustedOfficeTarget: number | null = officeDaysRequired;
-      let adjustedCompliant: boolean | null = officeDays >= officeDaysRequired;
-      let isPtoExcused = false;
+      const nextCell = calculateAttendanceWeekCell({
+        currentCell: data.weeks[wk],
+        officeDaysRequired,
+        hasActivTrakCoverage: data.hasActivTrakCoverage,
+        approvedCoverageWeekdays,
+        hasApprovedRemoteCoverage,
+        hasApprovedWorkAbroadCoverage,
+        exceptionLabel: getWeekExceptionLabel(email, wk),
+      });
 
-      if (!data.hasActivTrakCoverage) {
-        adjustedOfficeTarget = null;
-        adjustedCompliant = null;
-      } else {
-        let targetAfterWfh = officeDaysRequired;
-
-        if (approvedCoverageWeekdays > 0) {
-          targetAfterWfh = Math.max(0, officeDaysRequired - approvedCoverageWeekdays);
-          wfhExceptionType = targetAfterWfh === 0 ? 'temporary_full' : 'temporary_partial';
-        }
-
-        if (targetAfterWfh === 0) {
-          adjustedOfficeTarget = 0;
-          adjustedCompliant = true;
-        } else if (availableDays < targetAfterWfh) {
-          adjustedOfficeTarget = null;
-          adjustedCompliant = true;
-          isPtoExcused = true;
-        } else {
-          adjustedOfficeTarget = targetAfterWfh;
-          adjustedCompliant = officeDays >= targetAfterWfh;
-        }
-      }
-
-      if (hasApprovedWfhCoverage && adjustedOfficeTarget === 0) {
+      if (nextCell.hasApprovedWfhCoverage && nextCell.adjustedOfficeTarget === 0) {
         exemptWeekCount++;
       }
 
-      data.weeks[wk] = {
-        officeDays,
-        remoteDays,
-        ptoDays,
-        days,
-        rawOfficeTarget: officeDaysRequired,
-        adjustedOfficeTarget,
-        adjustedCompliant,
-        isPtoExcused,
-        hasApprovedWfhCoverage,
-        hasApprovedRemoteCoverage,
-        hasApprovedWorkAbroadCoverage,
-        wfhExceptionType,
-        approvedCoverageWeekdays,
-        exceptionLabel: getWeekExceptionLabel(email, wk),
-      };
+      data.weeks[wk] = nextCell;
     }
 
     // Total: sum over all display weeks (empty weeks contribute 0)
