@@ -1,19 +1,28 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {
+import * as officeAttendanceExport from '../lib/office-attendance-export.ts';
+import * as officeAttendanceView from '../lib/office-attendance-view.ts';
+import type {
+  ApprovalRequestRow,
+  DisplayRow,
+  FilteredAttendanceSummary,
+  WeeklyCompliance,
+} from '../lib/office-attendance-view.ts';
+
+function getModuleExports<T extends object>(mod: T): T {
+  return ((mod as T & { default?: T; 'module.exports'?: T }).default
+    ?? (mod as T & { default?: T; 'module.exports'?: T })['module.exports']
+    ?? mod);
+}
+
+const {
   buildApprovalRequestCsvContent,
   buildApprovalRequestExportData,
   buildAttendanceCsvContent,
   buildAttendanceExportData,
   toCsvRow,
-} from '../lib/office-attendance-export.ts';
-import {
-  createEmptyWeekCell,
-  type ApprovalRequestRow,
-  type DisplayRow,
-  type FilteredAttendanceSummary,
-  type WeeklyCompliance,
-} from '../lib/office-attendance-view.ts';
+} = getModuleExports(officeAttendanceExport);
+const { createEmptyWeekCell } = getModuleExports(officeAttendanceView);
 import type { WeekCell } from '../lib/types/attendance.ts';
 
 function createWeekCell(overrides: Partial<WeekCell> = {}): WeekCell {

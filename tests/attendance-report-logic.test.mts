@@ -1,12 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {
+import * as attendanceReportLogic from '../lib/attendance-report-logic.ts';
+import type {
+  AttendanceApprovalIndex,
+  AttendanceEmployeeMetaRow,
+} from '../lib/attendance-report-logic.ts';
+
+function getModuleExports<T extends object>(mod: T): T {
+  return ((mod as T & { default?: T; 'module.exports'?: T }).default
+    ?? (mod as T & { default?: T; 'module.exports'?: T })['module.exports']
+    ?? mod);
+}
+
+const {
   calculateAttendanceWeekCell,
   createAttendanceEmployeeAccumulator,
   ensureAttendanceEmployeeAccumulator,
-  type AttendanceApprovalIndex,
-  type AttendanceEmployeeMetaRow,
-} from '../lib/attendance-report-logic.ts';
+} = getModuleExports(attendanceReportLogic);
 
 function createApprovalIndex(overrides: Partial<AttendanceApprovalIndex> = {}): AttendanceApprovalIndex {
   return {

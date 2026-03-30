@@ -183,7 +183,7 @@ export const test = base.extend<{ asAdmin: void; asEmployee: void }>({
       route.continue({
         headers: {
           ...route.request().headers(),
-          'x-test-bypass-email': 'malsalem@jestais.com',
+          'x-test-bypass-email': 'qa-user@example.com',
         },
       });
     });

@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "next typegen && tsc --noEmit",
-    "test": "node --experimental-strip-types --experimental-specifier-resolution=node --test",
+    "test": "tsx --test tests/*.test.mts",
     "docker:build": "docker build -t myreports:latest .",
     "docker:save": "docker save myreports:latest -o myreports-latest.tar",
     "e2e:preflight": "scripts/preflight-e2e.sh .env.e2e",
@@ -44,6 +44,7 @@
     "autoprefixer": "^10.4.27",
     "postcss": "^8.5.8",
     "tailwindcss": "^3.4.17",
+    "tsx": "^4.21.0",
     "typescript": "^5.8.3"
   },
   "overrides": {

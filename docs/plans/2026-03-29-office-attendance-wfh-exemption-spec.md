@@ -1,616 +1,205 @@
-# Office Attendance WFH Exception Spec
+# Office Attendance Approved Coverage Spec
 
 Date: 2026-03-29
-Status: Draft
+Status: Implemented
 Scope: `app/dashboard/office-attendance/*`, `lib/dashboard-data.ts`, `lib/types/attendance.ts`
 
-## 1. Goal
+## Goal
 
-Make the office attendance report fair for employees with approved work-from-home coverage by:
+Keep office attendance reporting fair and transparent by:
 
-- keeping those employees visible in the report instead of treating them as blanket exclusions
-- scoring compliance per employee-week against an adjusted target
-- marking affected weeks with a green compliant state when the adjusted policy is satisfied
-- adding `*` to the weekly office-days value when approved WFH coverage affected that week
-- keeping raw office-day counts visible so the report stays transparent
+- showing raw office days for every employee-week
+- adjusting compliance against approved week-level remote-work and work-abroad coverage
+- keeping standing WFH policy visible without treating it as an automatic weekly exemption
+- using clear week markers in the UI and exports so managers can tell why a week was adjusted
 
-This spec builds on the existing attendance pipeline and does not introduce a second reporting system.
+## Source Data
 
-## 2. Source Code Research Summary
+The implemented behavior uses three BambooHR-backed Oracle sources:
 
-### 2.1 Existing data sources already in production
+- `TL_EMPLOYEES.REMOTE_WORKDAY_POLICY_ASSIGNED`
+  - standing policy flag
+  - informational only in v1 of the adjusted attendance logic
+- `TL_REMOTE_WORK_REQUESTS`
+  - approved temporary remote-work requests
+- `TL_WORK_ABROAD_REQUESTS`
+  - approved temporary work-abroad or another-province requests
 
-The repo already has both required approval sources:
+The daily sync keeps these sources current in Oracle and the attendance report reads from Oracle, not directly from BambooHR.
 
-- Standing policy flag:
-  - `TL_EMPLOYEES.REMOTE_WORKDAY_POLICY_ASSIGNED`
-  - synced from BambooHR field `4631.0` in `lib/bamboohr.ts` and `lib/sync.ts`
-- Temporary approved requests:
-  - `TL_REMOTE_WORK_REQUESTS`
-  - fields already include `REMOTE_WORK_START_DATE`, `REMOTE_WORK_END_DATE`, `REMOTE_WORK_TYPE`, `MANAGER_APPROVAL_RECEIVED`, and `ALTERNATE_IN_OFFICE_WORK_DATE`
+## Implemented Policy Rules
 
-No Oracle schema change is required for v1 of this feature.
+### Standing WFH policy
 
-### 2.2 Existing attendance backend behavior
+`REMOTE_WORKDAY_POLICY_ASSIGNED = 1` is treated as an employee policy label only.
 
-`lib/dashboard-data.ts#getAttendanceReport(...)` already loads:
+It does:
 
-- weekly attendance from `V_ATTENDANCE_WEEKLY`
-- employee metadata from `V_USER_MAPPINGS` + `TL_EMPLOYEES`
-- daily attendance detail from `TL_ATTENDANCE`
-- PTO-expanded weekdays from `TL_TIME_OFF`
-- remote-work requests from `TL_REMOTE_WORK_REQUESTS`
+- set `hasStandingWfhPolicy`
+- contribute to `remoteWorkStatusLabel`
+- remain visible in exports and the employee row
 
-The same function already:
+It does not:
 
-- recognizes approved temporary remote-work requests when `MANAGER_APPROVAL_RECEIVED` is `YES` or `APPROVED`
-- builds `approvedRemoteWorkEmails`
-- builds `approvedRemoteWorkTypesByEmail`
-- exposes row-level `approvedRemoteWorkRequest` and `remoteWorkStatusLabel`
+- reduce the weekly office target
+- make a week compliant by itself
+- place the employee in the `approved-only` filter by itself
+- add week markers by itself
 
-Current gap:
+### Approved temporary coverage
 
-- the permanent policy flag is not used in office attendance scoring
-- temporary approvals affect labels only, not weekly targets
-- weekly compliance currently adjusts only for PTO availability
+Only approved temporary records change week scoring:
 
-### 2.3 Existing UI behavior
+- approved remote-work requests
+- approved work-abroad / another-province requests
 
-`app/dashboard/office-attendance/attendance-client.tsx` currently:
+Week scoring uses only overlapping approved weekdays inside the scored week.
 
-- colors employee week cells only from `officeDays` and `ptoDays`
-- calculates employee score from raw office days and PTO capacity
-- excludes `approvedRemoteWorkRequest` employees by default in employee view
-- treats approved remote workers as fully excluded from aggregate eligibility
-- shows remote-work request data in a dedicated "Remote Work Requests" view
-- exports CSV/XLSX using raw office-day values only
-
-Current gap:
-
-- the page treats remote approval as an employee-level flag, but the requirement is employee-week handling
-
-## 3. Policy Assumptions
-
-These assumptions should be used for implementation unless HR later gives a richer policy model.
-
-### 3.1 Standing policy flag
-
-`REMOTE_WORKDAY_POLICY_ASSIGNED = 1` is treated as standing approved WFH coverage.
-
-For this first version, that means:
-
-- every scored week in range is treated as WFH-covered for that employee
-- adjusted office target becomes `0` for those weeks
-- those weeks are marked with `*`
-- those weeks are green in the employee grid
-- those weeks are excluded from KPI denominator and score capacity
-
-Reason: the repo currently stores only a boolean standing-policy flag, not a custom numeric in-office target. If HR later wants "reduced target" instead of "full exemption," the calculation can change in one place without redesigning the UI model.
-
-### 3.2 Approved temporary request
-
-A temporary request affects scoring only when:
-
-- `MANAGER_APPROVAL_RECEIVED` is `YES` or `APPROVED`
-- the request overlaps the selected date range
-- the overlap includes weekdays inside the ISO week being scored
-
-Temporary approvals adjust only the overlapping week(s), not the whole employee row.
-
-### 3.3 Alternate in-office date
-
-`ALTERNATE_IN_OFFICE_WORK_DATE` remains visible in the request list and tooltips, but v1 does not use it as a scoring override.
-
-Reason:
-
-- actual office attendance is already measured from attendance data
-- the alternate date field is informative but not reliable enough to replace measured office presence
-
-### 3.4 PTO behavior
-
-The current PTO concept remains valid:
-
-- PTO can still excuse a week when there are not enough available workdays left to satisfy the adjusted target
-
-This spec aligns scoring and compliance so PTO-excused weeks no longer lower the score.
-
-## 4. Target Behavior
-
-### 4.1 Employee-week outcome rules
-
-| Week type | `*` marker | Cell color | Adjusted target | Counts in KPI denominator |
-|---|---|---|---:|---|
-| No approved WFH coverage | No | Existing color rules | `2` or current required value | Yes |
-| Temporary approval, partial week, adjusted target met | Yes | Green | `1` or other reduced value | Yes |
-| Temporary approval, partial week, adjusted target not met | Yes | Existing non-compliant color | `1` or other reduced value | Yes |
-| Temporary approval makes target `0` | Yes | Green | `0` | No |
-| Standing policy week | Yes | Green | `0` | No |
-| PTO-excused week with no WFH coverage | No | Blue | `null` | No |
-| PTO-excused week with WFH coverage | Yes | Blue if excused by PTO, otherwise green if target reaches `0` | `null` or `0` | No |
-| No ActivTrak coverage | No | Gray / blank as today | `null` | No |
-
-Important guardrail:
-
-- `*` means "approved WFH coverage affected this week"
-- green means "compliant under adjusted policy"
-- partial approved weeks are not automatically green if the employee still missed the reduced target
-
-That preserves fairness without hiding real misses.
-
-### 4.2 Reporting principle
-
-The report should show both:
-
-- raw office attendance
-- policy-adjusted compliance
-
-In practice:
-
-- the weekly cell still displays raw office days
-- compliance colors and score use adjusted target
-- `*` tells the viewer raw office days were interpreted with approved WFH coverage that week
-
-Example:
-
-- `1*` means the employee had 1 office day and approved WFH coverage affected that week
-- if the adjusted target was `1`, the cell is green
-- if the adjusted target was `2`, the cell is not green
-
-## 5. Backend Design
-
-### 5.1 Data model changes
-
-Extend `lib/types/attendance.ts`.
-
-### New types
-
-```ts
-export type WfhExceptionType =
-  | 'none'
-  | 'standing_policy'
-  | 'temporary_partial'
-  | 'temporary_full';
-```
-
-### `WeekCell` additions
-
-```ts
-export interface WeekCell {
-  officeDays: number;
-  remoteDays: number;
-  ptoDays: number;
-  days: DayDetail[];
-
-  rawOfficeTarget: number;
-  adjustedOfficeTarget: number | null;
-  adjustedCompliant: boolean | null;
-  isPtoExcused: boolean;
-
-  hasApprovedWfhCoverage: boolean;
-  wfhExceptionType: WfhExceptionType;
-  approvedRemoteWeekdays: number;
-  exceptionLabel: string | null;
-}
-```
-
-### `AttendanceRow` additions
-
-```ts
-export interface AttendanceRow {
-  ...
-  hasStandingWfhPolicy: boolean;
-  hasApprovedRemoteRequestInRange: boolean;
-  hasAnyApprovedWfhCoverageInRange: boolean;
-  exemptWeekCount: number;
-}
-```
-
-Compatibility note:
-
-- `approvedRemoteWorkRequest` is too narrow for the new behavior because it ignores the standing policy flag
-- implementation should either replace it or keep it temporarily while introducing `hasAnyApprovedWfhCoverageInRange`
-
-### 5.2 New indexing step in `getAttendanceReport(...)`
-
-Add two indexes before row assembly:
-
-- `standingPolicyEmails: Set<string>`
-  - sourced from `empRows` joined to `TL_EMPLOYEES.REMOTE_WORKDAY_POLICY_ASSIGNED`
-- `approvedRemoteDatesByEmail: Map<string, Set<string>>`
-  - expand approved temporary requests into weekday date strings inside the selected range
-
-Also add:
-
-- `approvedRequestTypesByEmailWeek: Map<string, Set<string>>`
-- `approvedRequestLabelsByEmailWeek: Map<string, string[]>`
-
-These power the weekly tooltip and `remoteWorkStatusLabel`.
-
-### 5.3 Weekly calculation rules
+### Adjusted target
 
 For each employee-week:
 
-1. Start with the current required target.
-2. Apply standing policy coverage first.
-3. If no standing policy applies, subtract approved temporary remote weekdays from the target, floored at `0`.
-4. Apply PTO excusal only after the WFH-adjusted target is known.
-5. Determine whether the week contributes to score and aggregate compliance.
+1. start from the standard target
+2. subtract approved temporary weekdays in that week
+3. floor the adjusted target at `0`
+4. apply PTO excusal only after the adjusted target is known
 
-### Pseudocode
+Results:
 
-```ts
-rawOfficeTarget = officeDaysRequired
-hasStandingWfhPolicy = standingPolicyEmails.has(email)
-approvedRemoteWeekdays = countApprovedWeekdays(email, week)
-ptoDays = cell?.ptoDays ?? 0
-availableDays = 5 - ptoDays
+- if adjusted target is `0`, the week is compliant and exempt from the KPI denominator
+- if adjusted target is above `0`, compliance is based on the reduced target
+- if PTO leaves too few available weekdays to satisfy the adjusted target, the week is excused and neutral to the KPI denominator
+- if ActivTrak coverage is unknown, the week remains neutral
 
-if (!hasActivTrakCoverage) {
-  adjustedOfficeTarget = null
-  adjustedCompliant = null
-  isPtoExcused = false
-  wfhExceptionType = 'none'
-} else {
-  let targetAfterWfh = rawOfficeTarget
-  let wfhExceptionType: WfhExceptionType = 'none'
+## Backend Contract
 
-  if (hasStandingWfhPolicy) {
-    targetAfterWfh = 0
-    wfhExceptionType = 'standing_policy'
-  } else if (approvedRemoteWeekdays > 0) {
-    targetAfterWfh = Math.max(0, rawOfficeTarget - approvedRemoteWeekdays)
-    wfhExceptionType =
-      targetAfterWfh === 0 ? 'temporary_full' : 'temporary_partial'
-  }
+### `WeekCell`
 
-  if (targetAfterWfh === 0) {
-    adjustedOfficeTarget = 0
-    adjustedCompliant = true
-    isPtoExcused = false
-  } else if (availableDays < targetAfterWfh) {
-    adjustedOfficeTarget = null
-    adjustedCompliant = true
-    isPtoExcused = true
-  } else {
-    adjustedOfficeTarget = targetAfterWfh
-    adjustedCompliant = officeDays >= targetAfterWfh
-    isPtoExcused = false
-  }
-}
-```
+The week cell carries:
 
-### 5.4 Row summary rules
+- `rawOfficeTarget`
+- `adjustedOfficeTarget`
+- `adjustedCompliant`
+- `isPtoExcused`
+- `hasApprovedWfhCoverage`
+- `hasApprovedRemoteCoverage`
+- `hasApprovedWorkAbroadCoverage`
+- `approvedCoverageWeekdays`
+- `exceptionLabel`
 
-Keep these raw visibility metrics:
+### `AttendanceRow`
 
-- `total`
-- `avgPerWeek`
+The row carries:
 
-These remain based on actual office days.
-
-Change these compliance metrics:
-
-- `compliant`
-- employee `scorePct` in the client
-- aggregate weekly compliance percentages
-- top summary compliance rate
-
-These must be based on `adjustedOfficeTarget` and `adjustedCompliant`.
-
-### Employee score rules
-
-Weekly score capacity:
-
-- `0` when `adjustedOfficeTarget` is `null`
-- `0` when `adjustedOfficeTarget` is `0`
-- otherwise `adjustedOfficeTarget`
-
-Weekly earned points:
-
-- `0` when capacity is `0`
-- otherwise `min(officeDays, adjustedOfficeTarget)`
-
-This makes:
-
-- standing-policy weeks neutral to score
-- fully exempt temporary weeks neutral to score
-- PTO-excused weeks neutral to score
-- partial approved weeks score against the reduced target
-
-### 5.5 Aggregate view rules
-
-Current aggregate logic is employee-level. It must become week-level.
-
-Replace the current weekly classification with:
-
-- `eligibleEmployees`
-  - Quebec employees with ActivTrak coverage and `adjustedOfficeTarget > 0`
-- `compliantEmployees`
-  - eligible employees where `adjustedCompliant === true`
-- `exemptEmployees`
-  - Quebec employees with approved WFH coverage and `adjustedOfficeTarget === 0`
-- `excusedEmployees`
-  - Quebec employees with `isPtoExcused === true`
-- `unknownEmployees`
-  - Quebec employees without ActivTrak coverage
-
-Update weekly aggregate tooltip/list fields accordingly:
-
-- `fullyRemoteNames` should become `exemptNames`
-- add `excusedNames` if useful in detail export and tooltip
+- `hasStandingWfhPolicy`
+- `hasApprovedRemoteRequestInRange`
+- `hasApprovedWorkAbroadRequestInRange`
+- `hasAnyApprovedWfhCoverageInRange`
 
 Important:
 
-- exempt weeks do not count as failures
-- exempt weeks also do not inflate compliance denominator
+- `hasAnyApprovedWfhCoverageInRange` means actual approved temporary coverage in the selected range
+- it intentionally excludes the standing policy flag
 
-## 6. UI Spec
+## UI Behavior
 
-### 6.1 Employee grid
+### Week markers
 
-### Weekly cell content
+The employee grid keeps showing raw office days and adds small coverage markers when temporary approved coverage affected that week:
 
-Employee week cells keep showing raw office days, but append `*` when approved WFH coverage affected that week.
+- remote-work coverage: house icon
+- work-abroad coverage: plane icon
+- both can appear in the same week if both sources apply
 
-Examples:
+Exports use text equivalents:
 
-- `2`
-- `1*`
-- `0*`
+- remote-work coverage: `[House]`
+- work-abroad coverage: `[Plane]`
 
-### Weekly cell color
+### Week colors
 
-Employee cell color precedence:
+Current color precedence:
 
-1. unknown coverage -> gray
-2. PTO-excused week -> blue
-3. adjusted compliant -> green
-4. partial / below adjusted target -> current orange or red behavior
+1. unknown coverage stays gray
+2. any PTO in the week keeps the blue PTO signal
+3. adjusted compliant weeks are green
+4. non-compliant measured weeks use the standard warning/error tones
 
-This keeps the current blue PTO meaning and adds fair green compliance for approved WFH coverage.
+### Tooltips and detail modal
 
-### Tooltip content
-
-Employee week tooltip should add:
+Week detail surfaces:
 
 - raw office days
 - raw target
 - adjusted target
-- approved WFH coverage type
-- approved remote weekdays in the week
 - PTO days
-- explanation text
+- approved coverage weekdays
+- coverage source label
 
-Example tooltip copy:
+Coverage source can include:
 
-- `Actual office days: 1`
-- `Adjusted target: 1`
-- `Approved WFH coverage: Temporary remote work request`
-- `Approved remote weekdays: 1`
-- `Result: Compliant under adjusted policy`
+- temporary remote work
+- work abroad / another province
+- both, when applicable
 
-If standing policy applies:
+### Filters
 
-- `Approved WFH coverage: Standing policy`
-- `Adjusted target: 0`
-- `Result: Exempt this week`
+The WFH filter operates on actual approved temporary coverage in range:
 
-### 6.2 Legend
+- `all`
+- `standard-only`
+- `approved-only`
 
-Add a small legend near the grid and detail modal:
+Standing policy alone does not move an employee into `approved-only`.
 
-- `* Approved WFH coverage affected this week`
-- `Green = compliant under adjusted policy`
-- `Blue = excused because PTO left too few available workdays`
+## Aggregate Behavior
 
-### 6.3 Detail modal
+Department and manager views compute weekly buckets from the adjusted week logic:
 
-Update `AttendanceDetailModal` so weekly compliance uses adjusted target, not raw `2-day` rule.
+- `eligibleEmployees`
+- `compliantEmployees`
+- `exemptEmployees`
+- `excusedEmployees`
+- `unknownEmployees`
 
-Changes:
+Rules:
 
-- weekly summary row uses `adjustedOfficeTarget`
-- compliant icon uses `adjustedCompliant`
-- subtitle copy changes from "Weeks with at least 2 office days get a green check" to adjusted-policy wording
-- add WFH coverage explanation to each week row
+- only weeks with `adjustedOfficeTarget > 0` are eligible
+- weeks with `adjustedOfficeTarget === 0` are exempt
+- PTO-excused weeks are neutral
+- unknown ActivTrak coverage is neutral
 
-Suggested copy:
+## Export Behavior
 
-- `Weeks are scored against the adjusted office target after approved WFH coverage and PTO exceptions.`
+CSV and XLSX match the UI logic:
 
-### 6.4 Aggregate views
+- employee weekly cells export the displayed office-day value plus `[House]` and/or `[Plane]`
+- standing policy stays visible in dedicated metadata columns
+- approved coverage in range reflects temporary approved coverage only
+- aggregate exports include exempt and PTO-excused breakdown columns
 
-Department and manager views should:
+## Acceptance Cases
 
-- compute weekly compliance from week-level eligibility
-- show exempt counts separately from compliant counts
-- rename "Fully remote" to "Exempt this week"
+1. Standing-policy employee with no approved temporary coverage:
+   - no week marker
+   - normal weekly target
+   - employee remains in `standard-only`
 
-Recommended weekly breakdown columns:
+2. Approved remote-work week that reduces target to `0`:
+   - house marker shown
+   - adjusted target `0`
+   - week is compliant and exempt
 
-- `Eligible`
-- `Compliant`
-- `Exempt`
-- `Excused`
-- `Office Days`
+3. Approved work-abroad week that reduces target to `1`:
+   - plane marker shown
+   - adjusted target `1`
+   - compliance depends on actual office days versus `1`
 
-Recommended tooltip/list labels:
+4. Week with PTO and approved coverage:
+   - tooltip shows both PTO and approved coverage details
+   - blue PTO signal remains visible
+   - denominator treatment follows adjusted-target and PTO-excusal rules
 
-- `Compliant`
-- `Non-compliant`
-- `Exempt this week`
-- `PTO-excused`
-
-### 6.5 Filters
-
-The current employee-level control:
-
-- `Exclude Approved Remote Work`
-- `Include Approved Remote Work`
-
-does not fit week-level exemption handling well.
-
-Replace it with:
-
-- `All employees` (default)
-- `Only standard policy`
-- `Only approved WFH coverage`
-
-Behavior:
-
-- `All employees`
-  - show everyone, which lets managers see green exempt weeks and `*`
-- `Only standard policy`
-  - hide employees with any standing or temporary approved WFH coverage in the selected range
-- `Only approved WFH coverage`
-  - show only employees with any approved WFH coverage in the selected range
-
-Backward-compatibility note:
-
-- existing `approvedRemoteWork=include` URLs can map to `All employees`
-
-### 6.6 Row badges and copy
-
-Current `remoteWorkStatusLabel` should be updated so it can distinguish:
-
-- `Standard Policy`
-- `Standing WFH Policy`
-- `Approved Temporary WFH`
-- `Standing WFH Policy + Temporary Request`
-
-Prefer "approved WFH coverage" or "standing WFH policy" over "licensed to work from home" in UI copy.
-
-## 7. Export Spec
-
-Exports must match the on-screen logic.
-
-### 7.1 Employee CSV/XLSX
-
-Weekly columns should export the displayed office-days value with `*` when applicable.
-
-Examples:
-
-- `2`
-- `1*`
-- `0*`
-
-Add export-only metadata columns after `Remote Workday`:
-
-- `Standing WFH Policy`
-- `Approved WFH Coverage In Range`
-
-Optional if more detail is needed:
-
-- `Exempt Weeks`
-
-### 7.2 Aggregate CSV/XLSX
-
-Update weekly breakdown export columns from:
-
-- `Eligible Quebec`
-- `Compliant Count`
-- `Compliant`
-- `Non-compliant`
-- `Fully remote`
-
-to:
-
-- `Eligible Quebec`
-- `Compliant Count`
-- `Exempt Count`
-- `PTO Excused Count`
-- `Compliant`
-- `Non-compliant`
-- `Exempt`
-- `PTO Excused`
-
-Excel fill colors must use the same adjusted logic as the table.
-
-## 8. Non-goals For This Version
-
-- no Oracle schema change
-- no manual override table
-- no new HR approval workflow
-- no attempt to infer approval from raw remote attendance alone
-- no use of `ALTERNATE_IN_OFFICE_WORK_DATE` as a scoring override
-- no custom per-employee numeric weekly target beyond `0` or reduced-by-temporary-days logic
-
-## 9. Implementation Slices
-
-### Slice 1: backend data contract
-
-- extend `WeekCell` and `AttendanceRow`
-- index standing-policy emails
-- expand approved request dates by email/week
-- compute `adjustedOfficeTarget`, `adjustedCompliant`, `wfhExceptionType`
-
-### Slice 2: employee UI
-
-- update week cell rendering to append `*`
-- update cell color helpers to use adjusted logic
-- add legend
-- update detail modal weekly compliance section
-
-### Slice 3: aggregate UI
-
-- move aggregate eligibility/compliance to week-level logic
-- replace `fullyRemoteNames` with exempt naming
-- update aggregate summaries and tooltips
-
-### Slice 4: export parity
-
-- update CSV/XLSX cell values
-- update Excel fill colors
-- add exempt/excused columns to aggregate weekly breakdown export
-
-## 10. Acceptance Cases
-
-Implementation is correct when all of the following are true:
-
-1. Standard employee, no PTO, 2 office days:
-   - cell shows `2`
-   - cell is green
-   - week counts in denominator
-
-2. Standing-policy employee:
-   - every week in range shows `*`
-   - week cell is green
-   - week does not count in denominator
-
-3. Temporary request for one weekday, employee has 1 office day:
-   - cell shows `1*`
-   - adjusted target is `1`
-   - cell is green
-   - week counts in denominator
-
-4. Temporary request for one weekday, employee has 0 office days:
-   - cell shows `0*`
-   - adjusted target is `1`
-   - cell is not green
-   - week counts in denominator
-
-5. Temporary request covers enough weekdays to reduce target to `0`:
-   - cell shows `0*` or `1*`
-   - cell is green
-   - week does not count in denominator
-
-6. Employee has PTO that leaves too few available days for the adjusted target:
-   - week is PTO-excused
-   - cell is blue
-   - week does not count in denominator or score capacity
-
-7. Aggregate department view with mixed employees:
-   - compliant percentage counts only week-level eligible employees
-   - exempt employees are shown separately, not counted as failures
-   - exempt employees do not inflate denominator
-
-## 11. Recommended File Touch List
-
-- `lib/types/attendance.ts`
-- `lib/dashboard-data.ts`
-- `app/dashboard/office-attendance/attendance-client.tsx`
-- `lib/constants.ts`
-
-Optional only if copy extraction becomes worthwhile:
-
-- `lib/constants.ts` for new legend labels and colors
+5. Employee with no ActivTrak coverage:
+   - week stays neutral
+   - no compliance failure is recorded

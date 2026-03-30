@@ -1,38 +1,26 @@
 # Linux Production Server Access
 
-This is the current MyReports production host.
+This repository intentionally omits the live production hostname, IP address, username, and any reusable direct-login command.
 
-## Server
+Retrieve the current connection details from the approved secret store or the private ops runbook before connecting.
 
-| Field | Value |
-|---|---|
-| Hostname | `ubuntu-docker-host` |
-| IP | `172.16.20.97` |
-| OS | `Ubuntu Linux` |
-| User | `admin` |
-| Credentials | Retrieve from the approved secret store or IT owner. Do not store passwords in this repo. |
+## Access Workflow
 
-## Recommended SSH Login
+1. Retrieve the current production host, username, and authentication method from the approved secret store.
+2. Verify that the target is the active MyReports production Linux host.
+3. Connect with standard SSH using normal host-key verification.
+4. Avoid storing passwords, static SSH command lines, or copied connection details in the repository.
 
-Use interactive SSH and verify the host key normally:
+## Example Command Shape
 
 ```bash
-ssh admin@172.16.20.97
+ssh <production-user>@<production-host>
 ```
 
-If password auth is still required for automation, retrieve the password from the approved secret store at runtime and inject it locally. Do not hardcode it in commands, shell history, scripts, or repository docs.
-
-## Quick Connection Test
+Quick verification:
 
 ```bash
-ssh admin@172.16.20.97 'hostname && whoami && uname -a'
-```
-
-Expected host:
-
-```text
-ubuntu-docker-host
-admin
+ssh <production-user>@<production-host> 'hostname && whoami && uname -a'
 ```
 
 ## Docker / MyReports Checks
@@ -40,24 +28,23 @@ admin
 List running containers:
 
 ```bash
-ssh admin@172.16.20.97 'docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"'
+ssh <production-user>@<production-host> 'docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"'
 ```
 
 Check MyReports logs:
 
 ```bash
-ssh admin@172.16.20.97 'docker logs myreports --tail=120 2>&1'
+ssh <production-user>@<production-host> 'docker logs myreports --tail=120 2>&1'
 ```
 
 Check the currently running MyReports image:
 
 ```bash
-ssh admin@172.16.20.97 'docker inspect myreports --format "{{.Image}}|{{.Created}}|{{.State.StartedAt}}|{{.Config.Image}}"'
+ssh <production-user>@<production-host> 'docker inspect myreports --format "{{.Image}}|{{.Created}}|{{.State.StartedAt}}|{{.Config.Image}}"'
 ```
 
 ## Current Production Notes
 
-- `myreports.jestais.com` currently resolves to `172.16.20.97`
-- the production host runs `myreports` and `watchtower`
-- this Linux host is the real production runtime for MyReports
-- the old Windows host at `172.16.30.77` is no longer the MyReports production host
+- MyReports production runs on a Linux Docker host.
+- The host typically runs the `myreports` container and supporting infrastructure such as an update watcher.
+- The old Windows host is not the production source of truth for MyReports.

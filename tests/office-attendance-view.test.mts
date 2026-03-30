@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {
+import * as officeAttendanceView from '../lib/office-attendance-view.ts';
+import type { DisplayRow } from '../lib/office-attendance-view.ts';
+
+function getModuleExports<T extends object>(mod: T): T {
+  return ((mod as T & { default?: T; 'module.exports'?: T }).default
+    ?? (mod as T & { default?: T; 'module.exports'?: T })['module.exports']
+    ?? mod);
+}
+
+const {
   buildApprovalRequestSummary,
   buildCombinedApprovalRequests,
   buildFilteredAttendanceSummary,
@@ -9,8 +18,7 @@ import {
   filterAttendanceRows,
   getDefaultSortDirectionForKey,
   sortDisplayRows,
-  type DisplayRow,
-} from '../lib/office-attendance-view.ts';
+} = getModuleExports(officeAttendanceView);
 import type {
   AttendanceRemoteWorkRequest,
   AttendanceRow,
