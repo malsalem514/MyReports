@@ -117,6 +117,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
   const syncType = 'full';
   const startDate = new Date(now);
   startDate.setDate(now.getDate() - Math.max(1, daysBack));
+  startDate.setHours(0, 0, 0, 0);
 
   await initializeSchema();
 
@@ -249,7 +250,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
 
     await execute(
       `DELETE FROM TL_OFFICE_IP_ACTIVITY
-       WHERE RECORD_DATE BETWEEN :sd AND :ed`,
+       WHERE TRUNC(RECORD_DATE) BETWEEN TRUNC(:sd) AND TRUNC(:ed)`,
       { sd: startDate, ed: now },
     );
 
