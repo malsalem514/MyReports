@@ -484,6 +484,80 @@ export async function initializeSchema(): Promise<void> {
       WHERE HAS_ACTIVTRAK_USER = 0
     `);
     await safeExecuteDDL(conn, `
+      CREATE OR REPLACE VIEW V_USER_MAPPINGS_REPORT AS
+      WITH activtrak_email_activity AS (
+        SELECT
+          EMAIL,
+          MAX(ACTIVITY_AT) AS LAST_ACTIVTRAK_ACTIVITY
+        FROM (
+          SELECT
+            LOWER(p.EMAIL) AS EMAIL,
+            MAX(NVL(p.LAST_ACTIVITY_AT, CAST(p.RECORD_DATE AS TIMESTAMP))) AS ACTIVITY_AT
+          FROM TL_PRODUCTIVITY p
+          WHERE p.EMAIL IS NOT NULL
+          GROUP BY LOWER(p.EMAIL)
+
+          UNION ALL
+
+          SELECT
+            LOWER(a.EMAIL) AS EMAIL,
+            CAST(MAX(a.RECORD_DATE) AS TIMESTAMP) AS ACTIVITY_AT
+          FROM TL_ATTENDANCE a
+          WHERE a.EMAIL IS NOT NULL
+          GROUP BY LOWER(a.EMAIL)
+
+          UNION ALL
+
+          SELECT
+            LOWER(o.EMAIL) AS EMAIL,
+            CAST(MAX(o.RECORD_DATE) AS TIMESTAMP) AS ACTIVITY_AT
+          FROM TL_OFFICE_IP_ACTIVITY o
+          WHERE o.EMAIL IS NOT NULL
+          GROUP BY LOWER(o.EMAIL)
+        )
+        GROUP BY EMAIL
+      ),
+      tbs_last_entry AS (
+        SELECT
+          EMPLOYEE_NO,
+          MAX(ENTRY_DATE) AS LAST_TBS_ENTRY
+        FROM TBS_ALL_TIME_ENTRIES_V@TBS_LINK
+        GROUP BY EMPLOYEE_NO
+      )
+      SELECT
+        m.EMPLOYEE_ID,
+        m.EMAIL,
+        m.DISPLAY_NAME,
+        m.FIRST_NAME,
+        m.LAST_NAME,
+        m.JOB_TITLE,
+        m.DEPARTMENT,
+        m.DIVISION,
+        m.LOCATION,
+        m.SUPERVISOR_EMAIL,
+        m.HIRE_DATE,
+        m.STATUS,
+        m.TBS_EMPLOYEE_NO,
+        m.TBS_EMPLOYEE_NAME,
+        m.ACTIVTRAK_USER,
+        m.ACTRK_ID,
+        m.HAS_ACTIVTRAK_MAPPING,
+        m.HAS_ACTIVTRAK_USER,
+        CASE
+          WHEN activity.LAST_ACTIVTRAK_ACTIVITY IS NULL THEN CAST(stats.LAST_SEEN AS TIMESTAMP)
+          WHEN stats.LAST_SEEN IS NULL THEN activity.LAST_ACTIVTRAK_ACTIVITY
+          ELSE GREATEST(activity.LAST_ACTIVTRAK_ACTIVITY, CAST(stats.LAST_SEEN AS TIMESTAMP))
+        END AS LAST_ACTIVTRAK_ACTIVITY,
+        tbs.LAST_TBS_ENTRY
+      FROM V_USER_MAPPINGS m
+      LEFT JOIN activtrak_email_activity activity
+        ON activity.EMAIL = m.EMAIL
+      LEFT JOIN TL_ACTIVTRAK_USER_STATS stats
+        ON stats.USER_ID = m.ACTRK_ID
+      LEFT JOIN tbs_last_entry tbs
+        ON tbs.EMPLOYEE_NO = m.TBS_EMPLOYEE_NO
+    `);
+    await safeExecuteDDL(conn, `
       CREATE OR REPLACE VIEW V_SUSPICIOUS_ACTIVTRAK_IDENTITIES AS
       WITH identifier_rollup AS (
         SELECT

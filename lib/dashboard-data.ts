@@ -72,6 +72,8 @@ export interface BambooNotInActivTrakEmployee {
   actrkId: number | null;
   hasActivTrakMapping: boolean;
   hasActivTrakUser: boolean;
+  lastActivTrakActivity: Date | null;
+  lastTbsEntry: Date | null;
 }
 
 export interface SuspiciousActivTrakIdentity {
@@ -162,9 +164,11 @@ export async function getBambooNotInActivTrakEmployees(): Promise<BambooNotInAct
     ACTRK_ID: number | null;
     HAS_ACTIVTRAK_MAPPING: number;
     HAS_ACTIVTRAK_USER: number;
+    LAST_ACTIVTRAK_ACTIVITY: Date | null;
+    LAST_TBS_ENTRY: Date | null;
   }>(`
     SELECT *
-    FROM V_USER_MAPPINGS
+    FROM V_USER_MAPPINGS_REPORT
     ORDER BY DISPLAY_NAME, EMAIL
   `);
 
@@ -187,6 +191,8 @@ export async function getBambooNotInActivTrakEmployees(): Promise<BambooNotInAct
     actrkId: r.ACTRK_ID,
     hasActivTrakMapping: r.HAS_ACTIVTRAK_MAPPING === 1,
     hasActivTrakUser: r.HAS_ACTIVTRAK_USER === 1,
+    lastActivTrakActivity: r.LAST_ACTIVTRAK_ACTIVITY,
+    lastTbsEntry: r.LAST_TBS_ENTRY,
   }));
 }
 
