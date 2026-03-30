@@ -23,8 +23,10 @@ export interface WeekCell {
   adjustedCompliant: boolean | null;
   isPtoExcused: boolean;
   hasApprovedWfhCoverage: boolean;
+  hasApprovedRemoteCoverage: boolean;
+  hasApprovedWorkAbroadCoverage: boolean;
   wfhExceptionType: WfhExceptionType;
-  approvedRemoteWeekdays: number;
+  approvedCoverageWeekdays: number;
   exceptionLabel: string | null;
 }
 

@@ -1,4 +1,4 @@
-import { fetchActiveEmployees, fetchRemoteWorkRequests, fetchTimeOffRequests, fetchWorkAbroadRequests } from './bamboohr';
+import { fetchEmployeeDirectory, fetchRemoteWorkRequests, fetchTimeOffRequests, fetchWorkAbroadRequests } from './bamboohr';
 import { fetchActivTrakIdentifiers, fetchActivTrakUserStats, fetchOfficeAttendanceData, fetchOfficeIpActivity, fetchProductivityData } from './bigquery';
 import { execute, executeMany, initializeSchema, query } from './oracle';
 import { normalizeEmailNullable } from './email';
@@ -27,6 +27,17 @@ function toDateKey(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+function normalizeOracleText(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return value
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+    .replace(/[\u201C\u201D\u201E]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/\u2026/g, '...')
+    .replace(/\u00A0/g, ' ')
+    .trim() || null;
 }
 
 /**
@@ -137,9 +148,8 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
   let tbsMapped = 0;
 
   try {
-    const employees = await fetchActiveEmployees();
+    const employees = await fetchEmployeeDirectory();
     const employeeBinds = employees
-      .filter((emp) => emp.workEmail)
       .map((emp) => ({
         ID: emp.id,
         EMPLOYEE_NUMBER:
@@ -608,17 +618,17 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
         BAMBOO_ROW_ID: Number(row.rowId),
         EMPLOYEE_ID: row.employeeId,
         EMAIL: normalizeEmailNullable(row.employeeEmail),
-        EMPLOYEE_NAME: row.employeeName || null,
-        DEPARTMENT: row.department || null,
+        EMPLOYEE_NAME: normalizeOracleText(row.employeeName),
+        DEPARTMENT: normalizeOracleText(row.department),
         REQUEST_DATE: row.requestDate ? parseDateOnly(row.requestDate) : null,
         REMOTE_WORK_START_DATE: parseDateOnly(row.remoteWorkStartDate),
         REMOTE_WORK_END_DATE: row.remoteWorkEndDate ? parseDateOnly(row.remoteWorkEndDate) : null,
-        REMOTE_WORK_TYPE: row.remoteWorkType || null,
-        REASON: row.reason || null,
-        SUPPORTING_DOCUMENTATION_SUBMITTED: row.supportingDocumentationSubmitted || null,
-        ALTERNATE_IN_OFFICE_WORK_DATE: row.alternateInOfficeWorkDate || null,
-        MANAGER_APPROVAL_RECEIVED: row.managerApprovalReceived || null,
-        MANAGER_NAME: row.managerName || null,
+        REMOTE_WORK_TYPE: normalizeOracleText(row.remoteWorkType),
+        REASON: normalizeOracleText(row.reason),
+        SUPPORTING_DOCUMENTATION_SUBMITTED: normalizeOracleText(row.supportingDocumentationSubmitted),
+        ALTERNATE_IN_OFFICE_WORK_DATE: normalizeOracleText(row.alternateInOfficeWorkDate),
+        MANAGER_APPROVAL_RECEIVED: normalizeOracleText(row.managerApprovalReceived),
+        MANAGER_NAME: normalizeOracleText(row.managerName),
       }));
 
     if (remoteWorkBinds.length > 0) {
@@ -684,17 +694,17 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
         BAMBOO_ROW_ID: Number(row.rowId),
         EMPLOYEE_ID: row.employeeId,
         EMAIL: normalizeEmailNullable(row.employeeEmail),
-        EMPLOYEE_NAME: row.employeeName || null,
-        DEPARTMENT: row.department || null,
+        EMPLOYEE_NAME: normalizeOracleText(row.employeeName),
+        DEPARTMENT: normalizeOracleText(row.department),
         REQUEST_DATE: row.requestDate ? parseDateOnly(row.requestDate) : null,
         WORK_ABROAD_START_DATE: parseDateOnly(row.workAbroadStartDate),
         WORK_ABROAD_END_DATE: row.workAbroadEndDate ? parseDateOnly(row.workAbroadEndDate) : null,
-        REMOTE_WORK_LOCATION_ADDRESS: row.remoteWorkLocationAddress || null,
-        COUNTRY_OR_PROVINCE: row.countryOrProvince || null,
-        REASON: row.reason || null,
-        WORK_SCHEDULE: row.workSchedule || null,
-        REQUEST_APPROVED: row.requestApproved || null,
-        APPROVED_DECLINED_BY: row.approvedDeclinedBy || null,
+        REMOTE_WORK_LOCATION_ADDRESS: normalizeOracleText(row.remoteWorkLocationAddress),
+        COUNTRY_OR_PROVINCE: normalizeOracleText(row.countryOrProvince),
+        REASON: normalizeOracleText(row.reason),
+        WORK_SCHEDULE: normalizeOracleText(row.workSchedule),
+        REQUEST_APPROVED: normalizeOracleText(row.requestApproved),
+        APPROVED_DECLINED_BY: normalizeOracleText(row.approvedDeclinedBy),
       }));
 
     if (workAbroadBinds.length > 0) {

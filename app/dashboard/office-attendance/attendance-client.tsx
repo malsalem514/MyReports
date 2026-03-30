@@ -1,6 +1,6 @@
 'use client';
 
-import { Download, Filter, X } from 'lucide-react';
+import { Download, Filter, House, Plane, X } from 'lucide-react';
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -195,10 +195,50 @@ function getEmployeeCellHex(cell?: WeekCell): string {
   return CELL_HEX.absent;
 }
 
+function getWeekCoverageKinds(cell?: Pick<WeekCell, 'hasApprovedRemoteCoverage' | 'hasApprovedWorkAbroadCoverage'>): Array<'remote' | 'abroad'> {
+  const kinds: Array<'remote' | 'abroad'> = [];
+  if (cell?.hasApprovedRemoteCoverage) kinds.push('remote');
+  if (cell?.hasApprovedWorkAbroadCoverage) kinds.push('abroad');
+  return kinds;
+}
+
+function getCoverageSummaryLabel(cell?: Pick<WeekCell, 'hasApprovedRemoteCoverage' | 'hasApprovedWorkAbroadCoverage'>): string {
+  const kinds = getWeekCoverageKinds(cell);
+  if (kinds.length === 2) return 'Remote Work + Work Abroad';
+  if (kinds[0] === 'remote') return 'Remote Work';
+  if (kinds[0] === 'abroad') return 'Work Abroad';
+  return 'No';
+}
+
+function renderWeekCoverageMarkers(cell?: Pick<WeekCell, 'hasApprovedRemoteCoverage' | 'hasApprovedWorkAbroadCoverage'>, iconClassName = 'h-3 w-3') {
+  const kinds = getWeekCoverageKinds(cell);
+  if (kinds.length === 0) return null;
+
+  return (
+    <span className="inline-flex items-center gap-0.5" aria-hidden="true">
+      {kinds.includes('remote') ? <House className={`${iconClassName} text-sky-700`} /> : null}
+      {kinds.includes('abroad') ? <Plane className={`${iconClassName} text-emerald-700`} /> : null}
+    </span>
+  );
+}
+
 function formatEmployeeWeekValue(cell: WeekCell | undefined, isKnown: boolean): string {
   if (!isKnown) return UNKNOWN_DISPLAY_VALUE;
   const officeDays = cell?.officeDays ?? 0;
-  return `${officeDays}${cell?.hasApprovedWfhCoverage ? '*' : ''}`;
+  const kinds = getWeekCoverageKinds(cell);
+  const markers = kinds.map((kind) => kind === 'remote' ? '[House]' : '[Plane]').join(' ');
+  return markers ? `${officeDays} ${markers}` : String(officeDays);
+}
+
+function renderEmployeeWeekValue(cell: WeekCell | undefined, isKnown: boolean) {
+  if (!isKnown) return UNKNOWN_DISPLAY_VALUE;
+  const officeDays = cell?.officeDays ?? 0;
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span>{officeDays}</span>
+      {renderWeekCoverageMarkers(cell)}
+    </span>
+  );
 }
 
 function createEmptyWeeklyCompliance(): WeeklyCompliance {
@@ -227,8 +267,10 @@ function createEmptyWeekCell(): WeekCell {
     adjustedCompliant: false,
     isPtoExcused: false,
     hasApprovedWfhCoverage: false,
+    hasApprovedRemoteCoverage: false,
+    hasApprovedWorkAbroadCoverage: false,
     wfhExceptionType: 'none',
-    approvedRemoteWeekdays: 0,
+    approvedCoverageWeekdays: 0,
     exceptionLabel: null,
   };
 }
@@ -968,8 +1010,10 @@ export function AttendanceClient({
             adjustedCompliant: (compliance?.compliancePct ?? 0) >= 100,
             isPtoExcused: false,
             hasApprovedWfhCoverage: false,
+            hasApprovedRemoteCoverage: false,
+            hasApprovedWorkAbroadCoverage: false,
             wfhExceptionType: 'none',
-            approvedRemoteWeekdays: 0,
+            approvedCoverageWeekdays: 0,
             exceptionLabel: null,
           }];
         }),
@@ -1350,8 +1394,8 @@ export function AttendanceClient({
       isAggregateView ? 'Employees' : 'Department',
       ...(isAggregateView ? ['Quebec Employees', 'Remote/Exempt Employees'] : []),
       'Location',
-      'Remote Workday',
-      ...(isAggregateView ? [] : ['Standing WFH Policy', 'Approved Remote Coverage In Range', 'ActivTrak Coverage']),
+      'Coverage Status',
+      ...(isAggregateView ? [] : ['Standing WFH Policy', 'Approved Coverage In Range', 'ActivTrak Coverage']),
       ...weeks.map((w) => getWeekLabel(w)),
       isAggregateView ? 'Total Office Days' : 'Total',
       'Avg/Week',
@@ -1492,8 +1536,8 @@ export function AttendanceClient({
       isAggregateView ? 'Employees' : 'Department',
       ...(isAggregateView ? ['Quebec Employees', 'Remote/Exempt Employees'] : []),
       'Location',
-      'Remote Workday',
-      ...(isAggregateView ? [] : ['Standing WFH Policy', 'Approved Remote Coverage In Range', 'ActivTrak Coverage']),
+      'Coverage Status',
+      ...(isAggregateView ? [] : ['Standing WFH Policy', 'Approved Coverage In Range', 'ActivTrak Coverage']),
       ...weeks.map((w) => getWeekLabel(w)),
       isAggregateView ? 'Total Office Days' : 'Total',
       'Avg/Week',
@@ -1658,7 +1702,7 @@ export function AttendanceClient({
                 {isApprovedRemoteWorkView
                   ? 'Approved remote-work and work-abroad request records synced from Oracle. Use the approval fields to distinguish approved vs pending requests.'
                   : isAggregateView
-                    ? `Weekly compliance is based on Quebec employees meeting the adjusted office target after approved remote coverage and PTO exceptions.`
+                    ? `Weekly compliance is based on Quebec employees meeting the adjusted office target after approved week-level coverage and PTO exceptions.`
                     : `${currentView.description} Target ${OFFICE_DAYS_REQUIRED} office days per week.`}
               </p>
               <p className="mt-1 text-[11px] text-gray-400">
@@ -2005,7 +2049,7 @@ export function AttendanceClient({
                   <p className={`mt-1 text-[22px] font-semibold ${filteredSummary.complianceRate >= 80 ? 'text-green-600' : filteredSummary.complianceRate >= 50 ? 'text-amber-600' : 'text-red-600'}`}>
                     {filteredSummary.complianceRate}%
                   </p>
-                  <p className="mt-1 text-[11px] text-gray-400">Scored against each week&apos;s adjusted office target after approved remote coverage and PTO exceptions.</p>
+                  <p className="mt-1 text-[11px] text-gray-400">Scored against each week&apos;s adjusted office target after approved week-level coverage and PTO exceptions.</p>
                 </>
               )}
             </div>
@@ -2264,7 +2308,7 @@ export function AttendanceClient({
                                     ? complianceValueTone(departmentCompliance?.compliancePct ?? 0, departmentCompliance?.eligibleEmployees ?? 0)
                                     : (row.hasActivTrakCoverage ? getEmployeeCellColor(cell) : unknownTone())
                                 }`}>
-                                  {isAggregateView ? `${departmentCompliance?.compliancePct ?? 0}%` : formatEmployeeWeekValue(cell, row.hasActivTrakCoverage)}
+                                  {isAggregateView ? `${departmentCompliance?.compliancePct ?? 0}%` : renderEmployeeWeekValue(cell, row.hasActivTrakCoverage)}
                                 </span>
                               </div>
                               {isAggregateView ? (
@@ -2538,7 +2582,7 @@ export function AttendanceClient({
                           <td key={w} className="px-2 py-1.5 text-center">
                             <div className="group relative inline-flex">
                               <span className={`inline-flex min-h-6 min-w-8 cursor-default items-center justify-center rounded px-1 text-[11px] font-medium ${color}`}>
-                                {isAggregateView ? `${departmentCompliance?.compliancePct ?? 0}%` : formatEmployeeWeekValue(cell, row.hasActivTrakCoverage)}
+                                {isAggregateView ? `${departmentCompliance?.compliancePct ?? 0}%` : renderEmployeeWeekValue(cell, row.hasActivTrakCoverage)}
                               </span>
                               <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-80 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-3 py-2.5 opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
                                 <div className="text-left text-[11px]">
@@ -2580,8 +2624,8 @@ export function AttendanceClient({
                                         <div className="flex justify-between gap-3"><span>Remote days</span><span className="font-medium text-gray-900">{remote}</span></div>
                                         <div className="flex justify-between gap-3"><span>PTO days</span><span className="font-medium text-gray-900">{pto}</span></div>
                                         <div className="flex justify-between gap-3"><span>Adjusted target</span><span className="font-medium text-gray-900">{cell?.adjustedOfficeTarget == null ? (cell?.isPtoExcused ? 'Excused' : '—') : cell.adjustedOfficeTarget}</span></div>
-                                        <div className="flex justify-between gap-3"><span>Approved Coverage</span><span className="font-medium text-gray-900">{cell?.hasApprovedWfhCoverage ? 'Yes' : 'No'}</span></div>
-                                        <div className="flex justify-between gap-3"><span>Approved weekdays</span><span className="font-medium text-gray-900">{cell?.approvedRemoteWeekdays ?? 0}</span></div>
+                                        <div className="flex justify-between gap-3"><span>Coverage source</span><span className="font-medium text-gray-900">{getCoverageSummaryLabel(cell)}</span></div>
+                                        <div className="flex justify-between gap-3"><span>Approved weekdays</span><span className="font-medium text-gray-900">{cell?.approvedCoverageWeekdays ?? 0}</span></div>
                                       </div>
                                       <div>
                                         <p className="uppercase tracking-wider text-gray-400">Policy</p>
@@ -2688,7 +2732,8 @@ export function AttendanceClient({
           <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.partial}`} /> Below adjusted target</span>
           <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.absent}`} /> No office days</span>
           <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.pto}`} /> PTO-excused week</span>
-          <span className="flex items-center gap-1.5"><span className="font-semibold text-gray-600">*</span> Approved remote coverage affected this week</span>
+          <span className="flex items-center gap-1.5">{renderWeekCoverageMarkers({ hasApprovedRemoteCoverage: true, hasApprovedWorkAbroadCoverage: false }, 'h-3.5 w-3.5')} Approved remote-work coverage affected this week</span>
+          <span className="flex items-center gap-1.5">{renderWeekCoverageMarkers({ hasApprovedRemoteCoverage: false, hasApprovedWorkAbroadCoverage: true }, 'h-3.5 w-3.5')} Approved work-abroad coverage affected this week</span>
           {currentWeek ? <span className="flex items-center gap-1.5"><span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-300" /> Current week is excluded from score</span> : null}
         </div>
       ) : null}
@@ -2855,7 +2900,9 @@ function AttendanceDetailModal({
       adjustedCompliant: cell.adjustedCompliant,
       isPtoExcused: cell.isPtoExcused,
       hasApprovedWfhCoverage: cell.hasApprovedWfhCoverage,
-      approvedRemoteWeekdays: cell.approvedRemoteWeekdays ?? 0,
+      hasApprovedRemoteCoverage: cell.hasApprovedRemoteCoverage,
+      hasApprovedWorkAbroadCoverage: cell.hasApprovedWorkAbroadCoverage,
+      approvedCoverageWeekdays: cell.approvedCoverageWeekdays ?? 0,
       exceptionLabel: cell.exceptionLabel,
       scorePct: getWeekPointCapacity(cell) > 0
         ? Math.round((getWeekPoints(cell) / getWeekPointCapacity(cell)) * 100)
@@ -3059,7 +3106,7 @@ function AttendanceDetailModal({
             <section className="space-y-4">
               <div>
                 <h4 className="text-[13px] font-semibold uppercase tracking-wider text-gray-500">Weekly Compliance</h4>
-                <p className="mt-1 text-[12px] text-gray-400">Weeks are scored against the adjusted office target after approved remote coverage and PTO exceptions.</p>
+                <p className="mt-1 text-[12px] text-gray-400">Weeks are scored against the adjusted office target after approved week-level coverage and PTO exceptions.</p>
               </div>
               <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
                 <div className="divide-y divide-gray-100">
@@ -3073,7 +3120,15 @@ function AttendanceDetailModal({
                           <p className="text-[13px] font-medium text-gray-900">{weekSummary.label}</p>
                           <p className="mt-1 text-[11px] text-gray-400">
                             {hasActivTrakCoverage
-                              ? `${weekSummary.officeDays}${weekSummary.hasApprovedWfhCoverage ? '*' : ''} office • ${weekSummary.remoteDays} remote • ${weekSummary.ptoDays} PTO`
+                              ? (
+                                <>
+                                  <span className="inline-flex items-center gap-1">
+                                    <span>{weekSummary.officeDays}</span>
+                                    {renderWeekCoverageMarkers(weekSummary)}
+                                  </span>
+                                  <span>{` office • ${weekSummary.remoteDays} remote • ${weekSummary.ptoDays} PTO`}</span>
+                                </>
+                              )
                               : `Attendance unknown • ${weekSummary.ptoDays} PTO`}
                           </p>
                           {hasActivTrakCoverage ? (

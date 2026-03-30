@@ -642,7 +642,9 @@ export async function getAttendanceReport(
   const approvedWorkAbroadRequestEmails = new Set<string>();
   const approvedRemoteWorkTypesByEmail = new Map<string, Set<string>>();
   const approvedWorkAbroadCountriesByEmail = new Map<string, Set<string>>();
+  const approvedCoverageDatesByEmailWeek = new Map<string, Set<string>>();
   const approvedRemoteWorkDatesByEmailWeek = new Map<string, Set<string>>();
+  const approvedWorkAbroadDatesByEmailWeek = new Map<string, Set<string>>();
   const approvedCoverageLabelsByEmailWeek = new Map<string, Set<string>>();
   const remoteWorkRequests: AttendanceRemoteWorkRequest[] = [];
   const workAbroadRequests: AttendanceWorkAbroadRequest[] = [];
@@ -736,8 +738,10 @@ export async function getAttendanceReport(
     adjustedCompliant: officeDays >= officeDaysRequired,
     isPtoExcused: false,
     hasApprovedWfhCoverage: false,
+    hasApprovedRemoteCoverage: false,
+    hasApprovedWorkAbroadCoverage: false,
     wfhExceptionType: 'none',
-    approvedRemoteWeekdays: 0,
+    approvedCoverageWeekdays: 0,
     exceptionLabel: null,
   });
 
@@ -845,6 +849,7 @@ export async function getAttendanceReport(
       const dateStr = toDateStr(current);
       const weekStart = toDateStr(getWeekStartForDate(current));
       const weekKey = getWeekKey(email, weekStart);
+      addValueToSetMap(approvedCoverageDatesByEmailWeek, weekKey, dateStr);
       addValueToSetMap(approvedRemoteWorkDatesByEmailWeek, weekKey, dateStr);
       addValueToSetMap(
         approvedCoverageLabelsByEmailWeek,
@@ -913,7 +918,8 @@ export async function getAttendanceReport(
       const dateStr = toDateStr(current);
       const weekStart = toDateStr(getWeekStartForDate(current));
       const weekKey = getWeekKey(email, weekStart);
-      addValueToSetMap(approvedRemoteWorkDatesByEmailWeek, weekKey, dateStr);
+      addValueToSetMap(approvedCoverageDatesByEmailWeek, weekKey, dateStr);
+      addValueToSetMap(approvedWorkAbroadDatesByEmailWeek, weekKey, dateStr);
       addValueToSetMap(
         approvedCoverageLabelsByEmailWeek,
         weekKey,
@@ -1100,18 +1106,22 @@ export async function getAttendanceReport(
   const completedDataWeeks = weeks.filter((w) => w !== currentWeekStr);
   const numCompletedWeeks = completedDataWeeks.length;
 
-  const getApprovedRemoteWeekdays = (email: string, weekStart: string) => (
-    approvedRemoteWorkDatesByEmailWeek.get(getWeekKey(email, weekStart))?.size ?? 0
+  const getApprovedCoverageWeekdays = (email: string, weekStart: string) => (
+    approvedCoverageDatesByEmailWeek.get(getWeekKey(email, weekStart))?.size ?? 0
   );
 
-  const getWeekExceptionLabel = (email: string, weekStart: string, hasStandingWfhPolicy: boolean) => {
+  const hasApprovedRemoteCoverageForWeek = (email: string, weekStart: string) => (
+    (approvedRemoteWorkDatesByEmailWeek.get(getWeekKey(email, weekStart))?.size ?? 0) > 0
+  );
+
+  const hasApprovedWorkAbroadCoverageForWeek = (email: string, weekStart: string) => (
+    (approvedWorkAbroadDatesByEmailWeek.get(getWeekKey(email, weekStart))?.size ?? 0) > 0
+  );
+
+  const getWeekExceptionLabel = (email: string, weekStart: string) => {
     const labels = approvedCoverageLabelsByEmailWeek.get(getWeekKey(email, weekStart));
-    const hasTemporaryCoverage = getApprovedRemoteWeekdays(email, weekStart) > 0;
-    if (hasStandingWfhPolicy && hasTemporaryCoverage) {
-      return `Standing WFH Policy + ${formatCoverageLabels(labels)}`;
-    }
-    if (hasStandingWfhPolicy) return 'Standing WFH Policy';
-    if (hasTemporaryCoverage) return formatCoverageLabels(labels) || 'Approved Remote Coverage';
+    const hasTemporaryCoverage = getApprovedCoverageWeekdays(email, weekStart) > 0;
+    if (hasTemporaryCoverage) return formatCoverageLabels(labels) || 'Approved Coverage';
     return null;
   };
 
@@ -1133,9 +1143,10 @@ export async function getAttendanceReport(
       const ptoDays = currentCell?.ptoDays ?? 0;
       const days = currentCell?.days ?? [];
       const availableDays = 5 - ptoDays;
-      const approvedRemoteWeekdays = getApprovedRemoteWeekdays(email, wk);
-      const hasStandingWfhPolicy = data.hasStandingWfhPolicy;
-      const hasApprovedWfhCoverage = data.hasActivTrakCoverage && (hasStandingWfhPolicy || approvedRemoteWeekdays > 0);
+      const approvedCoverageWeekdays = getApprovedCoverageWeekdays(email, wk);
+      const hasApprovedRemoteCoverage = hasApprovedRemoteCoverageForWeek(email, wk);
+      const hasApprovedWorkAbroadCoverage = hasApprovedWorkAbroadCoverageForWeek(email, wk);
+      const hasApprovedWfhCoverage = data.hasActivTrakCoverage && approvedCoverageWeekdays > 0;
       let wfhExceptionType: WfhExceptionType = 'none';
       let adjustedOfficeTarget: number | null = officeDaysRequired;
       let adjustedCompliant: boolean | null = officeDays >= officeDaysRequired;
@@ -1147,11 +1158,8 @@ export async function getAttendanceReport(
       } else {
         let targetAfterWfh = officeDaysRequired;
 
-        if (hasStandingWfhPolicy) {
-          targetAfterWfh = 0;
-          wfhExceptionType = 'standing_policy';
-        } else if (approvedRemoteWeekdays > 0) {
-          targetAfterWfh = Math.max(0, officeDaysRequired - approvedRemoteWeekdays);
+        if (approvedCoverageWeekdays > 0) {
+          targetAfterWfh = Math.max(0, officeDaysRequired - approvedCoverageWeekdays);
           wfhExceptionType = targetAfterWfh === 0 ? 'temporary_full' : 'temporary_partial';
         }
 
@@ -1182,9 +1190,11 @@ export async function getAttendanceReport(
         adjustedCompliant,
         isPtoExcused,
         hasApprovedWfhCoverage,
+        hasApprovedRemoteCoverage,
+        hasApprovedWorkAbroadCoverage,
         wfhExceptionType,
-        approvedRemoteWeekdays,
-        exceptionLabel: getWeekExceptionLabel(email, wk, hasStandingWfhPolicy),
+        approvedCoverageWeekdays,
+        exceptionLabel: getWeekExceptionLabel(email, wk),
       };
     }
 
