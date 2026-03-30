@@ -50,13 +50,10 @@ export function useUrlStateSync({
     if (lastSearchParamsRef.current === currentParams) return;
     lastSearchParamsRef.current = currentParams;
     pendingExternalSyncRef.current = true;
-  }, [currentParams]);
-
-  useEffect(() => {
     fields.forEach((field, index) => {
       field.sync(nextValues[index]);
     });
-  }, [fields, nextValues]);
+  }, [currentParams, fields, nextValues]);
 
   const nextParams = useMemo(() => {
     const params = new URLSearchParams(searchParams.toString());
