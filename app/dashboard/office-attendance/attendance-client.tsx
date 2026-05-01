@@ -360,7 +360,8 @@ function getShortOfficeDayTone(officeHours: number, threshold: number): string {
 function getOfficeWeekCellTone(cell: OfficeDayHoursWeekCell, threshold: number): string {
   if (cell.officeDayCount === 0) return 'bg-gray-50 text-gray-500 border-gray-200';
   if (cell.shortOfficeDayCount > 0) return 'bg-red-50 text-red-800 border-red-100';
-  if ((cell.avgOfficeWindowHours ?? cell.avgOfficeHours ?? 0) < threshold + 1) return 'bg-amber-50 text-amber-800 border-amber-100';
+  if (cell.avgOfficeWindowHours === null) return 'bg-gray-50 text-gray-500 border-gray-200';
+  if (cell.avgOfficeWindowHours < threshold + 1) return 'bg-amber-50 text-amber-800 border-amber-100';
   return 'bg-green-50 text-green-800 border-green-100';
 }
 
@@ -369,8 +370,8 @@ function getOfficeDaySharePct(day: OfficeDayHoursDay): number {
   return Math.min(100, Math.round((day.officeHours / day.activeHours) * 100));
 }
 
-function getOfficeWindowHoursForThreshold(day: OfficeDayHoursDay): number {
-  return day.officeWindowHours ?? day.officeHours;
+function getOfficeWindowHoursForThreshold(day: OfficeDayHoursDay): number | null {
+  return day.officeWindowHours;
 }
 
 function createOfficeDayHoursWeekCell(week: string): OfficeDayHoursWeekCell {
@@ -854,7 +855,7 @@ export function AttendanceClient({
               officeFirstActivityAt: day.officeFirstActivityAt ?? null,
               officeLastActivityAt: day.officeLastActivityAt ?? null,
               officeIpMatches: day.officeIpMatches ?? null,
-              isShort: (officeWindowHours ?? officeHours) < shortOfficeDayThreshold,
+              isShort: officeWindowHours !== null && officeWindowHours < shortOfficeDayThreshold,
             });
           }
         }
@@ -1011,6 +1012,7 @@ export function AttendanceClient({
       totalTrackedHours += row.totalTrackedHours;
       for (const day of row.days) {
         const officeWindowHours = getOfficeWindowHoursForThreshold(day);
+        if (officeWindowHours === null) continue;
         if (officeWindowHours < 2) bucketSeeds[0]!.count += 1;
         else if (officeWindowHours < 4) bucketSeeds[1]!.count += 1;
         else if (officeWindowHours < 6) bucketSeeds[2]!.count += 1;
@@ -1021,7 +1023,7 @@ export function AttendanceClient({
 
     const buckets = bucketSeeds.map((bucket) => ({
       ...bucket,
-      percent: officeDayCount > 0 ? Math.round((bucket.count / officeDayCount) * 100) : 0,
+      percent: officeWindowDayCount > 0 ? Math.round((bucket.count / officeWindowDayCount) * 100) : 0,
     }));
 
     return {
@@ -1030,7 +1032,7 @@ export function AttendanceClient({
       officeDayCount,
       shortOfficeDayCount,
       shortOfficeLongWorkdayCount,
-      shortOfficeDayRate: officeDayCount > 0 ? Math.round((shortOfficeDayCount / officeDayCount) * 100) : 0,
+      shortOfficeDayRate: officeWindowDayCount > 0 ? Math.round((shortOfficeDayCount / officeWindowDayCount) * 100) : 0,
       avgOfficeWindowHours: officeWindowDayCount > 0 ? roundToTenth(totalOfficeWindowHours / officeWindowDayCount) : null,
       avgOfficeHours: officeDayCount > 0 ? roundToTenth(totalOfficeHours / officeDayCount) : null,
       avgRemoteHours: officeDayCount > 0 ? roundToTenth(totalRemoteHours / officeDayCount) : null,
