@@ -1,7 +1,6 @@
 'use server';
 import { getAccessContext } from '@/lib/access';
 import { query } from '@/lib/oracle';
-import { fetchOfficeAttendanceData } from '@/lib/bigquery';
 
 export interface SourceBreakdown {
   totalRecords: number;
@@ -84,9 +83,22 @@ export async function validateAttendanceData(
     WHERE START_DATE <= :endDate AND END_DATE >= :startDate
   `;
 
-  // Fetch all 4 sources in parallel
+  const syncedAttendanceSQL = `
+    SELECT LOWER(EMAIL) AS EMAIL, RECORD_DATE, DISPLAY_NAME, LOCATION
+    FROM TL_ATTENDANCE
+    WHERE RECORD_DATE BETWEEN :startDate AND :endDate
+    ORDER BY LOWER(EMAIL), RECORD_DATE, DECODE(LOCATION, 'Office', 1, 'Remote', 2, 3)
+  `;
+
+  // Fetch synced Oracle data only. Source-system comparisons belong in offline
+  // validation scripts/jobs, not in report-serving server actions.
   const [sourceRecords, oracleRows, bambooRows, ptoRows] = await Promise.all([
-    fetchOfficeAttendanceData(startDate, endDate),
+    query<{
+      EMAIL: string;
+      RECORD_DATE: Date;
+      DISPLAY_NAME: string | null;
+      LOCATION: string | null;
+    }>(syncedAttendanceSQL, { startDate, endDate }),
     query<{
       EMAIL: string; TOTAL_RECORDS: number; OFFICE_DAYS: number;
       REMOTE_DAYS: number; UNKNOWN_DAYS: number;
@@ -124,14 +136,14 @@ export async function validateAttendanceData(
     orUnknown += unknown;
   }
 
-  // --- ActivTrak: deduplicate and aggregate per employee (source has no dedup) ---
+  // --- Synced ActivTrak attendance: deduplicate and aggregate per employee ---
   const activtrakByEmail = new Map<string, { office: number; remote: number; unknown: number; total: number }>();
   const activtrakSeen = new Set<string>();
   let atOffice = 0, atRemote = 0, atUnknown = 0;
   for (const rec of sourceRecords) {
-    if (!rec.email) continue;
-    const email = rec.email.toLowerCase();
-    const d = rec.date instanceof Date ? rec.date : new Date(rec.date);
+    if (!rec.EMAIL) continue;
+    const email = rec.EMAIL.toLowerCase();
+    const d = rec.RECORD_DATE instanceof Date ? rec.RECORD_DATE : new Date(rec.RECORD_DATE);
     const key = `${email}|${d.toISOString().split('T')[0]}`;
     if (activtrakSeen.has(key)) continue;
     activtrakSeen.add(key);
@@ -139,11 +151,11 @@ export async function validateAttendanceData(
     if (!activtrakByEmail.has(email)) activtrakByEmail.set(email, { office: 0, remote: 0, unknown: 0, total: 0 });
     const entry = activtrakByEmail.get(email)!;
     entry.total++;
-    if (rec.location === 'Office') { entry.office++; atOffice++; }
-    else if (rec.location === 'Remote') { entry.remote++; atRemote++; }
+    if (rec.LOCATION === 'Office') { entry.office++; atOffice++; }
+    else if (rec.LOCATION === 'Remote') { entry.remote++; atRemote++; }
     else { entry.unknown++; atUnknown++; }
 
-    if (!nameMap.has(email) && rec.displayName) nameMap.set(email, rec.displayName);
+    if (!nameMap.has(email) && rec.DISPLAY_NAME) nameMap.set(email, rec.DISPLAY_NAME);
   }
 
   // --- Compare ---

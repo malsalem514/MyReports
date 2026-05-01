@@ -682,7 +682,7 @@ export async function getAttendanceReport(
         ENTRY_TYPE: string | null;
       }>(
         `SELECT EMPLOYEE_NO, ENTRY_DATE, WORK_CODE, WORK_DESCRIPTION, TIME_HOURS, ENTRY_TYPE
-         FROM TBS_ALL_TIME_ENTRIES_V@TBS_LINK
+         FROM TL_TBS_TIME_ENTRIES
          WHERE EMPLOYEE_NO IN (${tbsEmployeeNos.map((_, i) => `:tn${i}`).join(',')})
            AND ENTRY_DATE BETWEEN :sd AND :ed`,
         {
@@ -748,6 +748,7 @@ export async function getAttendanceReport(
         activeHours: 0,
         officeDurationSeconds: 0,
         officeHours: 0,
+        officeWindowHours: null,
         remoteHours: 0,
         firstActivityAt: null,
         lastActivityAt: null,
@@ -1036,6 +1037,10 @@ export async function getAttendanceReport(
   for (const days of dailyMap.values()) {
     for (const day of days) {
       day.officeHours = roundHours(day.officeDurationSeconds);
+      day.officeWindowHours = calculateElapsedOfficeWindowHours(
+        day.officeFirstActivityAt,
+        day.officeLastActivityAt,
+      );
       day.remoteHours = roundToTenth(Math.max(0, day.activeHours - day.officeHours));
     }
     days.sort((a, b) => a.date.localeCompare(b.date));
@@ -1572,7 +1577,7 @@ export async function getTbsComparisonReport(
       WORK_DESCRIPTION: string; TIME_HOURS: number; ENTRY_TYPE: string;
     }>(
       `SELECT EMPLOYEE_NO, ENTRY_DATE, WORK_CODE, WORK_DESCRIPTION, TIME_HOURS, ENTRY_TYPE
-       FROM TBS_ALL_TIME_ENTRIES_V@TBS_LINK
+       FROM TL_TBS_TIME_ENTRIES
        WHERE EMPLOYEE_NO IN (${tbsNos})
          AND ENTRY_DATE BETWEEN :sd AND :ed
          AND TO_CHAR(ENTRY_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')
@@ -1886,7 +1891,7 @@ export async function getWorkingHoursReport(
         DEFECT_CASE: string | null;
       }>(
         `SELECT EMPLOYEE_NO, ENTRY_DATE, WORK_CODE, WORK_DESCRIPTION, TIME_HOURS, ENTRY_TYPE, REMARK, DEFECT_CASE
-         FROM TBS_ALL_TIME_ENTRIES_V@TBS_LINK
+         FROM TL_TBS_TIME_ENTRIES
          WHERE EMPLOYEE_NO IN (${tbsNos.map((_, i) => `:tn${i}`).join(',')})
            AND ENTRY_DATE BETWEEN :sd AND :ed
          ORDER BY EMPLOYEE_NO, ENTRY_DATE`,
@@ -2291,4 +2296,31 @@ function formatOracleTimestamp(value: Date | string | null): string | null {
   const mm = String(value.getMinutes()).padStart(2, '0');
   const ss = String(value.getSeconds()).padStart(2, '0');
   return `${y}-${m}-${d} ${hh}:${mm}:${ss}`;
+}
+
+function parseOracleTimestamp(value: string | null): Date | null {
+  if (!value) return null;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second] = match;
+  return new Date(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+  );
+}
+
+function calculateElapsedOfficeWindowHours(
+  firstActivityAt: string | null,
+  lastActivityAt: string | null,
+): number | null {
+  const first = parseOracleTimestamp(firstActivityAt);
+  const last = parseOracleTimestamp(lastActivityAt);
+  if (!first || !last) return null;
+  const elapsedMs = last.getTime() - first.getTime();
+  if (elapsedMs < 0) return null;
+  return roundToTenth(elapsedMs / 3_600_000);
 }

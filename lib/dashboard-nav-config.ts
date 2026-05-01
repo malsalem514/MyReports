@@ -40,7 +40,7 @@ export const OFFICE_ATTENDANCE_VIEW_OPTIONS: Array<{
   params?: Record<string, string>;
 }> = [
   { id: 'employees', label: 'Employees', description: 'Individual attendance and weekly office presence.' },
-  { id: 'office-day-hours', label: 'Office vs Home Hours', description: 'Office and home/other tracked time on days counted as office days.', params: { view: 'office-day-hours' } },
+  { id: 'office-day-hours', label: 'Office vs Home Hours', description: 'Office windows, office activity, and home/other tracked time on days counted as office days.', params: { view: 'office-day-hours' } },
   { id: 'departments', label: 'Departments', description: 'Department rollups across the selected range.', params: { view: 'departments' } },
   { id: 'managers', label: 'Managers', description: 'Manager rollups across the selected range.', params: { view: 'managers' } },
   { id: 'approved-remote-work', label: 'Remote & Abroad Requests', description: 'Temporary remote-work and work-abroad/province request records with visible approval status.', params: { view: 'approved-remote-work' } },

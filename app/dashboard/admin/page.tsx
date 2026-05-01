@@ -1,5 +1,5 @@
 import { getAccessContext, getRoleDiagnostics } from '@/lib/access';
-import { fetchActiveEmployees } from '@/lib/bamboohr';
+import { getEmployees } from '@/lib/dashboard-data';
 import { DASHBOARD_TAB_LABELS, DASHBOARD_TAB_ROUTES } from '@/lib/dashboard-nav-config';
 import { normalizeEmail } from '@/lib/email';
 import { initializeSchema } from '@/lib/oracle';
@@ -25,7 +25,7 @@ export default async function AdminPage() {
   try {
     const [defaultsResult, employeesResult] = await Promise.allSettled([
       initializeSchema().then(() => getRoleDefaults()),
-      fetchActiveEmployees(),
+      getEmployees({ activeOnly: true }),
     ]);
 
     if (defaultsResult.status === 'fulfilled') {
@@ -36,15 +36,15 @@ export default async function AdminPage() {
 
     if (employeesResult.status === 'fulfilled') {
       directorUsers = employeesResult.value
-        .filter((employee) => employee.workEmail)
+        .filter((employee) => employee.email)
         .map((employee) => ({
           employee,
           diagnostics: getRoleDiagnostics(employee),
         }))
         .filter(({ diagnostics }) => diagnostics.isDirector)
         .map(({ employee, diagnostics }) => ({
-          name: employee.displayName || `${employee.firstName || ''} ${employee.lastName || ''}`.trim() || employee.workEmail || '',
-          email: employee.workEmail ? normalizeEmail(employee.workEmail) : '',
+          name: employee.displayName || `${employee.firstName || ''} ${employee.lastName || ''}`.trim() || employee.email || '',
+          email: employee.email ? normalizeEmail(employee.email) : '',
           department: employee.department || '',
           jobTitle: employee.jobTitle || '',
           reason: diagnostics.reason || 'Matched director rule',

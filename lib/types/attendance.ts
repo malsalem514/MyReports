@@ -6,6 +6,7 @@ export interface DayDetail {
   tbsReportedHours?: number;
   activeHours?: number;
   officeHours?: number;
+  officeWindowHours?: number | null;
   remoteHours?: number;
   firstActivityAt?: string | null;
   lastActivityAt?: string | null;

@@ -46,6 +46,7 @@ export interface AttendanceDayAccumulator {
   activeHours: number;
   officeDurationSeconds: number;
   officeHours: number;
+  officeWindowHours: number | null;
   remoteHours: number;
   firstActivityAt: string | null;
   lastActivityAt: string | null;
@@ -181,6 +182,7 @@ export function toWeekDayDetails(days: ReadonlyArray<AttendanceDayAccumulator>):
     tbsReportedHours: day.tbsReportedHours,
     activeHours: day.activeHours,
     officeHours: day.officeHours,
+    officeWindowHours: day.officeWindowHours,
     remoteHours: day.remoteHours,
     firstActivityAt: day.firstActivityAt,
     lastActivityAt: day.lastActivityAt,

@@ -2,11 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@/auth';
 import { isAdminEmail } from '@/lib/admin';
 import { query as oracleQuery } from '@/lib/oracle';
-import { getBigQueryClient } from '@/lib/bigquery';
 
 interface CheckResult {
   ok: boolean;
   error?: string;
+  metrics?: Record<string, unknown>;
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
@@ -32,44 +32,47 @@ async function checkOracle(): Promise<CheckResult> {
   }
 }
 
-async function checkBigQuery(): Promise<CheckResult> {
+async function checkOracleDataFlow(): Promise<CheckResult> {
   try {
-    const client = getBigQueryClient();
-    const [rows] = await client.query({ query: 'SELECT 1 as result', location: 'US' });
-    const ok = (rows[0] as { result?: number } | undefined)?.result === 1;
-    return { ok };
-  } catch (error) {
-    return { ok: false, error: normalizeError(error) };
-  }
-}
-
-async function checkBambooHR(): Promise<CheckResult> {
-  const apiKey = process.env.BAMBOOHR_API_KEY || '';
-  const subdomain = process.env.BAMBOOHR_SUBDOMAIN || '';
-
-  if (!apiKey || !subdomain || apiKey.toLowerCase().includes('dummy')) {
-    return { ok: false, error: 'BAMBOOHR_API_KEY or BAMBOOHR_SUBDOMAIN is missing/placeholder' };
-  }
-
-  try {
-    const authHeader = Buffer.from(`${apiKey}:x`).toString('base64');
-    const response = await fetch(
-      `https://api.bamboohr.com/api/gateway.php/${subdomain}/v1/meta/users`,
-      {
-        headers: {
-          Authorization: `Basic ${authHeader}`,
-          Accept: 'application/json',
-        },
-      },
+    const rows = await oracleQuery<{
+      ACTIVE_EMPLOYEES: number;
+      ATTENDANCE_ROWS: number;
+      ATTENDANCE_MAX_DATE: Date | null;
+      PRODUCTIVITY_ROWS: number;
+      PRODUCTIVITY_MAX_DATE: Date | null;
+      OFFICE_IP_ROWS: number;
+      OFFICE_IP_MAX_DATE: Date | null;
+      TBS_TIME_ENTRIES: number;
+      TBS_MAX_DATE: Date | null;
+      REMOTE_WORK_REQUESTS: number;
+      WORK_ABROAD_REQUESTS: number;
+      TIME_OFF_ROWS: number;
+    }>(
+      `SELECT
+         (SELECT COUNT(*) FROM TL_EMPLOYEES WHERE EMAIL IS NOT NULL AND (STATUS IS NULL OR UPPER(STATUS) != 'INACTIVE')) AS ACTIVE_EMPLOYEES,
+         (SELECT COUNT(*) FROM TL_ATTENDANCE) AS ATTENDANCE_ROWS,
+         (SELECT MAX(RECORD_DATE) FROM TL_ATTENDANCE) AS ATTENDANCE_MAX_DATE,
+         (SELECT COUNT(*) FROM TL_PRODUCTIVITY) AS PRODUCTIVITY_ROWS,
+         (SELECT MAX(RECORD_DATE) FROM TL_PRODUCTIVITY) AS PRODUCTIVITY_MAX_DATE,
+         (SELECT COUNT(*) FROM TL_OFFICE_IP_ACTIVITY) AS OFFICE_IP_ROWS,
+         (SELECT MAX(RECORD_DATE) FROM TL_OFFICE_IP_ACTIVITY) AS OFFICE_IP_MAX_DATE,
+         (SELECT COUNT(*) FROM TL_TBS_TIME_ENTRIES) AS TBS_TIME_ENTRIES,
+         (SELECT MAX(ENTRY_DATE) FROM TL_TBS_TIME_ENTRIES) AS TBS_MAX_DATE,
+         (SELECT COUNT(*) FROM TL_REMOTE_WORK_REQUESTS) AS REMOTE_WORK_REQUESTS,
+         (SELECT COUNT(*) FROM TL_WORK_ABROAD_REQUESTS) AS WORK_ABROAD_REQUESTS,
+         (SELECT COUNT(*) FROM TL_TIME_OFF) AS TIME_OFF_ROWS
+       FROM DUAL`,
     );
 
-    if (!response.ok) {
-      return {
-        ok: false,
-        error: `BambooHR HTTP ${response.status} ${response.statusText}`,
-      };
-    }
-    return { ok: true };
+    const metrics = rows[0];
+    const ok = Boolean(
+      metrics &&
+      metrics.ACTIVE_EMPLOYEES > 0 &&
+      metrics.ATTENDANCE_ROWS > 0 &&
+      metrics.PRODUCTIVITY_ROWS > 0,
+    );
+
+    return { ok, metrics };
   } catch (error) {
     return { ok: false, error: normalizeError(error) };
   }
@@ -96,13 +99,12 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
-  const [oracleResult, bigQueryResult, bambooResult] = await Promise.all([
+  const [oracleResult, dataFlowResult] = await Promise.all([
     withTimeout(checkOracle(), 2500, { ok: false, error: 'Oracle check timeout' }),
-    withTimeout(checkBigQuery(), 3500, { ok: false, error: 'BigQuery check timeout' }),
-    withTimeout(checkBambooHR(), 3500, { ok: false, error: 'BambooHR check timeout' }),
+    withTimeout(checkOracleDataFlow(), 3500, { ok: false, error: 'Oracle data-flow check timeout' }),
   ]);
 
-  const ok = oracleResult.ok && bigQueryResult.ok && bambooResult.ok;
+  const ok = oracleResult.ok && dataFlowResult.ok;
 
   return NextResponse.json(
     {
@@ -111,13 +113,11 @@ export async function GET(request: NextRequest) {
       timestamp: new Date().toISOString(),
       checks: {
         oracle: oracleResult.ok,
-        bigQuery: bigQueryResult.ok,
-        bambooHR: bambooResult.ok,
+        oracleDataFlow: dataFlowResult.ok,
       },
       details: {
         oracle: oracleResult,
-        bigQuery: bigQueryResult,
-        bambooHR: bambooResult,
+        oracleDataFlow: dataFlowResult,
       },
     },
     { status: ok ? 200 : 503 },

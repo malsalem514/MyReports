@@ -3,11 +3,7 @@ import { auth } from '@/auth';
 import { getDevBypassEmail } from './dev-bypass';
 import { isAdminEmail, isRootAdminEmail } from './admin';
 import { normalizeEmail } from './email';
-import {
-  fetchEmployeeDirectory,
-  fetchReportingStructure,
-  type BambooHREmployee,
-} from './bamboohr';
+import { query } from './oracle';
 
 // ============================================================================
 // Types
@@ -34,7 +30,22 @@ export interface RoleDiagnostics {
   reason: string | null;
 }
 
-export function getRoleDiagnostics(employee: BambooHREmployee): RoleDiagnostics {
+interface AccessEmployeeRow {
+  ID: string;
+  EMAIL: string;
+  DISPLAY_NAME: string | null;
+  FIRST_NAME: string | null;
+  LAST_NAME: string | null;
+  JOB_TITLE: string | null;
+  DEPARTMENT: string | null;
+  SUPERVISOR_ID: string | null;
+  SUPERVISOR_EMAIL: string | null;
+}
+
+export function getRoleDiagnostics(employee: {
+  jobTitle?: string | null;
+  department?: string | null;
+}): RoleDiagnostics {
   const jobTitle = (employee.jobTitle || '').toLowerCase().trim();
   const department = (employee.department || '').toLowerCase().trim();
 
@@ -47,6 +58,89 @@ export function getRoleDiagnostics(employee: BambooHREmployee): RoleDiagnostics 
   }
 
   return { isDirector: false, reason: null };
+}
+
+async function fetchActiveAccessEmployees(): Promise<AccessEmployeeRow[]> {
+  return query<AccessEmployeeRow>(
+    `SELECT
+       ID,
+       LOWER(EMAIL) AS EMAIL,
+       DISPLAY_NAME,
+       FIRST_NAME,
+       LAST_NAME,
+       JOB_TITLE,
+       DEPARTMENT,
+       SUPERVISOR_ID,
+       LOWER(SUPERVISOR_EMAIL) AS SUPERVISOR_EMAIL
+     FROM TL_EMPLOYEES
+     WHERE EMAIL IS NOT NULL
+       AND (STATUS IS NULL OR UPPER(STATUS) != 'INACTIVE')`,
+  );
+}
+
+function toRoleEmployee(row: AccessEmployeeRow) {
+  return {
+    jobTitle: row.JOB_TITLE,
+    department: row.DEPARTMENT,
+  };
+}
+
+function getEmployeeName(row: AccessEmployeeRow, fallbackEmail: string): string {
+  return (
+    row.DISPLAY_NAME ||
+    `${row.FIRST_NAME || ''} ${row.LAST_NAME || ''}`.trim() ||
+    fallbackEmail
+  );
+}
+
+function collectReportRows(
+  allEmployees: AccessEmployeeRow[],
+  currentUser: AccessEmployeeRow,
+): { directReports: AccessEmployeeRow[]; allReports: AccessEmployeeRow[] } {
+  const bySupervisor = new Map<string, AccessEmployeeRow[]>();
+  const addSupervisorKey = (key: string | null | undefined, employee: AccessEmployeeRow) => {
+    const normalized = key ? normalizeEmail(key) : '';
+    if (!normalized) return;
+    if (!bySupervisor.has(normalized)) bySupervisor.set(normalized, []);
+    bySupervisor.get(normalized)!.push(employee);
+  };
+
+  for (const employee of allEmployees) {
+    addSupervisorKey(employee.SUPERVISOR_ID, employee);
+    addSupervisorKey(employee.SUPERVISOR_EMAIL, employee);
+  }
+
+  const managerKeys = [
+    currentUser.ID,
+    currentUser.EMAIL,
+  ].map((value) => normalizeEmail(value)).filter(Boolean);
+
+  const directByEmail = new Map<string, AccessEmployeeRow>();
+  for (const key of managerKeys) {
+    for (const report of bySupervisor.get(key) || []) {
+      directByEmail.set(normalizeEmail(report.EMAIL), report);
+    }
+  }
+
+  const allByEmail = new Map<string, AccessEmployeeRow>();
+  const queue = [...directByEmail.values()];
+  while (queue.length > 0) {
+    const report = queue.shift()!;
+    const email = normalizeEmail(report.EMAIL);
+    if (allByEmail.has(email)) continue;
+    allByEmail.set(email, report);
+
+    for (const key of [report.ID, report.EMAIL].map((value) => normalizeEmail(value)).filter(Boolean)) {
+      for (const child of bySupervisor.get(key) || []) {
+        if (!allByEmail.has(normalizeEmail(child.EMAIL))) queue.push(child);
+      }
+    }
+  }
+
+  return {
+    directReports: [...directByEmail.values()],
+    allReports: [...allByEmail.values()],
+  };
 }
 
 // ============================================================================
@@ -89,10 +183,10 @@ export async function getAccessContextByEmail(
   // Root and HR-admin access must not depend on external directory availability.
   if (hasAdminAccess) {
     try {
-      const allEmployees = await fetchEmployeeDirectory();
+      const allEmployees = await fetchActiveAccessEmployees();
       const allEmails = allEmployees
-        .filter((emp) => emp.workEmail)
-        .map((emp) => normalizeEmail(emp.workEmail!));
+        .filter((emp) => emp.EMAIL)
+        .map((emp) => normalizeEmail(emp.EMAIL));
       return {
         userEmail: normalizedEmail,
         employeeId: null,
@@ -125,10 +219,10 @@ export async function getAccessContextByEmail(
   }
 
   try {
-    const allEmployees = await fetchEmployeeDirectory();
+    const allEmployees = await fetchActiveAccessEmployees();
 
     const currentUser = allEmployees.find(
-      (emp) => emp.workEmail && normalizeEmail(emp.workEmail) === normalizedEmail,
+      (emp) => emp.EMAIL && normalizeEmail(emp.EMAIL) === normalizedEmail,
     );
 
     if (!currentUser) {
@@ -147,43 +241,31 @@ export async function getAccessContextByEmail(
       };
     }
 
-    const reports = await fetchReportingStructure(currentUser.id);
-    const diagnostics = getRoleDiagnostics(currentUser);
+    const { directReports, allReports } = collectReportRows(allEmployees, currentUser);
+    const diagnostics = getRoleDiagnostics(toRoleEmployee(currentUser));
 
     const allowedEmails = new Set<string>();
     allowedEmails.add(normalizedEmail);
 
-    let directReportCount = 0;
-    for (const emp of allEmployees) {
-      if (emp.supervisorId === currentUser.id || emp.supervisorEId === currentUser.id) {
-        directReportCount++;
-      }
+    for (const report of allReports) {
+      if (report.EMAIL) allowedEmails.add(normalizeEmail(report.EMAIL));
     }
-
-    for (const report of reports) {
-      if (report.workEmail) allowedEmails.add(normalizeEmail(report.workEmail));
-    }
-
-    const userName =
-      currentUser.displayName ||
-      `${currentUser.firstName || ''} ${currentUser.lastName || ''}`.trim() ||
-      normalizedEmail;
 
     return {
       userEmail: normalizedEmail,
-      employeeId: currentUser.id,
-      employeeName: userName,
-      department: currentUser.department ?? null,
+      employeeId: currentUser.ID,
+      employeeName: getEmployeeName(currentUser, normalizedEmail),
+      department: currentUser.DEPARTMENT ?? null,
       isRootAdmin: false,
       isHRAdmin: false,
       isDirector: diagnostics.isDirector,
-      isManager: reports.length > 0,
+      isManager: allReports.length > 0,
       allowedEmails: Array.from(allowedEmails),
-      directReportCount,
-      totalReportCount: reports.length,
+      directReportCount: directReports.length,
+      totalReportCount: allReports.length,
     };
   } catch (error) {
-    console.error('Error fetching access context from BambooHR:', error);
+    console.error('Error fetching access context from Oracle:', error);
     return {
       userEmail: normalizedEmail,
       employeeId: null,

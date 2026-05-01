@@ -14,6 +14,7 @@ export interface SyncSummary {
   remoteWorkRequestsSynced: number;
   workAbroadRequestsSynced: number;
   tbsMapped: number;
+  tbsTimeEntriesSynced: number;
   errors: string[];
 }
 
@@ -52,7 +53,38 @@ function normalizeOracleText(value: string | null | undefined): string | null {
  * 1. BambooHR Employee #, but only when it exists in TBS_EMPLOYEES
  * 2. First+last name match, preferring the employee with the most recent TBS entry
  */
+async function syncTbsEmployees(): Promise<number> {
+  const result = await execute(`
+    MERGE INTO TL_TBS_EMPLOYEES t
+    USING (
+      SELECT
+        e.EMPLOYEE_NO,
+        e.EMPLOYEE_FIRST_NAME,
+        e.EMPLOYEE_LAST_NAME,
+        (SELECT MAX(v.ENTRY_DATE)
+         FROM TBS_ALL_TIME_ENTRIES_V@TBS_LINK v
+         WHERE v.EMPLOYEE_NO = e.EMPLOYEE_NO) AS LAST_ENTRY
+      FROM TBS_EMPLOYEES@TBS_LINK e
+    ) s
+    ON (t.EMPLOYEE_NO = s.EMPLOYEE_NO)
+    WHEN MATCHED THEN UPDATE SET
+      t.EMPLOYEE_FIRST_NAME = s.EMPLOYEE_FIRST_NAME,
+      t.EMPLOYEE_LAST_NAME = s.EMPLOYEE_LAST_NAME,
+      t.LAST_ENTRY = s.LAST_ENTRY,
+      t.UPDATED_AT = CURRENT_TIMESTAMP
+    WHEN NOT MATCHED THEN INSERT (
+      EMPLOYEE_NO, EMPLOYEE_FIRST_NAME, EMPLOYEE_LAST_NAME, LAST_ENTRY
+    ) VALUES (
+      s.EMPLOYEE_NO, s.EMPLOYEE_FIRST_NAME, s.EMPLOYEE_LAST_NAME, s.LAST_ENTRY
+    )
+  `);
+
+  return result.rowsAffected || 0;
+}
+
 export async function syncTbsEmployeeMap(): Promise<number> {
+  await syncTbsEmployees();
+
   const result = await execute(`
     MERGE INTO TL_TBS_EMPLOYEE_MAP m
     USING (
@@ -62,12 +94,7 @@ export async function syncTbsEmployeeMap(): Promise<number> {
                  PARTITION BY UPPER(TRIM(EMPLOYEE_FIRST_NAME)), UPPER(TRIM(EMPLOYEE_LAST_NAME))
                  ORDER BY NVL(LAST_ENTRY, DATE '1900-01-01') DESC
                ) AS RN
-        FROM (
-          SELECT e.EMPLOYEE_NO, e.EMPLOYEE_FIRST_NAME, e.EMPLOYEE_LAST_NAME,
-                 (SELECT MAX(v.ENTRY_DATE) FROM TBS_ALL_TIME_ENTRIES_V@TBS_LINK v
-                  WHERE v.EMPLOYEE_NO = e.EMPLOYEE_NO) AS LAST_ENTRY
-          FROM TBS_EMPLOYEES@TBS_LINK e
-        )
+        FROM TL_TBS_EMPLOYEES
       ),
       source_rows AS (
         SELECT
@@ -76,7 +103,7 @@ export async function syncTbsEmployeeMap(): Promise<number> {
           'auto-bamboo' AS match_method,
           1 AS priority
         FROM TL_EMPLOYEES b
-        JOIN TBS_EMPLOYEES@TBS_LINK t
+        JOIN TL_TBS_EMPLOYEES t
           ON t.EMPLOYEE_NO = b.EMPLOYEE_NUMBER
         WHERE b.EMAIL IS NOT NULL
           AND b.EMPLOYEE_NUMBER IS NOT NULL
@@ -153,6 +180,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
   let remoteWorkRequestsSynced = 0;
   let workAbroadRequestsSynced = 0;
   let tbsMapped = 0;
+  let tbsTimeEntriesSynced = 0;
 
   try {
     const employees = await fetchEmployeeDirectory();
@@ -812,6 +840,70 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     errors.push(`TBS mapping sync failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  try {
+    const tbsMapRows = await query<{ TBS_EMPLOYEE_NO: number }>(
+      `SELECT DISTINCT TBS_EMPLOYEE_NO
+       FROM TL_TBS_EMPLOYEE_MAP
+       WHERE TBS_EMPLOYEE_NO IS NOT NULL`,
+    );
+    const employeeNos = tbsMapRows
+      .map((row) => row.TBS_EMPLOYEE_NO)
+      .filter((employeeNo): employeeNo is number => typeof employeeNo === 'number');
+
+    await execute(
+      `DELETE FROM TL_TBS_TIME_ENTRIES
+       WHERE ENTRY_DATE BETWEEN :sd AND :ed`,
+      { sd: startDate, ed: now },
+    );
+
+    if (employeeNos.length > 0) {
+      const tbsSourceRows = await query<{
+        EMPLOYEE_NO: number;
+        ENTRY_DATE: Date;
+        WORK_CODE: string | null;
+        WORK_DESCRIPTION: string | null;
+        TIME_HOURS: number | null;
+        ENTRY_TYPE: string | null;
+        REMARK: string | null;
+        DEFECT_CASE: string | null;
+      }>(
+        `SELECT EMPLOYEE_NO, ENTRY_DATE, WORK_CODE, WORK_DESCRIPTION, TIME_HOURS, ENTRY_TYPE, REMARK, DEFECT_CASE
+         FROM TBS_ALL_TIME_ENTRIES_V@TBS_LINK
+         WHERE EMPLOYEE_NO IN (${employeeNos.map((_, i) => `:tn${i}`).join(',')})
+           AND ENTRY_DATE BETWEEN :sd AND :ed`,
+        {
+          sd: startDate,
+          ed: now,
+          ...Object.fromEntries(employeeNos.map((employeeNo, i) => [`tn${i}`, employeeNo])),
+        },
+      );
+
+      if (tbsSourceRows.length > 0) {
+        await executeMany(
+          `INSERT INTO TL_TBS_TIME_ENTRIES (
+             EMPLOYEE_NO, ENTRY_DATE, WORK_CODE, WORK_DESCRIPTION, TIME_HOURS, ENTRY_TYPE, REMARK, DEFECT_CASE
+           ) VALUES (
+             :EMPLOYEE_NO, :ENTRY_DATE, :WORK_CODE, :WORK_DESCRIPTION, :TIME_HOURS, :ENTRY_TYPE, :REMARK, :DEFECT_CASE
+           )`,
+          tbsSourceRows.map((row) => ({
+            EMPLOYEE_NO: row.EMPLOYEE_NO,
+            ENTRY_DATE: row.ENTRY_DATE,
+            WORK_CODE: normalizeOracleText(row.WORK_CODE),
+            WORK_DESCRIPTION: normalizeOracleText(row.WORK_DESCRIPTION),
+            TIME_HOURS: row.TIME_HOURS || 0,
+            ENTRY_TYPE: normalizeOracleText(row.ENTRY_TYPE),
+            REMARK: normalizeOracleText(row.REMARK),
+            DEFECT_CASE: normalizeOracleText(row.DEFECT_CASE),
+          })),
+        );
+      }
+
+      tbsTimeEntriesSynced = tbsSourceRows.length;
+    }
+  } catch (error) {
+    errors.push(`TBS time entries sync failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   const completedAt = new Date();
   const recordsSynced =
     employeesSynced +
@@ -820,7 +912,8 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     timeOffSynced +
     remoteWorkRequestsSynced +
     workAbroadRequestsSynced +
-    tbsMapped;
+    tbsMapped +
+    tbsTimeEntriesSynced;
 
   try {
     await execute(
@@ -856,6 +949,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     remoteWorkRequestsSynced,
     workAbroadRequestsSynced,
     tbsMapped,
+    tbsTimeEntriesSynced,
     errors,
   };
 

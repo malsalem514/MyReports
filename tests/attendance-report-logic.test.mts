@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as attendanceReportLogic from '../lib/attendance-report-logic.ts';
 import type {
+  AttendanceDayAccumulator,
   AttendanceApprovalIndex,
   AttendanceEmployeeMetaRow,
 } from '../lib/attendance-report-logic.ts';
@@ -16,6 +17,7 @@ const {
   calculateAttendanceWeekCell,
   createAttendanceEmployeeAccumulator,
   ensureAttendanceEmployeeAccumulator,
+  toWeekDayDetails,
 } = getModuleExports(attendanceReportLogic);
 
 function createApprovalIndex(overrides: Partial<AttendanceApprovalIndex> = {}): AttendanceApprovalIndex {
@@ -126,6 +128,37 @@ test('ensureAttendanceEmployeeAccumulator reuses existing accumulators', () => {
   assert.equal(first, second);
   assert.equal(second.name, 'Alice Example');
   assert.ok(second.weeks['2026-03-16']);
+});
+
+test('toWeekDayDetails includes elapsed office window separately from activity hours', () => {
+  const days: AttendanceDayAccumulator[] = [
+    {
+      date: '2026-03-30',
+      dayLabel: 'Mon',
+      location: 'Office',
+      ptoType: null,
+      tbsReportedHours: 8,
+      activeHours: 8,
+      officeDurationSeconds: 9_000,
+      officeHours: 2.5,
+      officeWindowHours: 7.3,
+      remoteHours: 5.5,
+      firstActivityAt: '2026-03-30 08:30:00',
+      lastActivityAt: '2026-03-30 17:10:00',
+      officeFirstActivityAt: '2026-03-30 09:00:00',
+      officeLastActivityAt: '2026-03-30 16:18:00',
+      officeIpMatches: new Set(['203.0.113.7', '203.0.113.2']),
+    },
+  ];
+
+  const [detail] = toWeekDayDetails(days);
+
+  assert.equal(detail?.officeWindowHours, 7.3);
+  assert.equal(detail?.officeHours, 2.5);
+  assert.equal(detail?.remoteHours, 5.5);
+  assert.equal(detail?.officeFirstActivityAt, '2026-03-30 09:00:00');
+  assert.equal(detail?.officeLastActivityAt, '2026-03-30 16:18:00');
+  assert.equal(detail?.officeIpMatches, '203.0.113.2, 203.0.113.7');
 });
 
 test('calculateAttendanceWeekCell marks fully approved coverage as compliant with zero target', () => {
