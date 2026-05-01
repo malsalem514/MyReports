@@ -12,9 +12,15 @@ export const TAB_KEYS = [
   'timesheet-compare',
   'working-hours',
   'bamboo-not-in-activtrak',
+  'activtrak-identities',
 ] as const;
 
 export type TabKey = (typeof TAB_KEYS)[number];
+
+export const ADMIN_ONLY_TAB_KEYS = [
+  'bamboo-not-in-activtrak',
+  'activtrak-identities',
+] as const satisfies readonly TabKey[];
 
 export const TAB_ROLES = [
   'root-admin',
@@ -71,9 +77,36 @@ export function isTabRole(value: string): value is TabRole {
   return TAB_ROLES.includes(value as TabRole);
 }
 
+export function isAdminOnlyTabKey(value: string): value is (typeof ADMIN_ONLY_TAB_KEYS)[number] {
+  return ADMIN_ONLY_TAB_KEYS.includes(value as (typeof ADMIN_ONLY_TAB_KEYS)[number]);
+}
+
+export function isAdminTabRole(role: string): role is 'root-admin' | 'hr-admin' {
+  return role === 'root-admin' || role === 'hr-admin';
+}
+
 function getFallbackVisibilityMap(role: string): Map<TabKey, boolean> {
-  const visibleTabs = new Set(FALLBACK_ROLES[role] || TAB_KEYS);
+  const visibleTabs = new Set(getFallbackTabsForRole(role));
   return new Map(TAB_KEYS.map((tabKey) => [tabKey, visibleTabs.has(tabKey)]));
+}
+
+function getFallbackTabsForRole(role: string): TabKey[] {
+  const visibleTabs = [...(FALLBACK_ROLES[role] || TAB_KEYS)];
+  if (isAdminTabRole(role)) {
+    return visibleTabs;
+  }
+  return visibleTabs.filter((tabKey) => !isAdminOnlyTabKey(tabKey));
+}
+
+export function getFallbackRoleDefaults(): TabRoleRow[] {
+  return TAB_ROLES.flatMap((role) => {
+    const visibility = getFallbackVisibilityMap(role);
+    return TAB_KEYS.map((tabKey) => ({
+      ROLE_NAME: role,
+      TAB_KEY: tabKey,
+      VISIBLE: visibility.get(tabKey) ? 1 : 0,
+    }));
+  });
 }
 
 /** Resolve visible tab keys for a user: role defaults + email overrides */
@@ -104,16 +137,16 @@ export async function getVisibleTabs(
   } catch (err: unknown) {
     // ORA-00942: table or view does not exist — fall back to hardcoded defaults
     if (err && typeof err === 'object' && 'errorNum' in err && (err as { errorNum: number }).errorNum === 942) {
-      return FALLBACK_ROLES[role] || [...TAB_KEYS];
+      return getFallbackTabsForRole(role);
     }
     // Any datasource outage should not block the UI shell.
     console.warn('Tab visibility query failed, using fallback role defaults.', err);
-    return FALLBACK_ROLES[role] || [...TAB_KEYS];
+    return getFallbackTabsForRole(role);
   }
 
   // If no role rows exist yet (tables exist but empty), use fallback
   if (roleDefaults.length === 0 && overrides.length === 0) {
-    return FALLBACK_ROLES[role] || [...TAB_KEYS];
+    return getFallbackTabsForRole(role);
   }
 
   // Build visibility map: start with hardcoded fallbacks so newly-added tabs
@@ -129,6 +162,12 @@ export async function getVisibleTabs(
   for (const row of overrides) {
     if (TAB_KEYS.includes(row.TAB_KEY as TabKey)) {
       visibility.set(row.TAB_KEY as TabKey, row.VISIBLE === 1);
+    }
+  }
+
+  if (!isAdminTabRole(role)) {
+    for (const tabKey of ADMIN_ONLY_TAB_KEYS) {
+      visibility.set(tabKey, false);
     }
   }
 
@@ -203,6 +242,9 @@ export async function setRoleTabVisibility(
   }
   if (role === 'root-admin' && !visible) {
     throw new Error('Root admin visibility is fixed and cannot be disabled.');
+  }
+  if (visible && isAdminOnlyTabKey(tabKey) && !isAdminTabRole(role)) {
+    throw new Error(`${tabKey} is an admin-only report and cannot be enabled for ${role}.`);
   }
 
   await execute(

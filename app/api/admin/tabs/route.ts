@@ -12,6 +12,8 @@ import {
   TAB_KEYS,
   isTabKey,
   isTabRole,
+  isAdminOnlyTabKey,
+  isAdminTabRole,
 } from '@/lib/tab-config';
 import { initializeSchema } from '@/lib/oracle';
 import { getAccessContextByEmail } from '@/lib/access';
@@ -133,6 +135,15 @@ export async function POST(request: NextRequest) {
         if (!email || visible === undefined) {
           return NextResponse.json({ error: 'Missing email or visible' }, { status: 400 });
         }
+        if (visible && isAdminOnlyTabKey(tabKey)) {
+          const targetAccess = await getAccessContextByEmail(email);
+          if (!isAdminTabRole(resolveRole(targetAccess))) {
+            return NextResponse.json(
+              { error: `${tabKey} is an admin-only report and cannot be shown for non-admin employees.` },
+              { status: 400 },
+            );
+          }
+        }
         await setOverride(email, tabKey, visible);
         break;
       case 'remove-override':
@@ -152,6 +163,7 @@ export async function POST(request: NextRequest) {
       && (
         message.startsWith('Unsupported ')
         || message.includes('cannot be disabled')
+        || message.includes('admin-only report')
       );
     return NextResponse.json(
       { error: message },

@@ -30,7 +30,6 @@ export default async function DashboardLayout({ children }: { children: ReactNod
     const isAllowed =
       allowedPaths.has(pathname) ||
       pathname === '/dashboard/search' ||
-      pathname === '/dashboard/activtrak-identities' ||
       pathname.startsWith('/dashboard/employee/') ||
       pathname === '/dashboard/admin';
     if (!isAllowed && pathname !== '/dashboard') {

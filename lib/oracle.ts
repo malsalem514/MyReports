@@ -733,7 +733,13 @@ export async function initializeSchema(): Promise<void> {
     );
 
     // Seed role defaults (MERGE = idempotent)
-    const allTabs = ['office-attendance', 'timesheet-compare', 'working-hours', 'bamboo-not-in-activtrak'];
+    const allTabs = [
+      'office-attendance',
+      'timesheet-compare',
+      'working-hours',
+      'bamboo-not-in-activtrak',
+      'activtrak-identities',
+    ];
     const roleDefaults = [
       { roleName: 'root-admin', visibleTabs: allTabs },
       { roleName: 'hr-admin', visibleTabs: allTabs },
@@ -759,6 +765,12 @@ export async function initializeSchema(): Promise<void> {
          SET VISIBLE = 1
        WHERE ROLE_NAME = 'root-admin'
          AND TAB_KEY IN (${allTabs.map((tab) => `'${tab}'`).join(', ')})
+    `);
+    await conn.execute(`
+      UPDATE TL_TAB_ROLES
+         SET VISIBLE = 0
+       WHERE ROLE_NAME NOT IN ('root-admin', 'hr-admin')
+         AND TAB_KEY IN ('bamboo-not-in-activtrak', 'activtrak-identities')
     `);
 
     const roleList = `'root-admin', 'hr-admin', 'director', 'manager', 'employee'`;

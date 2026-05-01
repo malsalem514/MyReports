@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 interface AdminClientProps {
   roles: string[];
   tabs: string[];
+  tabMetadata: Record<string, TabMetadata>;
   roleMap: Record<string, Record<string, boolean>>;
   directorUsers: Array<{
     name: string;
@@ -14,6 +15,12 @@ interface AdminClientProps {
     jobTitle: string;
     reason: string;
   }>;
+}
+
+interface TabMetadata {
+  label: string;
+  path: string;
+  adminOnly: boolean;
 }
 
 interface EmployeeResult {
@@ -38,9 +45,18 @@ function formatRoleLabel(role: string): string {
   return role.charAt(0).toUpperCase() + role.slice(1);
 }
 
+function isAdminRole(role: string): boolean {
+  return role === 'root-admin' || role === 'hr-admin';
+}
+
+function formatTabLabel(tab: string, metadata?: TabMetadata): string {
+  return metadata?.label || tab;
+}
+
 export function AdminClient({
   roles,
   tabs,
+  tabMetadata,
   roleMap: initialRoleMap,
   directorUsers,
 }: AdminClientProps) {
@@ -95,7 +111,13 @@ export function AdminClient({
 
   const toggleRole = async (role: string, tab: string) => {
     if (role === 'root-admin') return;
-    const newVal = !roleMap[role][tab];
+    const metadata = tabMetadata[tab];
+    const newVal = !(roleMap[role]?.[tab] ?? false);
+    if (newVal && metadata?.adminOnly && !isAdminRole(role)) {
+      setSaveMessage(null);
+      setSaveError(`${formatTabLabel(tab, metadata)} is admin-only and can only be shown to Root Admin or HR Admin.`);
+      return;
+    }
     const previousRow = roleMap[role];
     setRoleMap((prev) => ({
       ...prev,
@@ -162,6 +184,7 @@ export function AdminClient({
 
   const getEffectiveVisibility = (tab: string): boolean => {
     if (!selectedEmployee) return false;
+    if (tabMetadata[tab]?.adminOnly && !isAdminRole(selectedEmployee.role)) return false;
     const state = getOverrideState(tab);
     if (state === 'show') return true;
     if (state === 'hide') return false;
@@ -170,6 +193,12 @@ export function AdminClient({
 
   const setOverrideState = async (tab: string, state: OverrideState) => {
     if (!selectedEmployee) return;
+    const metadata = tabMetadata[tab];
+    if (state === 'show' && metadata?.adminOnly && !isAdminRole(selectedEmployee.role)) {
+      setSaveMessage(null);
+      setSaveError(`${formatTabLabel(tab, metadata)} is admin-only and can only be shown to Root Admin or HR Admin.`);
+      return;
+    }
     const email = searchQuery.trim().toLowerCase();
     const previousOverrides = selectedEmployee.overrides;
 
@@ -246,31 +275,54 @@ export function AdminClient({
               </tr>
             </thead>
             <tbody>
-              {tabs.map((tab) => (
-                <tr key={tab} className="border-b border-gray-50 last:border-0">
-                  <td className="px-4 py-2.5 font-medium text-gray-700">{tab}</td>
-                  {roles.map((role) => (
-                    <td key={role} className="px-4 py-2.5 text-center">
-                      <button
-                        onClick={() => toggleRole(role, tab)}
-                        disabled={saving || role === 'root-admin'}
-                        role="switch"
-                        aria-checked={roleMap[role]?.[tab] ?? false}
-                        className={`inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                          roleMap[role]?.[tab] ? 'bg-blue-500' : 'bg-gray-200'
-                        } ${role === 'root-admin' ? 'cursor-not-allowed opacity-60' : ''}`}
-                        aria-label={`${formatRoleLabel(role)} ${tab} visibility`}
-                      >
-                        <span
-                          className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
-                            roleMap[role]?.[tab] ? 'translate-x-6' : 'translate-x-1'
-                          }`}
-                        />
-                      </button>
+              {tabs.map((tab) => {
+                const metadata = tabMetadata[tab];
+                return (
+                  <tr key={tab} className="border-b border-gray-50 last:border-0">
+                    <td className="px-4 py-2.5 font-medium text-gray-700">
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center gap-2">
+                          <span>{formatTabLabel(tab, metadata)}</span>
+                          {metadata?.adminOnly ? (
+                            <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+                              Admin only
+                            </span>
+                          ) : null}
+                        </div>
+                        <span className="text-[11px] font-normal text-gray-400">
+                          {metadata?.path || tab}
+                        </span>
+                      </div>
                     </td>
-                  ))}
-                </tr>
-              ))}
+                    {roles.map((role) => {
+                      const isVisible = roleMap[role]?.[tab] ?? false;
+                      const cannotEnableAdminOnly = Boolean(metadata?.adminOnly && !isAdminRole(role) && !isVisible);
+                      const isDisabled = saving || role === 'root-admin' || cannotEnableAdminOnly;
+                      return (
+                        <td key={role} className="px-4 py-2.5 text-center">
+                          <button
+                            onClick={() => toggleRole(role, tab)}
+                            disabled={isDisabled}
+                            role="switch"
+                            aria-checked={isVisible}
+                            title={cannotEnableAdminOnly ? 'Admin-only reports can only be shown to Root Admin or HR Admin.' : undefined}
+                            className={`inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                              isVisible ? 'bg-blue-500' : 'bg-gray-200'
+                            } ${isDisabled ? 'cursor-not-allowed opacity-60' : ''}`}
+                            aria-label={`${formatRoleLabel(role)} ${formatTabLabel(tab, metadata)} visibility`}
+                          >
+                            <span
+                              className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                                isVisible ? 'translate-x-6' : 'translate-x-1'
+                              }`}
+                            />
+                          </button>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -401,13 +453,29 @@ export function AdminClient({
                 </thead>
                 <tbody>
                   {tabs.map((tab) => {
+                    const metadata = tabMetadata[tab];
                     const state = getOverrideState(tab);
                     const effective = getEffectiveVisibility(tab);
-                    const roleDefault = selectedEmployee.roleDefaults[tab];
+                    const isAdminOnlyForEmployee = Boolean(metadata?.adminOnly && !isAdminRole(selectedEmployee.role));
+                    const roleDefault = isAdminOnlyForEmployee ? false : selectedEmployee.roleDefaults[tab];
 
                     return (
                       <tr key={tab} className="border-b border-gray-50 last:border-0">
-                        <td className="px-4 py-3 font-medium text-gray-700">{tab}</td>
+                        <td className="px-4 py-3 font-medium text-gray-700">
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-2">
+                              <span>{formatTabLabel(tab, metadata)}</span>
+                              {metadata?.adminOnly ? (
+                                <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+                                  Admin only
+                                </span>
+                              ) : null}
+                            </div>
+                            <span className="text-[11px] font-normal text-gray-400">
+                              {metadata?.path || tab}
+                            </span>
+                          </div>
+                        </td>
 
                         {/* Role default indicator */}
                         <td className="px-4 py-3 text-center">
@@ -438,11 +506,13 @@ export function AdminClient({
                             </button>
                             <button
                               onClick={() => setOverrideState(tab, 'show')}
-                              disabled={saving}
+                              disabled={saving || isAdminOnlyForEmployee}
+                              title={isAdminOnlyForEmployee ? 'Admin-only reports can only be shown to Root Admin or HR Admin.' : undefined}
                               className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
                                 state === 'show'
                                   ? 'bg-green-600 text-white'
                                   : 'bg-gray-100 text-gray-500 hover:bg-green-50 hover:text-green-700'
+                              } ${isAdminOnlyForEmployee ? 'cursor-not-allowed opacity-50 hover:bg-gray-100 hover:text-gray-500' : ''
                               }`}
                             >
                               Show

@@ -1,5 +1,6 @@
 import { getAccessContext } from '@/lib/access';
 import { getSuspiciousActivTrakIdentities } from '@/lib/dashboard-data';
+import { requireVisibleTab } from '@/lib/tab-config';
 import { redirect } from 'next/navigation';
 import { SuspiciousActivTrakIdentitiesClient } from './report-client';
 
@@ -11,6 +12,7 @@ export default async function ActivTrakIdentitiesPage() {
   if (!access.isRootAdmin && !access.isHRAdmin) {
     redirect('/dashboard');
   }
+  await requireVisibleTab(access.userEmail, access, 'activtrak-identities');
 
   try {
     const rows = await getSuspiciousActivTrakIdentities();

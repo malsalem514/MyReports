@@ -1,7 +1,9 @@
 import { getAccessContext, getRoleDiagnostics } from '@/lib/access';
 import { fetchActiveEmployees } from '@/lib/bamboohr';
+import { DASHBOARD_TAB_LABELS, DASHBOARD_TAB_ROUTES } from '@/lib/dashboard-nav-config';
 import { normalizeEmail } from '@/lib/email';
-import { getRoleDefaults, TAB_KEYS, TAB_ROLES } from '@/lib/tab-config';
+import { initializeSchema } from '@/lib/oracle';
+import { ADMIN_ONLY_TAB_KEYS, getFallbackRoleDefaults, getRoleDefaults, TAB_KEYS, TAB_ROLES } from '@/lib/tab-config';
 import { redirect } from 'next/navigation';
 import { AdminClient } from './admin-client';
 
@@ -11,7 +13,7 @@ export default async function AdminPage() {
     redirect('/dashboard');
   }
 
-  let roleDefaults: Awaited<ReturnType<typeof getRoleDefaults>> = [];
+  let roleDefaults: Awaited<ReturnType<typeof getRoleDefaults>> = getFallbackRoleDefaults();
   let directorUsers: Array<{
     name: string;
     email: string;
@@ -22,7 +24,7 @@ export default async function AdminPage() {
   const dataErrors: string[] = [];
   try {
     const [defaultsResult, employeesResult] = await Promise.allSettled([
-      getRoleDefaults(),
+      initializeSchema().then(() => getRoleDefaults()),
       fetchActiveEmployees(),
     ]);
 
@@ -69,6 +71,15 @@ export default async function AdminPage() {
       roleMap[row.ROLE_NAME][row.TAB_KEY] = row.VISIBLE === 1;
     }
   }
+  const adminOnlyTabs = new Set<string>(ADMIN_ONLY_TAB_KEYS);
+  const tabMetadata = Object.fromEntries(TAB_KEYS.map((tab) => [
+    tab,
+    {
+      label: DASHBOARD_TAB_LABELS[tab],
+      path: DASHBOARD_TAB_ROUTES[tab],
+      adminOnly: adminOnlyTabs.has(tab),
+    },
+  ]));
 
   return (
     <div className="space-y-4">
@@ -80,6 +91,7 @@ export default async function AdminPage() {
       <AdminClient
         roles={[...roles]}
         tabs={[...TAB_KEYS]}
+        tabMetadata={tabMetadata}
         roleMap={roleMap}
         directorUsers={directorUsers}
       />

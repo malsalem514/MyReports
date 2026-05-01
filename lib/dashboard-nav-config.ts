@@ -22,6 +22,7 @@ export const DASHBOARD_TAB_ROUTES: Record<TabKey, string> = {
   'timesheet-compare': '/dashboard/timesheet-compare',
   'working-hours': '/dashboard/working-hours',
   'bamboo-not-in-activtrak': '/dashboard/bamboo-not-in-activtrak',
+  'activtrak-identities': '/dashboard/activtrak-identities',
 };
 
 export const DASHBOARD_TAB_LABELS: Record<TabKey, string> = {
@@ -29,6 +30,7 @@ export const DASHBOARD_TAB_LABELS: Record<TabKey, string> = {
   'timesheet-compare': 'TBS Compare',
   'working-hours': 'Working Hours',
   'bamboo-not-in-activtrak': 'Users Mappings',
+  'activtrak-identities': 'ActivTrak Identities',
 };
 
 export const OFFICE_ATTENDANCE_VIEW_OPTIONS: Array<{
@@ -75,7 +77,7 @@ export function buildDashboardNavItems(
   let workingHoursGroupAdded = false;
 
   for (const key of visibleTabs) {
-    if (key === 'bamboo-not-in-activtrak') {
+    if (key === 'bamboo-not-in-activtrak' || key === 'activtrak-identities') {
       navItems.push({
         key,
         path: DASHBOARD_TAB_ROUTES[key],
@@ -129,12 +131,6 @@ export function buildDashboardNavItems(
       key: 'admin',
       path: '/dashboard/admin',
       label: 'Tab Visibility',
-      section: 'admin',
-    });
-    navItems.push({
-      key: 'activtrak-identities',
-      path: '/dashboard/activtrak-identities',
-      label: 'ActivTrak Identities',
       section: 'admin',
     });
   }
