@@ -32,6 +32,7 @@ export interface RoleDiagnostics {
 
 interface AccessEmployeeRow {
   ID: string;
+  EMPLOYEE_NUMBER: number | null;
   EMAIL: string;
   DISPLAY_NAME: string | null;
   FIRST_NAME: string | null;
@@ -64,6 +65,7 @@ async function fetchActiveAccessEmployees(): Promise<AccessEmployeeRow[]> {
   return query<AccessEmployeeRow>(
     `SELECT
        ID,
+       EMPLOYEE_NUMBER,
        LOWER(EMAIL) AS EMAIL,
        DISPLAY_NAME,
        FIRST_NAME,
@@ -93,6 +95,14 @@ function getEmployeeName(row: AccessEmployeeRow, fallbackEmail: string): string 
   );
 }
 
+function getEmployeeLookupKeys(row: AccessEmployeeRow): string[] {
+  return [
+    row.ID,
+    row.EMPLOYEE_NUMBER === null || row.EMPLOYEE_NUMBER === undefined ? null : String(row.EMPLOYEE_NUMBER),
+    row.EMAIL,
+  ].map((value) => (value ? normalizeEmail(value) : '')).filter(Boolean);
+}
+
 function collectReportRows(
   allEmployees: AccessEmployeeRow[],
   currentUser: AccessEmployeeRow,
@@ -110,10 +120,7 @@ function collectReportRows(
     addSupervisorKey(employee.SUPERVISOR_EMAIL, employee);
   }
 
-  const managerKeys = [
-    currentUser.ID,
-    currentUser.EMAIL,
-  ].map((value) => normalizeEmail(value)).filter(Boolean);
+  const managerKeys = getEmployeeLookupKeys(currentUser);
 
   const directByEmail = new Map<string, AccessEmployeeRow>();
   for (const key of managerKeys) {
@@ -130,7 +137,7 @@ function collectReportRows(
     if (allByEmail.has(email)) continue;
     allByEmail.set(email, report);
 
-    for (const key of [report.ID, report.EMAIL].map((value) => normalizeEmail(value)).filter(Boolean)) {
+    for (const key of getEmployeeLookupKeys(report)) {
       for (const child of bySupervisor.get(key) || []) {
         if (!allByEmail.has(normalizeEmail(child.EMAIL))) queue.push(child);
       }
