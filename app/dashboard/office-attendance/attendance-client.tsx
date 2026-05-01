@@ -395,7 +395,7 @@ function createOfficeDayHoursWeekCell(week: string): OfficeDayHoursWeekCell {
 function formatOfficeWeekCellExportValue(cell: OfficeDayHoursWeekCell | undefined): string {
   if (!cell || cell.officeDayCount === 0) return '';
   return cell.days
-    .map((day) => `${formatCompactDayLabel(day.date)}: ${formatHoursValue(day.officeWindowHours)} window, ${formatHoursValue(day.officeHours)} office activity, ${formatHoursValue(day.remoteHours)} home/other active, ${getOfficeDaySharePct(day)}% office activity`)
+    .map((day) => `${formatCompactDayLabel(day.date)}: ${formatHoursValue(day.officeWindowHours)} in office, first activity ${formatActivityTime(day.officeFirstActivityAt)}, last activity ${formatActivityTime(day.officeLastActivityAt)}, ${formatHoursValue(day.officeHours)} office activity, ${formatHoursValue(day.remoteHours)} home/other active, ${getOfficeDaySharePct(day)}% office activity`)
     .join(' | ');
 }
 
@@ -1191,11 +1191,11 @@ export function AttendanceClient({
         'Manager',
         'Location',
         'Office Days',
-        'Avg Office Window Hours',
+        'Avg In Office Hours',
         'Avg Office Activity Hours',
         'Avg Home/Other Active Hours',
         'Office Activity Share %',
-        'Short Office Windows',
+        'Short In Office Days',
         ...weeks.map((week) => getWeekLabel(week)),
       ];
       const rows = sortedOfficeDayHourRows.map((row) => [
@@ -1251,11 +1251,11 @@ export function AttendanceClient({
         'Manager',
         'Location',
         'Office Days',
-        'Avg Office Window Hrs',
+        'Avg In Office Hrs',
         'Avg Office Activity Hrs',
         'Avg Home/Other Active Hrs',
         'Office Activity Share %',
-        'Short Office Windows',
+        'Short In Office Days',
         ...weeks.map((week) => getWeekLabel(week)),
       ];
       styleHeaderRow(ws.addRow(headers));
@@ -1283,12 +1283,12 @@ export function AttendanceClient({
         'Date',
         'Week',
         'Office Activity Hours',
-        'Office Window Hours',
+        'In Office Hours',
         'Home/Other Active Hours',
         'Total Tracked Hours',
         'Office Activity Share %',
-        'Office Window Start',
-        'Office Window End',
+        'In Office First Activity',
+        'In Office Last Activity',
         'Office IP Matches',
       ]));
       sortedOfficeDayHourRows.forEach((rowData) => {
@@ -1362,8 +1362,8 @@ export function AttendanceClient({
     : isAggregateView
       ? currentView.label
       : 'Employees';
-  const averageMetricLabel = isApprovedRemoteWorkView ? 'Employees' : isOfficeDayHoursView ? 'Avg Office Window' : isAggregateView ? 'Avg Office Days/Emp/Week' : 'Avg Office Days/Week';
-  const zeroMetricLabel = isApprovedRemoteWorkView ? 'Work Abroad Requests' : isOfficeDayHoursView ? 'Short Office Windows' : isAggregateView ? `Zero-Office ${aggregateLabel}s` : 'Zero Office Days';
+  const averageMetricLabel = isApprovedRemoteWorkView ? 'Employees' : isOfficeDayHoursView ? 'Avg In Office' : isAggregateView ? 'Avg Office Days/Emp/Week' : 'Avg Office Days/Week';
+  const zeroMetricLabel = isApprovedRemoteWorkView ? 'Work Abroad Requests' : isOfficeDayHoursView ? 'Short In Office Days' : isAggregateView ? `Zero-Office ${aggregateLabel}s` : 'Zero Office Days';
 
   const SortHeader = ({
     label,
@@ -1418,7 +1418,7 @@ export function AttendanceClient({
                 {isApprovedRemoteWorkView
                   ? 'Bamboo remote-work and work-abroad request records with approval and authorization status.'
                   : isOfficeDayHoursView
-                    ? 'One row per employee with per-day office window, office activity, home/other active time, and activity share by week.'
+                    ? 'One row per employee with per-day in-office time, office activity, home/other active time, and activity share by week.'
                     : isAggregateView
                     ? `Weekly compliance is based on Quebec employees meeting the adjusted office target after approved week-level coverage and PTO exceptions.`
                     : `${currentView.description} Target ${OFFICE_DAYS_REQUIRED} office days per week.`}
@@ -1738,7 +1738,7 @@ export function AttendanceClient({
                   <p className="mt-1 text-[11px] text-gray-400">{officeDayHoursSummary.employeeCount} employee{officeDayHoursSummary.employeeCount === 1 ? '' : 's'}</p>
                 </div>
                 <div className="rounded-xl border border-gray-200 bg-white p-4">
-                  <p className="text-[11px] font-medium text-gray-500">Avg Office Window</p>
+                  <p className="text-[11px] font-medium text-gray-500">Avg In Office</p>
                   <p className="mt-1 text-[22px] font-semibold text-gray-900">{formatHoursValue(officeDayHoursSummary.avgOfficeWindowHours)}</p>
                   <p className="mt-1 text-[11px] text-gray-400">First to last office activity</p>
                 </div>
@@ -1753,14 +1753,14 @@ export function AttendanceClient({
                   <p className="mt-1 text-[11px] text-gray-400">{officeDayHoursSummary.officeSharePct}% office activity share</p>
                 </div>
                 <div className="rounded-xl border border-gray-200 bg-white p-4">
-                  <p className="text-[11px] font-medium text-gray-500">Short Office Windows</p>
+                  <p className="text-[11px] font-medium text-gray-500">Short In Office Days</p>
                   <p className={`mt-1 text-[22px] font-semibold ${officeDayHoursSummary.shortOfficeDayCount > 0 ? 'text-red-600' : 'text-gray-900'}`}>
                     {officeDayHoursSummary.shortOfficeDayCount}
                   </p>
-                  <p className="mt-1 text-[11px] text-gray-400">{officeDayHoursSummary.shortOfficeDayRate}% below {shortOfficeDayThreshold}h window</p>
+                  <p className="mt-1 text-[11px] text-gray-400">{officeDayHoursSummary.shortOfficeDayRate}% below {shortOfficeDayThreshold}h in office</p>
                 </div>
                 <div className="rounded-xl border border-gray-200 bg-white p-4">
-                  <label className="block text-[11px] font-medium text-gray-500">Short-Window Threshold</label>
+                  <label className="block text-[11px] font-medium text-gray-500">Short In Office Threshold</label>
                   <select
                     value={String(shortOfficeDayThreshold)}
                     onChange={(event) => changeShortOfficeDayThreshold(event.target.value)}
@@ -1777,10 +1777,10 @@ export function AttendanceClient({
               <div className="rounded-xl border border-gray-200 bg-white p-4">
                 <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                   <div>
-                    <h3 className="text-[13px] font-semibold text-gray-900">Office-Window Spread</h3>
-                    <p className="text-[11px] text-gray-400">Distribution of elapsed office windows on days that counted as office days.</p>
+                    <h3 className="text-[13px] font-semibold text-gray-900">In Office Spread</h3>
+                    <p className="text-[11px] text-gray-400">Distribution of elapsed in-office time on days that counted as office days.</p>
                   </div>
-                  <p className="text-[11px] text-gray-400">{officeDayHoursSummary.impactedEmployeeCount} employee{officeDayHoursSummary.impactedEmployeeCount === 1 ? '' : 's'} with at least one short office window</p>
+                  <p className="text-[11px] text-gray-400">{officeDayHoursSummary.impactedEmployeeCount} employee{officeDayHoursSummary.impactedEmployeeCount === 1 ? '' : 's'} with at least one short in-office day</p>
                 </div>
                 <div className="mt-4 grid gap-2 sm:grid-cols-5">
                   {officeDayHoursSummary.buckets.map((bucket) => (
@@ -1799,8 +1799,8 @@ export function AttendanceClient({
               <div className="rounded-xl border border-gray-200 bg-white">
                 <div className="flex flex-col gap-1 border-b border-gray-100 px-4 py-3 sm:flex-row sm:items-end sm:justify-between">
                   <div>
-                    <h3 className="text-[13px] font-semibold text-gray-900">Office Windows</h3>
-                    <p className="text-[11px] text-gray-400">Elapsed office window is first-to-last office activity; office activity is summed active time on office IP.</p>
+                    <h3 className="text-[13px] font-semibold text-gray-900">In Office</h3>
+                    <p className="text-[11px] text-gray-400">In Office is first-to-last office activity; Office Activity is summed active time on office IP.</p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="text-[11px] text-gray-400">{officeWindowRows.length} employees</p>
@@ -1824,7 +1824,7 @@ export function AttendanceClient({
                       <tr className="border-b border-gray-100">
                         <OfficeWindowSortHeader label="Employee" colKey="name" />
                         <OfficeWindowSortHeader label="Office Days" colKey="officeDayCount" align="right" />
-                        <OfficeWindowSortHeader label="Avg Office Window" colKey="avgOfficeWindowHours" align="right" />
+                        <OfficeWindowSortHeader label="Avg In Office" colKey="avgOfficeWindowHours" align="right" />
                         <OfficeWindowSortHeader label="Avg Office Activity" colKey="avgOfficeDayHours" align="right" />
                         <OfficeWindowSortHeader label="Home/Other Active" colKey="avgRemoteDayHours" align="right" />
                         <OfficeWindowSortHeader label="Activity Split" colKey="officeSharePct" />
@@ -1869,7 +1869,7 @@ export function AttendanceClient({
                         );
                       })}
                       {officeWindowRows.length === 0 ? (
-                        <tr><td colSpan={6} className="px-4 py-6 text-center text-[12px] text-gray-400">No office-day windows in this range.</td></tr>
+                        <tr><td colSpan={6} className="px-4 py-6 text-center text-[12px] text-gray-400">No office days with in-office time in this range.</td></tr>
                       ) : null}
                     </tbody>
                   </table>
@@ -2117,7 +2117,7 @@ export function AttendanceClient({
                           <p className="mt-1 text-[16px] font-semibold text-gray-900">{row.officeSharePct}%</p>
                         </div>
                         <div className="rounded-lg bg-gray-50 px-3 py-2">
-                          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Avg Office Window</p>
+                          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Avg In Office</p>
                           <p className="mt-1 text-[16px] font-semibold text-gray-900">{formatHoursValue(row.avgOfficeWindowHours)}</p>
                         </div>
                         <div className="rounded-lg bg-gray-50 px-3 py-2">
@@ -2153,7 +2153,7 @@ export function AttendanceClient({
                                         <div className="flex items-center justify-between gap-2">
                                           <span className="text-[11px] font-medium text-gray-700">{formatCompactDayLabel(day.date)}</span>
                                           <span className={`text-[11px] font-semibold tabular-nums ${day.isShort ? 'text-red-600' : 'text-gray-900'}`}>
-                                            {formatHoursValue(day.officeWindowHours)} window
+                                            {formatHoursValue(day.officeWindowHours)} in office
                                           </span>
                                         </div>
                                         <div className="mt-1 h-1 overflow-hidden rounded-full bg-gray-200">
@@ -2162,6 +2162,10 @@ export function AttendanceClient({
                                         <div className="mt-1 flex items-center justify-between text-[9px] text-gray-400">
                                           <span>activity {formatHoursValue(day.officeHours)} / {dayOfficeSharePct}%</span>
                                           <span>home {formatHoursValue(day.remoteHours)}</span>
+                                        </div>
+                                        <div className="mt-0.5 flex items-center justify-between gap-2 text-[9px] text-gray-400">
+                                          <span>first activity {formatActivityTime(day.officeFirstActivityAt)}</span>
+                                          <span>last activity {formatActivityTime(day.officeLastActivityAt)}</span>
                                         </div>
                                       </div>
                                     );
@@ -2490,7 +2494,7 @@ export function AttendanceClient({
                       </th>
                       <SortHeader label="Dept" colKey="department" />
                       <SortHeader label="Office Days" colKey="total" align="right" />
-                      <SortHeader label="Avg Window" colKey="avgOfficeWindowHours" align="right" />
+                      <SortHeader label="Avg In Office" colKey="avgOfficeWindowHours" align="right" />
                       <SortHeader label="Avg Activity" colKey="avgOfficeDayHours" align="right" />
                       <SortHeader label="Activity Share" colKey="officeSharePct" align="right" />
                       {weeks.map((week) => (
@@ -2526,7 +2530,7 @@ export function AttendanceClient({
                               <div className={`min-h-20 rounded-lg border px-2 py-2 ${tone}`}>
                                 <div className="flex items-center justify-between gap-2">
                                   <span className="text-[11px] font-semibold">{cell.officeDayCount} day{cell.officeDayCount === 1 ? '' : 's'}</span>
-                                  <span className="text-[10px] font-medium">{formatHoursValue(cell.avgOfficeWindowHours)} window avg</span>
+                                  <span className="text-[10px] font-medium">{formatHoursValue(cell.avgOfficeWindowHours)} in office avg</span>
                                 </div>
                                 {cell.days.length > 0 ? (
                                   <div className="mt-2 space-y-1.5">
@@ -2538,7 +2542,7 @@ export function AttendanceClient({
                                           <div className="flex items-center justify-between gap-2">
                                             <span className="text-[10px] font-medium text-gray-600">{formatCompactDayLabel(day.date)}</span>
                                             <span className={`text-[10px] font-semibold tabular-nums ${day.isShort ? 'text-red-600' : 'text-gray-900'}`}>
-                                              {formatHoursValue(day.officeWindowHours)} window
+                                              {formatHoursValue(day.officeWindowHours)} in office
                                             </span>
                                           </div>
                                           <div className="mt-1 flex h-1.5 overflow-hidden rounded-full bg-gray-200">
@@ -2547,9 +2551,12 @@ export function AttendanceClient({
                                           </div>
                                           <div className="mt-1 flex items-center justify-between text-[9px] text-gray-400">
                                             <span>activity {formatHoursValue(day.officeHours)} / {officeShare}%</span>
-                                            <span>{formatActivityTime(day.officeFirstActivityAt)}-{formatActivityTime(day.officeLastActivityAt)}</span>
+                                            <span>home {formatHoursValue(day.remoteHours)}</span>
                                           </div>
-                                          <div className="mt-0.5 text-[9px] text-gray-400">home/other active {formatHoursValue(day.remoteHours)}</div>
+                                          <div className="mt-0.5 flex items-center justify-between gap-2 text-[9px] text-gray-400">
+                                            <span>first activity {formatActivityTime(day.officeFirstActivityAt)}</span>
+                                            <span>last activity {formatActivityTime(day.officeLastActivityAt)}</span>
+                                          </div>
                                         </div>
                                       );
                                     })}
