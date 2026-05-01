@@ -15,8 +15,10 @@ export interface AttendanceApprovalIndex {
   standingPolicyEmails: ReadonlySet<string>;
   approvedRemoteRequestEmails: ReadonlySet<string>;
   approvedWorkAbroadRequestEmails: ReadonlySet<string>;
+  unapprovedRemoteRequestEmails?: ReadonlySet<string>;
   approvedRemoteWorkTypesByEmail: ReadonlyMap<string, ReadonlySet<string>>;
   approvedWorkAbroadCountriesByEmail: ReadonlyMap<string, ReadonlySet<string>>;
+  unapprovedRemoteWorkTypesByEmail?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 export interface AttendanceEmployeeAccumulator {
@@ -42,6 +44,14 @@ export interface AttendanceDayAccumulator {
   ptoType: string | null;
   tbsReportedHours: number;
   activeHours: number;
+  officeDurationSeconds: number;
+  officeHours: number;
+  remoteHours: number;
+  firstActivityAt: string | null;
+  lastActivityAt: string | null;
+  officeFirstActivityAt: string | null;
+  officeLastActivityAt: string | null;
+  officeIpMatches: Set<string>;
 }
 
 interface AttendanceRangeFlags {
@@ -61,6 +71,7 @@ export interface WeeklyAttendanceCellInput {
   hasApprovedRemoteCoverage: boolean;
   hasApprovedWorkAbroadCoverage: boolean;
   exceptionLabel: string | null;
+  hasStandingPolicyCoverage?: boolean;
 }
 
 function formatApprovalSuffix(values?: ReadonlySet<string>): string {
@@ -75,6 +86,7 @@ export function getRemoteWorkStatusLabel(
   const hasStandingWfhPolicy = approvalIndex.standingPolicyEmails.has(email);
   const hasApprovedRemoteRequest = approvalIndex.approvedRemoteRequestEmails.has(email);
   const hasApprovedWorkAbroadRequest = approvalIndex.approvedWorkAbroadRequestEmails.has(email);
+  const hasUnapprovedRemoteRequest = approvalIndex.unapprovedRemoteRequestEmails?.has(email) ?? false;
   const labels: string[] = [];
 
   if (hasApprovedRemoteRequest) {
@@ -98,6 +110,11 @@ export function getRemoteWorkStatusLabel(
   }
   if (hasStandingWfhPolicy) return 'Standing WFH Policy';
   if (labels.length > 0) return labels.join(' + ');
+  if (hasUnapprovedRemoteRequest) {
+    return `Bamboo Arrangement - Approval Missing${formatApprovalSuffix(
+      approvalIndex.unapprovedRemoteWorkTypesByEmail?.get(email),
+    )}`;
+  }
   return 'Standard Policy';
 }
 
@@ -110,7 +127,7 @@ function getAttendanceRangeFlags(
   const hasApprovedRemoteRequestInRange = approvedRemoteWorkRequest;
   const hasApprovedWorkAbroadRequestInRange = approvalIndex.approvedWorkAbroadRequestEmails.has(email);
   const hasAnyApprovedWfhCoverageInRange =
-    hasApprovedRemoteRequestInRange || hasApprovedWorkAbroadRequestInRange;
+    hasStandingWfhPolicy || hasApprovedRemoteRequestInRange || hasApprovedWorkAbroadRequestInRange;
 
   return {
     approvedRemoteWorkRequest,
@@ -163,6 +180,13 @@ export function toWeekDayDetails(days: ReadonlyArray<AttendanceDayAccumulator>):
     ptoType: day.ptoType,
     tbsReportedHours: day.tbsReportedHours,
     activeHours: day.activeHours,
+    officeHours: day.officeHours,
+    remoteHours: day.remoteHours,
+    firstActivityAt: day.firstActivityAt,
+    lastActivityAt: day.lastActivityAt,
+    officeFirstActivityAt: day.officeFirstActivityAt,
+    officeLastActivityAt: day.officeLastActivityAt,
+    officeIpMatches: day.officeIpMatches.size > 0 ? [...day.officeIpMatches].sort().join(', ') : null,
   }));
 }
 
@@ -174,6 +198,7 @@ export function calculateAttendanceWeekCell({
   hasApprovedRemoteCoverage,
   hasApprovedWorkAbroadCoverage,
   exceptionLabel,
+  hasStandingPolicyCoverage = false,
 }: WeeklyAttendanceCellInput): WeekCell {
   const officeDays = currentCell?.officeDays ?? 0;
   const remoteDays = currentCell?.remoteDays ?? 0;
@@ -195,7 +220,11 @@ export function calculateAttendanceWeekCell({
 
     if (approvedCoverageWeekdays > 0) {
       targetAfterWfh = Math.max(0, officeDaysRequired - approvedCoverageWeekdays);
-      wfhExceptionType = targetAfterWfh === 0 ? 'temporary_full' : 'temporary_partial';
+      if (hasStandingPolicyCoverage) {
+        wfhExceptionType = 'standing_policy';
+      } else {
+        wfhExceptionType = targetAfterWfh === 0 ? 'temporary_full' : 'temporary_partial';
+      }
     }
 
     if (targetAfterWfh === 0) {

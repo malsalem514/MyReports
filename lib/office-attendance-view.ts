@@ -86,6 +86,7 @@ export interface ApprovalRequestRow {
   endDate: string | null;
   category: string | null;
   approvalStatus: string | null;
+  authorizationStatus?: string | null;
   approver: string | null;
   reason: string | null;
   address: string | null;
@@ -745,6 +746,7 @@ export function filterRemoteWorkRequests(params: {
       request.remoteWorkType,
       request.reason,
       request.managerName,
+      request.authorizationStatusLabel,
     ],
     selectedDepartmentSet,
     selectedLocationSet,
@@ -843,6 +845,7 @@ export function buildCombinedApprovalRequests(params: {
       endDate: request.remoteWorkEndDate,
       category: request.remoteWorkType,
       approvalStatus: request.managerApprovalReceived,
+      authorizationStatus: request.authorizationStatusLabel ?? (request.managerApprovalReceived ? 'Approved Request' : 'Approval Missing'),
       approver: request.managerName,
       reason: request.reason,
       address: null,
@@ -864,6 +867,7 @@ export function buildCombinedApprovalRequests(params: {
       endDate: request.workAbroadEndDate,
       category: request.countryOrProvince,
       approvalStatus: request.requestApproved,
+      authorizationStatus: request.requestApproved,
       approver: request.approvedDeclinedBy,
       reason: request.reason,
       address: request.remoteWorkLocationAddress,

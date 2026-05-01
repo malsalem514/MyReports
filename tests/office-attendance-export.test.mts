@@ -99,6 +99,7 @@ test('buildApprovalRequestExportData shares one header/row shape for request exp
     endDate: '2026-03-11',
     category: 'Scheduled Office Day Remote Work',
     approvalStatus: 'Approved',
+    authorizationStatus: 'Approved Request',
     approver: 'Manager Example',
     reason: 'Family',
     address: null,
@@ -116,13 +117,13 @@ test('buildApprovalRequestExportData shares one header/row shape for request exp
   assert.equal(exportData.sheet.columnWidths[13], 24);
   assert.equal(
     toCsvRow(exportData.sheet.rows[0]!),
-    '"Remote Work","10","1","Alice ""Quoted"" Example","alice@example.com","Technology","Quebec","2026-03-01","2026-03-10","2026-03-11","Scheduled Office Day Remote Work","Approved","Manager Example","Family","","","Yes",""',
+    '"Remote Work","10","1","Alice ""Quoted"" Example","alice@example.com","Technology","Quebec","2026-03-01","2026-03-10","2026-03-11","Scheduled Office Day Remote Work","Approved","Approved Request","Manager Example","Family","","","Yes",""',
   );
   assert.equal(
     buildApprovalRequestCsvContent(exportData),
     [
-      '"Source","Bamboo Row ID","Employee ID","Employee Name","Email","Department","Office Location","Request Date","Start Date","End Date","Category","Approval Status","Approver","Reason","Address","Work Schedule","Supporting Documentation Submitted","Alternate In-Office Work Date"',
-      '"Remote Work","10","1","Alice ""Quoted"" Example","alice@example.com","Technology","Quebec","2026-03-01","2026-03-10","2026-03-11","Scheduled Office Day Remote Work","Approved","Manager Example","Family","","","Yes",""',
+      '"Source","Bamboo Row ID","Employee ID","Employee Name","Email","Department","Office Location","Request Date","Start Date","End Date","Category","Approval Status","Authorization Status","Approver","Reason","Address","Work Schedule","Supporting Documentation Submitted","Alternate In-Office Work Date"',
+      '"Remote Work","10","1","Alice ""Quoted"" Example","alice@example.com","Technology","Quebec","2026-03-01","2026-03-10","2026-03-11","Scheduled Office Day Remote Work","Approved","Approved Request","Manager Example","Family","","","Yes",""',
     ].join('\n'),
   );
 });

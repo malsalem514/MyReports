@@ -118,6 +118,8 @@ export interface OfficeIpActivityRecord {
   publicIp: string;
   durationSeconds: number;
   eventCount: number;
+  firstActivityAt: string | null;
+  lastActivityAt: string | null;
 }
 
 // ============================================================================
@@ -328,7 +330,9 @@ export async function fetchOfficeIpActivity(
       ARRAY_AGG(NULLIF(TRIM(e.user_name), '') IGNORE NULLS LIMIT 1)[OFFSET(0)] AS display_name,
       e.public_ip,
       SUM(COALESCE(e.duration_sec, 0)) AS duration_seconds,
-      COUNT(*) AS event_count
+      COUNT(*) AS event_count,
+      MIN(e.local_datetime) AS first_activity_datetime,
+      MAX(DATETIME_ADD(e.local_datetime, INTERVAL COALESCE(e.duration_sec, 0) SECOND)) AS last_activity_datetime
     FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.events\` e
     LEFT JOIN user_emails ue
       ON e.user_id = ue.userid
@@ -362,6 +366,8 @@ export async function fetchOfficeIpActivity(
     publicIp: String(row.public_ip || ''),
     durationSeconds: Number(row.duration_seconds) || 0,
     eventCount: Number(row.event_count) || 0,
+    firstActivityAt: normalizeBigQueryDateTime(row.first_activity_datetime),
+    lastActivityAt: normalizeBigQueryDateTime(row.last_activity_datetime),
   }));
 }
 
@@ -462,6 +468,16 @@ function formatDate(date: Date): string {
   const m = String(date.getMonth() + 1).padStart(2, '0');
   const d = String(date.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
+}
+
+function normalizeBigQueryDateTime(value: unknown): string | null {
+  if (!value) return null;
+  if (typeof value === 'string') return value.replace('T', ' ');
+  if (typeof value === 'object' && value !== null && 'value' in value) {
+    const raw = (value as { value?: unknown }).value;
+    return raw ? String(raw).replace('T', ' ') : null;
+  }
+  return String(value).replace('T', ' ');
 }
 
 function normalizeLocation(location: string | null): 'Office' | 'Remote' | 'Unknown' {

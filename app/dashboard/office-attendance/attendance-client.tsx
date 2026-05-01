@@ -1,7 +1,7 @@
 'use client';
 
 import { Download, Filter, House, Plane, X } from 'lucide-react';
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import {
@@ -15,6 +15,7 @@ import {
   buildApprovalRequestExportData,
   buildAttendanceCsvContent,
   buildAttendanceExportData,
+  toCsvRow,
 } from '@/lib/office-attendance-export';
 import { OFFICE_ATTENDANCE_VIEW_OPTIONS, type OfficeAttendanceViewKey } from '@/lib/dashboard-nav-config';
 import { getOfficeAttendanceDefaultRange, toDateParam } from '@/lib/report-date-defaults';
@@ -33,6 +34,7 @@ import {
   buildDisplayRows,
   buildFilteredAttendanceSummary,
   buildGroupedRows,
+  compareMaybeNumber,
   createEmptyWeekCell,
   filterAttendanceRows,
   filterRemoteWorkRequests,
@@ -72,11 +74,12 @@ interface Props {
 
 type ViewMode = OfficeAttendanceViewKey;
 type DateFilterMode = 'quick' | 'custom';
+type OfficeWindowSortKey = 'name' | 'officeDayCount' | 'avgOfficeDayHours' | 'avgRemoteDayHours' | 'officeSharePct';
 const DEFAULT_EMPLOYEE_LOCATION = 'Quebec (Montreal Head Office)';
 
 function getInitialViewMode(searchParams: SearchParamReader): ViewMode {
   const view = searchParams.get('view');
-  if (view === 'employees' || view === 'departments' || view === 'managers' || view === 'approved-remote-work') {
+  if (view === 'employees' || view === 'office-day-hours' || view === 'departments' || view === 'managers' || view === 'approved-remote-work') {
     return view;
   }
   if (searchParams.get('remoteWork') === 'approved') {
@@ -91,7 +94,7 @@ function getDefaultLocationSelection(
   locations: string[],
 ): string[] {
   if (searchParams.has('locations')) return parseListParam(searchParams.get('locations'));
-  if (viewMode !== 'employees') return [];
+  if (viewMode !== 'employees' && viewMode !== 'office-day-hours') return [];
   return locations.includes(DEFAULT_EMPLOYEE_LOCATION) ? [DEFAULT_EMPLOYEE_LOCATION] : [];
 }
 
@@ -110,6 +113,71 @@ interface DetailState {
   row: DisplayRow;
 }
 
+interface OfficeDayHoursDay {
+  date: string;
+  week: string;
+  weekLabel: string;
+  activeHours: number;
+  officeHours: number;
+  remoteHours: number;
+  tbsReportedHours: number;
+  firstActivityAt: string | null;
+  lastActivityAt: string | null;
+  officeFirstActivityAt: string | null;
+  officeLastActivityAt: string | null;
+  officeIpMatches: string | null;
+  isShort: boolean;
+}
+
+interface OfficeDayHoursWeekCell {
+  week: string;
+  label: string;
+  officeDayCount: number;
+  shortOfficeDayCount: number;
+  totalOfficeHours: number;
+  totalRemoteHours: number;
+  totalTrackedHours: number;
+  avgOfficeHours: number | null;
+  officeSharePct: number;
+  days: OfficeDayHoursDay[];
+}
+
+interface OfficeDayHoursRow {
+  id: string;
+  label: string;
+  secondary: string;
+  email?: string;
+  managerName?: string;
+  officeLocation: string;
+  remoteWorkStatusLabel: string;
+  hasActivTrakCoverage: boolean;
+  hasStandingWfhPolicy: boolean;
+  hasAnyApprovedWfhCoverageInRange: boolean;
+  displayRow: DisplayRow;
+  officeDayCount: number;
+  shortOfficeDayCount: number;
+  shortOfficeLongWorkdayCount: number;
+  shortOfficeDayRate: number;
+  avgOfficeDayHours: number | null;
+  avgRemoteDayHours: number | null;
+  avgTotalDayHours: number | null;
+  avgTbsReportedHours: number | null;
+  officeSharePct: number;
+  totalOfficeHours: number;
+  totalRemoteHours: number;
+  totalTrackedHours: number;
+  weeks: Record<string, OfficeDayHoursWeekCell>;
+  days: OfficeDayHoursDay[];
+  shortDays: OfficeDayHoursDay[];
+}
+
+interface OfficeDayHoursBucket {
+  key: string;
+  label: string;
+  count: number;
+  percent: number;
+}
+
 interface CalendarMonth {
   key: string;
   label: string;
@@ -122,6 +190,9 @@ interface CalendarMonth {
 
 const PAGE_SIZE = 50;
 const UNKNOWN_DISPLAY_VALUE = '—';
+const DEFAULT_SHORT_OFFICE_DAY_HOURS = 4;
+const SHORT_OFFICE_DAY_THRESHOLD_OPTIONS = [2, 3, 4, 5, 6] as const;
+const FULL_WORKDAY_ACTIVE_HOURS = 6;
 
 /** Parse YYYY-MM-DD as local date (avoids UTC timezone shift) */
 function parseLocalDate(s: string): Date {
@@ -253,6 +324,82 @@ function formatCompactHours(value?: number | null): string {
   return `${hours.toFixed(1)}h`;
 }
 
+function roundToTenth(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+function parseShortOfficeDayThreshold(raw: string | null): number {
+  const value = Number(raw);
+  return SHORT_OFFICE_DAY_THRESHOLD_OPTIONS.includes(value as (typeof SHORT_OFFICE_DAY_THRESHOLD_OPTIONS)[number])
+    ? value
+    : DEFAULT_SHORT_OFFICE_DAY_HOURS;
+}
+
+function formatHoursValue(value?: number | null): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—';
+  return `${value.toFixed(1)}h`;
+}
+
+function formatPercentValue(value?: number | null): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—';
+  return `${value}%`;
+}
+
+function getShortOfficeDayTone(officeHours: number, threshold: number): string {
+  if (officeHours < threshold) return 'bg-red-50 text-red-700';
+  if (officeHours < threshold + 1) return 'bg-amber-50 text-amber-700';
+  return 'bg-green-50 text-green-700';
+}
+
+function getOfficeWeekCellTone(cell: OfficeDayHoursWeekCell, threshold: number): string {
+  if (cell.officeDayCount === 0) return 'bg-gray-50 text-gray-500 border-gray-200';
+  if (cell.shortOfficeDayCount > 0) return 'bg-red-50 text-red-800 border-red-100';
+  if ((cell.avgOfficeHours ?? 0) < threshold + 1) return 'bg-amber-50 text-amber-800 border-amber-100';
+  return 'bg-green-50 text-green-800 border-green-100';
+}
+
+function getOfficeDaySharePct(day: OfficeDayHoursDay): number {
+  if (day.activeHours <= 0) return day.officeHours > 0 ? 100 : 0;
+  return Math.min(100, Math.round((day.officeHours / day.activeHours) * 100));
+}
+
+function createOfficeDayHoursWeekCell(week: string): OfficeDayHoursWeekCell {
+  return {
+    week,
+    label: getWeekLabel(week),
+    officeDayCount: 0,
+    shortOfficeDayCount: 0,
+    totalOfficeHours: 0,
+    totalRemoteHours: 0,
+    totalTrackedHours: 0,
+    avgOfficeHours: null,
+    officeSharePct: 0,
+    days: [],
+  };
+}
+
+function formatOfficeWeekCellExportValue(cell: OfficeDayHoursWeekCell | undefined): string {
+  if (!cell || cell.officeDayCount === 0) return '';
+  return cell.days
+    .map((day) => `${formatCompactDayLabel(day.date)}: ${formatHoursValue(day.officeHours)} office, ${formatHoursValue(day.remoteHours)} home/other, ${getOfficeDaySharePct(day)}% office`)
+    .join(' | ');
+}
+
+function formatCompactDayLabel(date: string): string {
+  return parseLocalDate(date).toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'numeric',
+    day: 'numeric',
+  });
+}
+
+function formatActivityTime(value: string | null): string {
+  if (!value) return '—';
+  const parsed = new Date(value.replace(' ', 'T'));
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
 function formatMonthLabel(date: Date): string {
   return date.toLocaleDateString('en-US', {
     month: 'long',
@@ -307,6 +454,10 @@ export function AttendanceClient({
   const [locOpen, setLocOpen] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>(() => searchParams.get('sortKey') || 'name');
   const [sortDir, setSortDir] = useState<SortDir>(() => parseEnumParam(searchParams.get('sortDir'), ['asc', 'desc'] as const, 'asc'));
+  const [officeWindowSortKey, setOfficeWindowSortKey] = useState<OfficeWindowSortKey>('avgOfficeDayHours');
+  const [officeWindowSortDir, setOfficeWindowSortDir] = useState<SortDir>('desc');
+  const [shortOfficeDayThreshold, setShortOfficeDayThreshold] = useState(() => parseShortOfficeDayThreshold(searchParams.get('shortOfficeHours')));
+  const [selectedOfficeWindowEmployeeId, setSelectedOfficeWindowEmployeeId] = useState<string | null>(null);
   const [page, setPage] = useState(() => parsePageParam(searchParams.get('page')));
   const [detail, setDetail] = useState<DetailState | null>(null);
   const [showScrollRail, setShowScrollRail] = useState(false);
@@ -436,6 +587,7 @@ export function AttendanceClient({
   const isManagerView = viewMode === 'managers';
   const isAggregateView = isDepartmentView || isManagerView;
   const isApprovedRemoteWorkView = viewMode === 'approved-remote-work';
+  const isOfficeDayHoursView = viewMode === 'office-day-hours';
   const aggregateLabel = isManagerView ? 'Manager' : 'Department';
   const aggregatePluralLabel = isManagerView ? 'managers' : 'departments';
   const currentView = OFFICE_ATTENDANCE_VIEW_OPTIONS.find((option) => option.id === viewMode) ?? OFFICE_ATTENDANCE_VIEW_OPTIONS[0]!;
@@ -474,6 +626,10 @@ export function AttendanceClient({
   useEffect(() => {
     setMobileFiltersOpen(false);
   }, [searchParams, viewMode]);
+
+  useEffect(() => {
+    setShortOfficeDayThreshold(parseShortOfficeDayThreshold(searchParams.get('shortOfficeHours')));
+  }, [searchParams]);
 
   useEffect(() => {
     if (!detail || typeof window === 'undefined') return;
@@ -545,6 +701,26 @@ export function AttendanceClient({
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
     else { setSortKey(key); setSortDir(getDefaultSortDirectionForKey(key)); }
     setPage(0);
+  };
+
+  const handleOfficeWindowSort = useCallback((key: OfficeWindowSortKey) => {
+    setOfficeWindowSortKey(key);
+    setOfficeWindowSortDir((previousDir) => (
+      officeWindowSortKey === key
+        ? (previousDir === 'asc' ? 'desc' : 'asc')
+        : (key === 'name' ? 'asc' : 'desc')
+    ));
+  }, [officeWindowSortKey]);
+
+  const changeShortOfficeDayThreshold = (raw: string) => {
+    const threshold = parseShortOfficeDayThreshold(raw);
+    const params = new URLSearchParams(searchParams.toString());
+    params.set('view', 'office-day-hours');
+    params.set('shortOfficeHours', String(threshold));
+    params.delete('page');
+    setShortOfficeDayThreshold(threshold);
+    setPage(0);
+    router.replace(`/dashboard/office-attendance?${params.toString()}`, { scroll: false });
   };
 
   const changeLookback = (val: string) => {
@@ -631,6 +807,203 @@ export function AttendanceClient({
     [displayRows, isAggregateView, sortDir, sortKey],
   );
 
+  const officeDayHourRows = useMemo<OfficeDayHoursRow[]>(() => {
+    return displayRows
+      .filter((row) => !isAggregateView && row.hasActivTrakCoverage)
+      .map((row) => {
+        const days: OfficeDayHoursDay[] = [];
+
+        for (const week of weeks) {
+          const cell = row.weeks[week];
+          if (!cell) continue;
+
+          for (const day of cell.days ?? []) {
+            const officeHours = roundToTenth(Math.max(0, day.officeHours ?? 0));
+            const activeHours = roundToTenth(Math.max(0, day.activeHours ?? 0));
+            const isOfficeDay = day.location === 'Office' || officeHours > 0;
+            if (!isOfficeDay) continue;
+
+            const remoteHours = roundToTenth(Math.max(0, day.remoteHours ?? activeHours - officeHours));
+            days.push({
+              date: day.date,
+              week,
+              weekLabel: getWeekLabel(week),
+              activeHours,
+              officeHours,
+              remoteHours,
+              tbsReportedHours: roundToTenth(Math.max(0, day.tbsReportedHours ?? 0)),
+              firstActivityAt: day.firstActivityAt ?? null,
+              lastActivityAt: day.lastActivityAt ?? null,
+              officeFirstActivityAt: day.officeFirstActivityAt ?? null,
+              officeLastActivityAt: day.officeLastActivityAt ?? null,
+              officeIpMatches: day.officeIpMatches ?? null,
+              isShort: officeHours < shortOfficeDayThreshold,
+            });
+          }
+        }
+
+        const weekly = Object.fromEntries(
+          weeks.map((week) => [week, createOfficeDayHoursWeekCell(week)]),
+        ) as Record<string, OfficeDayHoursWeekCell>;
+
+        for (const day of days) {
+          if (!weekly[day.week]) weekly[day.week] = createOfficeDayHoursWeekCell(day.week);
+          const weekCell = weekly[day.week]!;
+          weekCell.officeDayCount += 1;
+          weekCell.shortOfficeDayCount += day.isShort ? 1 : 0;
+          weekCell.totalOfficeHours = roundToTenth(weekCell.totalOfficeHours + day.officeHours);
+          weekCell.totalRemoteHours = roundToTenth(weekCell.totalRemoteHours + day.remoteHours);
+          weekCell.totalTrackedHours = roundToTenth(weekCell.totalTrackedHours + day.activeHours);
+          weekCell.days.push(day);
+        }
+
+        for (const weekCell of Object.values(weekly)) {
+          weekCell.days.sort((a, b) => a.date.localeCompare(b.date));
+          weekCell.avgOfficeHours = weekCell.officeDayCount > 0
+            ? roundToTenth(weekCell.totalOfficeHours / weekCell.officeDayCount)
+            : null;
+          weekCell.officeSharePct = weekCell.totalTrackedHours > 0
+            ? Math.min(100, Math.round((weekCell.totalOfficeHours / weekCell.totalTrackedHours) * 100))
+            : 0;
+        }
+
+        const officeDayCount = days.length;
+        const shortDays = days.filter((day) => day.isShort);
+        const shortOfficeLongWorkdayCount = shortDays.filter((day) => day.activeHours >= FULL_WORKDAY_ACTIVE_HOURS).length;
+        const totalOfficeHours = roundToTenth(days.reduce((sum, day) => sum + day.officeHours, 0));
+        const totalRemoteHours = roundToTenth(days.reduce((sum, day) => sum + day.remoteHours, 0));
+        const totalTrackedHours = roundToTenth(days.reduce((sum, day) => sum + day.activeHours, 0));
+        const totalTbsReportedHours = roundToTenth(days.reduce((sum, day) => sum + day.tbsReportedHours, 0));
+
+        return {
+          id: row.id,
+          label: row.label,
+          secondary: row.secondary,
+          email: row.email,
+          managerName: row.managerName,
+          officeLocation: row.officeLocation,
+          remoteWorkStatusLabel: row.remoteWorkStatusLabel,
+          hasActivTrakCoverage: row.hasActivTrakCoverage,
+          hasStandingWfhPolicy: row.hasStandingWfhPolicy,
+          hasAnyApprovedWfhCoverageInRange: row.hasAnyApprovedWfhCoverageInRange,
+          displayRow: row,
+          officeDayCount,
+          shortOfficeDayCount: shortDays.length,
+          shortOfficeLongWorkdayCount,
+          shortOfficeDayRate: officeDayCount > 0 ? Math.round((shortDays.length / officeDayCount) * 100) : 0,
+          avgOfficeDayHours: officeDayCount > 0 ? roundToTenth(totalOfficeHours / officeDayCount) : null,
+          avgRemoteDayHours: officeDayCount > 0 ? roundToTenth(totalRemoteHours / officeDayCount) : null,
+          avgTotalDayHours: officeDayCount > 0 ? roundToTenth(totalTrackedHours / officeDayCount) : null,
+          avgTbsReportedHours: officeDayCount > 0 ? roundToTenth(totalTbsReportedHours / officeDayCount) : null,
+          officeSharePct: totalTrackedHours > 0 ? Math.min(100, Math.round((totalOfficeHours / totalTrackedHours) * 100)) : 0,
+          totalOfficeHours,
+          totalRemoteHours,
+          totalTrackedHours,
+          weeks: weekly,
+          days: days.sort((a, b) => a.date.localeCompare(b.date)),
+          shortDays,
+        };
+      })
+      .filter((row) => row.officeDayCount > 0);
+  }, [displayRows, isAggregateView, shortOfficeDayThreshold, weeks]);
+
+  const officeWindowRows = useMemo(() => {
+    const direction = officeWindowSortDir === 'asc' ? 1 : -1;
+    return [...officeDayHourRows].sort((left, right) => {
+      let comparison = 0;
+      if (officeWindowSortKey === 'name') comparison = left.label.localeCompare(right.label);
+      else if (officeWindowSortKey === 'officeDayCount') comparison = left.officeDayCount - right.officeDayCount;
+      else if (officeWindowSortKey === 'avgOfficeDayHours') comparison = compareMaybeNumber(left.avgOfficeDayHours, right.avgOfficeDayHours, direction);
+      else if (officeWindowSortKey === 'avgRemoteDayHours') comparison = compareMaybeNumber(left.avgRemoteDayHours, right.avgRemoteDayHours, direction);
+      else if (officeWindowSortKey === 'officeSharePct') comparison = left.officeSharePct - right.officeSharePct;
+
+      if (comparison !== 0) return officeWindowSortKey.startsWith('avg') ? comparison : direction * comparison;
+      return left.label.localeCompare(right.label);
+    });
+  }, [officeDayHourRows, officeWindowSortDir, officeWindowSortKey]);
+
+  const selectedOfficeWindowRow = useMemo(
+    () => officeDayHourRows.find((row) => row.id === selectedOfficeWindowEmployeeId) ?? null,
+    [officeDayHourRows, selectedOfficeWindowEmployeeId],
+  );
+
+  useEffect(() => {
+    if (!selectedOfficeWindowEmployeeId) return;
+    if (!officeDayHourRows.some((row) => row.id === selectedOfficeWindowEmployeeId)) {
+      setSelectedOfficeWindowEmployeeId(null);
+    }
+  }, [officeDayHourRows, selectedOfficeWindowEmployeeId]);
+
+  const detailOfficeDayHourRows = useMemo(
+    () => selectedOfficeWindowRow ? [selectedOfficeWindowRow] : officeDayHourRows,
+    [officeDayHourRows, selectedOfficeWindowRow],
+  );
+
+  const sortedOfficeDayHourRows = useMemo(() => {
+    const direction = sortDir === 'asc' ? 1 : -1;
+    return [...detailOfficeDayHourRows].sort((left, right) => {
+      if (sortKey === 'name') return direction * left.label.localeCompare(right.label);
+      if (sortKey === 'department') return direction * left.secondary.localeCompare(right.secondary);
+      if (sortKey === 'officeLocation') return direction * left.officeLocation.localeCompare(right.officeLocation);
+      if (sortKey === 'total') return direction * (left.officeDayCount - right.officeDayCount);
+      if (sortKey === 'avgPerWeek' || sortKey === 'avgOfficeDayHours') return compareMaybeNumber(left.avgOfficeDayHours, right.avgOfficeDayHours, direction);
+      if (sortKey === 'avgRemoteDayHours') return compareMaybeNumber(left.avgRemoteDayHours, right.avgRemoteDayHours, direction);
+      if (sortKey === 'officeSharePct') return direction * (left.officeSharePct - right.officeSharePct);
+      return left.label.localeCompare(right.label);
+    });
+  }, [detailOfficeDayHourRows, sortDir, sortKey]);
+
+  const officeDayHoursSummary = useMemo(() => {
+    const bucketSeeds: OfficeDayHoursBucket[] = [
+      { key: 'lt2', label: '<2h', count: 0, percent: 0 },
+      { key: '2to4', label: '2-4h', count: 0, percent: 0 },
+      { key: '4to6', label: '4-6h', count: 0, percent: 0 },
+      { key: '6to8', label: '6-8h', count: 0, percent: 0 },
+      { key: 'gte8', label: '8h+', count: 0, percent: 0 },
+    ];
+    let officeDayCount = 0;
+    let shortOfficeDayCount = 0;
+    let shortOfficeLongWorkdayCount = 0;
+    let totalOfficeHours = 0;
+    let totalRemoteHours = 0;
+    let totalTrackedHours = 0;
+
+    for (const row of officeDayHourRows) {
+      officeDayCount += row.officeDayCount;
+      shortOfficeDayCount += row.shortOfficeDayCount;
+      shortOfficeLongWorkdayCount += row.shortOfficeLongWorkdayCount;
+      totalOfficeHours += row.totalOfficeHours;
+      totalRemoteHours += row.totalRemoteHours;
+      totalTrackedHours += row.totalTrackedHours;
+      for (const day of row.days) {
+        if (day.officeHours < 2) bucketSeeds[0]!.count += 1;
+        else if (day.officeHours < 4) bucketSeeds[1]!.count += 1;
+        else if (day.officeHours < 6) bucketSeeds[2]!.count += 1;
+        else if (day.officeHours < 8) bucketSeeds[3]!.count += 1;
+        else bucketSeeds[4]!.count += 1;
+      }
+    }
+
+    const buckets = bucketSeeds.map((bucket) => ({
+      ...bucket,
+      percent: officeDayCount > 0 ? Math.round((bucket.count / officeDayCount) * 100) : 0,
+    }));
+
+    return {
+      employeeCount: officeDayHourRows.length,
+      impactedEmployeeCount: officeDayHourRows.filter((row) => row.shortOfficeDayCount > 0).length,
+      officeDayCount,
+      shortOfficeDayCount,
+      shortOfficeLongWorkdayCount,
+      shortOfficeDayRate: officeDayCount > 0 ? Math.round((shortOfficeDayCount / officeDayCount) * 100) : 0,
+      avgOfficeHours: officeDayCount > 0 ? roundToTenth(totalOfficeHours / officeDayCount) : null,
+      avgRemoteHours: officeDayCount > 0 ? roundToTenth(totalRemoteHours / officeDayCount) : null,
+      avgTotalHours: officeDayCount > 0 ? roundToTenth(totalTrackedHours / officeDayCount) : null,
+      officeSharePct: totalTrackedHours > 0 ? Math.min(100, Math.round((totalOfficeHours / totalTrackedHours) * 100)) : 0,
+      buckets,
+    };
+  }, [officeDayHourRows]);
+
   const filteredSummary = useMemo(
     () => buildFilteredAttendanceSummary({
       filteredRows: filtered,
@@ -678,9 +1051,14 @@ export function AttendanceClient({
   );
   const hasRequestResults = filteredRemoteWorkRequests.length > 0 || filteredWorkAbroadRequests.length > 0;
 
-  const activeRowsCount = isApprovedRemoteWorkView ? combinedApprovalRequests.length : sorted.length;
+  const activeRowsCount = isApprovedRemoteWorkView
+    ? combinedApprovalRequests.length
+    : isOfficeDayHoursView
+      ? sortedOfficeDayHourRows.length
+      : sorted.length;
   const totalPages = Math.max(1, Math.ceil(activeRowsCount / PAGE_SIZE));
   const pageRows = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const pageOfficeDayHourRows = sortedOfficeDayHourRows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   const activeFilterCount =
     (search ? 1 : 0) +
     (selectedDepts.length > 0 ? 1 : 0) +
@@ -767,6 +1145,38 @@ export function AttendanceClient({
   };
 
   const exportCSV = () => {
+    if (isOfficeDayHoursView) {
+      const headers = [
+        'Employee',
+        'Department',
+        'Email',
+        'Manager',
+        'Location',
+        'Office Days',
+        'Avg In Office Hours',
+        'Avg Home/Other Hours',
+        'Office Share %',
+        'Short Office Days',
+        ...weeks.map((week) => getWeekLabel(week)),
+      ];
+      const rows = sortedOfficeDayHourRows.map((row) => [
+        row.label,
+        row.secondary,
+        row.email || '',
+        row.managerName || '',
+        row.officeLocation,
+        row.officeDayCount,
+        row.avgOfficeDayHours?.toFixed(1) ?? '',
+        row.avgRemoteDayHours?.toFixed(1) ?? '',
+        row.officeSharePct,
+        row.shortOfficeDayCount,
+        ...weeks.map((week) => formatOfficeWeekCellExportValue(row.weeks[week])),
+      ]);
+      const csv = [toCsvRow(headers), ...rows.map(toCsvRow)].join('\n');
+      downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), `office-day-hours-${startDate}-${endDate}.csv`);
+      return;
+    }
+
     if (isApprovedRemoteWorkView) {
       const csv = buildApprovalRequestCsvContent(approvalExportData);
       downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), `office-attendance-approved-coverage-requests-${startDate}-${endDate}.csv`);
@@ -792,6 +1202,74 @@ export function AttendanceClient({
         worksheet.getColumn(index + 1).width = width;
       });
     };
+
+    if (isOfficeDayHoursView) {
+      const headers = [
+        'Employee',
+        'Department',
+        'Email',
+        'Manager',
+        'Location',
+        'Office Days',
+        'Avg In Office Hrs',
+        'Avg Home/Other Hrs',
+        'Office Share %',
+        'Short Office Days',
+        ...weeks.map((week) => getWeekLabel(week)),
+      ];
+      styleHeaderRow(ws.addRow(headers));
+      sortedOfficeDayHourRows.forEach((rowData) => {
+        ws.addRow([
+          rowData.label,
+          rowData.secondary,
+          rowData.email || '',
+          rowData.managerName || '',
+          rowData.officeLocation,
+          rowData.officeDayCount,
+          rowData.avgOfficeDayHours ?? '',
+          rowData.avgRemoteDayHours ?? '',
+          rowData.officeSharePct,
+          rowData.shortOfficeDayCount,
+          ...weeks.map((week) => formatOfficeWeekCellExportValue(rowData.weeks[week])),
+        ]);
+      });
+      applyColumnWidths(ws, [24, 28, 28, 24, 24, 14, 16, 18, 14, 16, ...weeks.map(() => 34)]);
+
+      const detailSheet = wb.addWorksheet('Daily Office Detail');
+      styleHeaderRow(detailSheet.addRow([
+        'Employee',
+        'Date',
+        'Week',
+        'Office Hours',
+        'Home/Other Hours',
+        'Total Active Hours',
+        'Office Share %',
+        'Office Window Start',
+        'Office Window End',
+        'Office IP Matches',
+      ]));
+      sortedOfficeDayHourRows.forEach((rowData) => {
+        rowData.days.forEach((day) => {
+          detailSheet.addRow([
+            rowData.label,
+            day.date,
+            day.weekLabel,
+            day.officeHours,
+            day.remoteHours,
+            day.activeHours,
+            getOfficeDaySharePct(day),
+            day.officeFirstActivityAt || '',
+            day.officeLastActivityAt || '',
+            day.officeIpMatches || '',
+          ]);
+        });
+      });
+      applyColumnWidths(detailSheet, [24, 14, 18, 14, 16, 18, 14, 22, 22, 28]);
+
+      const buffer = await wb.xlsx.writeBuffer();
+      downloadBlob(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `office-day-hours-${startDate}-${endDate}.xlsx`);
+      return;
+    }
 
     if (isApprovedRemoteWorkView) {
       styleHeaderRow(ws.addRow(approvalExportData.sheet.headers));
@@ -832,14 +1310,16 @@ export function AttendanceClient({
     downloadBlob(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `office-attendance-${startDate}-${endDate}-${viewMode}.xlsx`);
   };
 
-  const resultLabel = isApprovedRemoteWorkView ? 'requests' : isAggregateView ? aggregatePluralLabel : 'employees';
+  const resultLabel = isApprovedRemoteWorkView ? 'requests' : isOfficeDayHoursView ? 'employees with office days' : isAggregateView ? aggregatePluralLabel : 'employees';
   const primaryMetricLabel = isApprovedRemoteWorkView
     ? 'Request Records'
+    : isOfficeDayHoursView
+      ? 'Office Days'
     : isAggregateView
       ? currentView.label
       : 'Employees';
-  const averageMetricLabel = isApprovedRemoteWorkView ? 'Employees' : isAggregateView ? 'Avg Office Days/Emp/Week' : 'Avg Office Days/Week';
-  const zeroMetricLabel = isApprovedRemoteWorkView ? 'Work Abroad Requests' : isAggregateView ? `Zero-Office ${aggregateLabel}s` : 'Zero Office Days';
+  const averageMetricLabel = isApprovedRemoteWorkView ? 'Employees' : isOfficeDayHoursView ? 'Avg In Office Hours' : isAggregateView ? 'Avg Office Days/Emp/Week' : 'Avg Office Days/Week';
+  const zeroMetricLabel = isApprovedRemoteWorkView ? 'Work Abroad Requests' : isOfficeDayHoursView ? 'Short Office Days' : isAggregateView ? `Zero-Office ${aggregateLabel}s` : 'Zero Office Days';
 
   const SortHeader = ({
     label,
@@ -862,6 +1342,28 @@ export function AttendanceClient({
     );
   };
 
+  const OfficeWindowSortHeader = ({
+    label,
+    colKey,
+    align = 'left',
+  }: {
+    label: string;
+    colKey: OfficeWindowSortKey;
+    align?: 'left' | 'center' | 'right';
+  }) => {
+    const alignClass =
+      align === 'center' ? 'text-center' : align === 'right' ? 'text-right' : 'text-left';
+    const active = officeWindowSortKey === colKey;
+    return (
+      <th
+        className={`cursor-pointer select-none whitespace-nowrap px-3 py-3 ${alignClass} text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900`}
+        onClick={() => handleOfficeWindowSort(colKey)}
+      >
+        {label} {active ? (officeWindowSortDir === 'asc' ? '↑' : '↓') : ''}
+      </th>
+    );
+  };
+
   return (
     <div className="space-y-6">
       <div className="space-y-6">
@@ -870,8 +1372,10 @@ export function AttendanceClient({
               <h2 className="text-[15px] font-semibold text-gray-900">{currentView.label}</h2>
               <p className="mt-0.5 text-[12px] text-gray-500">
                 {isApprovedRemoteWorkView
-                  ? 'Approved remote-work and work-abroad request records synced from Oracle. Use the approval fields to distinguish approved vs pending requests.'
-                  : isAggregateView
+                  ? 'Bamboo remote-work and work-abroad request records with approval and authorization status.'
+                  : isOfficeDayHoursView
+                    ? 'One row per employee with per-day office hours, home/other hours, and office share by week.'
+                    : isAggregateView
                     ? `Weekly compliance is based on Quebec employees meeting the adjusted office target after approved week-level coverage and PTO exceptions.`
                     : `${currentView.description} Target ${OFFICE_DAYS_REQUIRED} office days per week.`}
               </p>
@@ -1150,7 +1654,7 @@ export function AttendanceClient({
             </div>
             {!isAggregateView && !isApprovedRemoteWorkView && (
               <div className="w-full md:w-56">
-                <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Approved Coverage</label>
+                <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Authorized WFH</label>
                 <select
                   value={wfhFilter}
                   onChange={(e) => {
@@ -1161,7 +1665,7 @@ export function AttendanceClient({
                 >
                   <option value="all">All Employees</option>
                   <option value="standard-only">Only Standard Policy</option>
-                  <option value="approved-only">Only Approved Coverage</option>
+                  <option value="approved-only">Only Authorized WFH</option>
                 </select>
               </div>
             )}
@@ -1170,7 +1674,7 @@ export function AttendanceClient({
                 onClick={() => {
                   setSearch('');
                   setSelectedDepts([]);
-                  setSelectedLocs(viewMode === 'employees' && locations.includes(DEFAULT_EMPLOYEE_LOCATION) ? [DEFAULT_EMPLOYEE_LOCATION] : []);
+                  setSelectedLocs((viewMode === 'employees' || viewMode === 'office-day-hours') && locations.includes(DEFAULT_EMPLOYEE_LOCATION) ? [DEFAULT_EMPLOYEE_LOCATION] : []);
                   setWfhFilter('all');
                   setPage(0);
                 }}
@@ -1181,6 +1685,145 @@ export function AttendanceClient({
             )}
           </div>
 
+          {isOfficeDayHoursView ? (
+            <div className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+                <div className="rounded-xl border border-gray-200 bg-white p-4">
+                  <p className="text-[11px] font-medium text-gray-500">Office Days</p>
+                  <p className="mt-1 text-[22px] font-semibold text-gray-900">{officeDayHoursSummary.officeDayCount}</p>
+                  <p className="mt-1 text-[11px] text-gray-400">{officeDayHoursSummary.employeeCount} employee{officeDayHoursSummary.employeeCount === 1 ? '' : 's'}</p>
+                </div>
+                <div className="rounded-xl border border-gray-200 bg-white p-4">
+                  <p className="text-[11px] font-medium text-gray-500">Avg In Office Hours</p>
+                  <p className="mt-1 text-[22px] font-semibold text-gray-900">{formatHoursValue(officeDayHoursSummary.avgOfficeHours)}</p>
+                  <p className="mt-1 text-[11px] text-gray-400">Avg total {formatHoursValue(officeDayHoursSummary.avgTotalHours)}</p>
+                </div>
+                <div className="rounded-xl border border-gray-200 bg-white p-4">
+                  <p className="text-[11px] font-medium text-gray-500">Home/Other / Office Day</p>
+                  <p className="mt-1 text-[22px] font-semibold text-gray-900">{formatHoursValue(officeDayHoursSummary.avgRemoteHours)}</p>
+                  <p className="mt-1 text-[11px] text-gray-400">{officeDayHoursSummary.officeSharePct}% office share</p>
+                </div>
+                <div className="rounded-xl border border-gray-200 bg-white p-4">
+                  <p className="text-[11px] font-medium text-gray-500">Short Office Days</p>
+                  <p className={`mt-1 text-[22px] font-semibold ${officeDayHoursSummary.shortOfficeDayCount > 0 ? 'text-red-600' : 'text-gray-900'}`}>
+                    {officeDayHoursSummary.shortOfficeDayCount}
+                  </p>
+                  <p className="mt-1 text-[11px] text-gray-400">{officeDayHoursSummary.shortOfficeDayRate}% below {shortOfficeDayThreshold}h office</p>
+                </div>
+                <div className="rounded-xl border border-gray-200 bg-white p-4">
+                  <label className="block text-[11px] font-medium text-gray-500">Short-Day Threshold</label>
+                  <select
+                    value={String(shortOfficeDayThreshold)}
+                    onChange={(event) => changeShortOfficeDayThreshold(event.target.value)}
+                    className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
+                  >
+                    {SHORT_OFFICE_DAY_THRESHOLD_OPTIONS.map((option) => (
+                      <option key={option} value={option}>{option} hours</option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-[11px] text-gray-400">{officeDayHoursSummary.shortOfficeLongWorkdayCount} were {FULL_WORKDAY_ACTIVE_HOURS}h+ total workdays</p>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-gray-200 bg-white p-4">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h3 className="text-[13px] font-semibold text-gray-900">Office-Time Spread</h3>
+                    <p className="text-[11px] text-gray-400">Distribution of office hours on days that counted as office days.</p>
+                  </div>
+                  <p className="text-[11px] text-gray-400">{officeDayHoursSummary.impactedEmployeeCount} employee{officeDayHoursSummary.impactedEmployeeCount === 1 ? '' : 's'} with at least one short office day</p>
+                </div>
+                <div className="mt-4 grid gap-2 sm:grid-cols-5">
+                  {officeDayHoursSummary.buckets.map((bucket) => (
+                    <div key={bucket.key} className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                      <p className="text-[11px] font-medium text-gray-500">{bucket.label}</p>
+                      <p className="mt-1 text-[18px] font-semibold text-gray-900">{bucket.count}</p>
+                      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-200">
+                        <div className="h-full rounded-full bg-gray-900" style={{ width: `${bucket.percent}%` }} />
+                      </div>
+                      <p className="mt-1 text-[10px] text-gray-400">{bucket.percent}%</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-gray-200 bg-white">
+                <div className="flex flex-col gap-1 border-b border-gray-100 px-4 py-3 sm:flex-row sm:items-end sm:justify-between">
+                  <div>
+                    <h3 className="text-[13px] font-semibold text-gray-900">Office Windows</h3>
+                    <p className="text-[11px] text-gray-400">Average office and home/other time on office days in the selected period.</p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-[11px] text-gray-400">{officeWindowRows.length} employees</p>
+                    {selectedOfficeWindowRow ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedOfficeWindowEmployeeId(null);
+                          setPage(0);
+                        }}
+                        className="rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
+                      >
+                        Clear selection
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="max-h-[24rem] overflow-auto">
+                  <table className="min-w-full border-collapse">
+                    <thead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:bg-white/95 [&_th]:backdrop-blur">
+                      <tr className="border-b border-gray-100">
+                        <OfficeWindowSortHeader label="Employee" colKey="name" />
+                        <OfficeWindowSortHeader label="Office Days" colKey="officeDayCount" align="right" />
+                        <OfficeWindowSortHeader label="Avg In Office Hours" colKey="avgOfficeDayHours" align="right" />
+                        <OfficeWindowSortHeader label="Home/Other Hours" colKey="avgRemoteDayHours" align="right" />
+                        <OfficeWindowSortHeader label="Office vs Home" colKey="officeSharePct" />
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {officeWindowRows.map((row) => {
+                        const selected = selectedOfficeWindowEmployeeId === row.id;
+                        const homeSharePct = Math.max(0, 100 - row.officeSharePct);
+                        return (
+                          <tr
+                            key={row.id}
+                            onClick={() => {
+                              setSelectedOfficeWindowEmployeeId(selected ? null : row.id);
+                              setPage(0);
+                            }}
+                            className={`cursor-pointer hover:bg-gray-50 ${selected ? 'bg-gray-100' : 'bg-white'}`}
+                          >
+                            <td className="px-4 py-2.5">
+                              <p className="text-[13px] font-medium text-gray-900">{row.label}</p>
+                              <p className="text-[11px] text-gray-400">{row.secondary}</p>
+                            </td>
+                            <td className="px-3 py-2.5 text-right text-[12px] font-semibold text-gray-900">{row.officeDayCount}</td>
+                            <td className={`px-3 py-2.5 text-right text-[12px] font-semibold ${row.avgOfficeDayHours !== null && row.avgOfficeDayHours < shortOfficeDayThreshold ? 'text-red-600' : 'text-gray-900'}`}>
+                              {formatHoursValue(row.avgOfficeDayHours)}
+                            </td>
+                            <td className="px-3 py-2.5 text-right text-[12px] text-gray-600">{formatHoursValue(row.avgRemoteDayHours)}</td>
+                            <td className="px-4 py-2.5">
+                              <div className="flex items-center justify-between gap-3 text-[12px]">
+                                <span className="font-semibold text-gray-900">{formatPercentValue(row.officeSharePct)} office</span>
+                                <span className="text-gray-500">{formatPercentValue(homeSharePct)} home</span>
+                              </div>
+                              <div className="mt-1.5 flex h-2 overflow-hidden rounded-full bg-gray-100">
+                                <div className="h-full bg-gray-900" style={{ width: `${row.officeSharePct}%` }} />
+                                <div className="h-full bg-amber-200" style={{ width: `${homeSharePct}%` }} />
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {officeWindowRows.length === 0 ? (
+                        <tr><td colSpan={5} className="px-4 py-6 text-center text-[12px] text-gray-400">No office-day hours in this range.</td></tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          ) : (
           <div className="grid gap-4 sm:grid-cols-4">
             <div className="rounded-xl border border-gray-200 bg-white p-4">
               <p className="text-[11px] font-medium text-gray-500">{primaryMetricLabel}</p>
@@ -1238,13 +1881,14 @@ export function AttendanceClient({
               )}
             </div>
           </div>
+          )}
 
           <div className="flex items-center justify-between text-[12px] text-gray-500">
-            <span>{activeRowsCount} {resultLabel} {hasFilters ? '(filtered)' : ''}</span>
+            <span>{activeRowsCount} {resultLabel} {hasFilters || selectedOfficeWindowRow ? '(filtered)' : ''}</span>
             <span>{isApprovedRemoteWorkView ? 'Combined request tables' : `Page ${page + 1} of ${totalPages}`}</span>
           </div>
 
-          {showScrollRail && !isApprovedRemoteWorkView ? (
+          {showScrollRail && !isApprovedRemoteWorkView && !isOfficeDayHoursView ? (
             <div className="sticky top-20 z-20 -mb-2 hidden md:block">
               <div className="rounded-xl border border-gray-200 bg-white/95 px-3 py-2 shadow-sm backdrop-blur">
                 <div className="mb-1 flex items-center justify-between text-[10px] font-medium uppercase tracking-wider text-gray-400">
@@ -1292,8 +1936,8 @@ export function AttendanceClient({
                                 <p className="mt-1 text-[12px] font-semibold text-gray-900">{formatOptionalDate(request.requestDate)}</p>
                               </div>
                               <div className="rounded-lg bg-gray-50 px-3 py-2">
-                                <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Approval</p>
-                                <p className="mt-1 text-[12px] font-semibold text-gray-900">{request.managerApprovalReceived || '—'}</p>
+                                <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Authorization</p>
+                                <p className="mt-1 text-[12px] font-semibold text-gray-900">{request.authorizationStatusLabel || 'Approval Missing'}</p>
                               </div>
                               <div className="rounded-lg bg-gray-50 px-3 py-2">
                                 <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Start</p>
@@ -1302,6 +1946,14 @@ export function AttendanceClient({
                               <div className="rounded-lg bg-gray-50 px-3 py-2">
                                 <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">End</p>
                                 <p className="mt-1 text-[12px] font-semibold text-gray-900">{formatOptionalDate(request.remoteWorkEndDate)}</p>
+                              </div>
+                              <div className="rounded-lg bg-gray-50 px-3 py-2">
+                                <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Manager Approval</p>
+                                <p className="mt-1 text-[12px] font-semibold text-gray-900">{request.managerApprovalReceived || '—'}</p>
+                              </div>
+                              <div className="rounded-lg bg-gray-50 px-3 py-2">
+                                <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Standing WFH</p>
+                                <p className="mt-1 text-[12px] font-semibold text-gray-900">{request.remoteWorkdayPolicyAssigned ? 'Yes' : 'No'}</p>
                               </div>
                             </div>
 
@@ -1377,7 +2029,96 @@ export function AttendanceClient({
             </div>
           ) : null}
 
-          {!isApprovedRemoteWorkView ? (
+          {isOfficeDayHoursView ? (
+            <div className="rounded-xl border border-gray-200 bg-white md:hidden">
+              {detailOfficeDayHourRows.length === 0 ? (
+                <div className="p-12 text-center text-[13px] text-gray-500">No {resultLabel} match filters.</div>
+              ) : (
+                <div className="divide-y divide-gray-100">
+                  {pageOfficeDayHourRows.map((row) => (
+                    <article key={row.id} className="space-y-4 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <button
+                            type="button"
+                            onClick={() => setDetail({ row: row.displayRow })}
+                            className="truncate text-left text-[14px] font-semibold text-gray-900 hover:underline"
+                          >
+                            {row.label}
+                          </button>
+                          <p className="mt-1 text-[12px] text-gray-500">{row.secondary}</p>
+                          <p className="mt-0.5 text-[12px] text-gray-500">{row.officeLocation}</p>
+                        </div>
+                        <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-medium ${row.shortOfficeDayCount > 0 ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
+                          {row.shortOfficeDayCount} short
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="rounded-lg bg-gray-50 px-3 py-2">
+                          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Office Days</p>
+                          <p className="mt-1 text-[16px] font-semibold text-gray-900">{row.officeDayCount}</p>
+                        </div>
+                        <div className="rounded-lg bg-gray-50 px-3 py-2">
+                          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Office Share</p>
+                          <p className="mt-1 text-[16px] font-semibold text-gray-900">{row.officeSharePct}%</p>
+                        </div>
+                        <div className="rounded-lg bg-gray-50 px-3 py-2">
+                          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Avg In Office</p>
+                          <p className="mt-1 text-[16px] font-semibold text-gray-900">{formatHoursValue(row.avgOfficeDayHours)}</p>
+                        </div>
+                        <div className="rounded-lg bg-gray-50 px-3 py-2">
+                          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">Avg Home/Other</p>
+                          <p className="mt-1 text-[16px] font-semibold text-gray-900">{formatHoursValue(row.avgRemoteDayHours)}</p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        {weeks.map((week) => {
+                          const cell = row.weeks[week] ?? createOfficeDayHoursWeekCell(week);
+                          const tone = getOfficeWeekCellTone(cell, shortOfficeDayThreshold);
+                          return (
+                            <div key={week} className={`rounded-lg border px-3 py-2 ${tone}`}>
+                              <div className="flex items-center justify-between gap-3">
+                                <p className="text-[11px] font-medium text-gray-700">{getWeekLabel(week)}</p>
+                                <p className="text-[10px] font-medium text-gray-500">
+                                  {cell.officeDayCount > 0
+                                    ? `${cell.officeDayCount} office day${cell.officeDayCount === 1 ? '' : 's'}`
+                                    : 'No office days'}
+                                </p>
+                              </div>
+                              {cell.officeDayCount > 0 ? (
+                                <div className="mt-2 space-y-1.5">
+                                  {cell.days.map((day) => {
+                                    const dayOfficeSharePct = getOfficeDaySharePct(day);
+                                    return (
+                                      <div key={day.date} className="rounded-md bg-white/70 px-2 py-1.5">
+                                        <div className="flex items-center justify-between gap-2">
+                                          <span className="text-[11px] font-medium text-gray-700">{formatCompactDayLabel(day.date)}</span>
+                                          <span className={`text-[11px] font-semibold tabular-nums ${day.isShort ? 'text-red-600' : 'text-gray-900'}`}>
+                                            {formatHoursValue(day.officeHours)} / {dayOfficeSharePct}%
+                                          </span>
+                                        </div>
+                                        <div className="mt-1 h-1 overflow-hidden rounded-full bg-gray-200">
+                                          <div className="h-full rounded-full bg-green-600" style={{ width: `${dayOfficeSharePct}%` }} />
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          {!isApprovedRemoteWorkView && !isOfficeDayHoursView ? (
             <div className="rounded-xl border border-gray-200 bg-white md:hidden">
               {sorted.length === 0 ? (
               <div className="p-12 text-center text-[13px] text-gray-500">No {resultLabel} match filters.</div>
@@ -1587,7 +2328,9 @@ export function AttendanceClient({
                             <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Type</th>
                             <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Supporting Docs</th>
                             <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Alternate In-Office Date</th>
-                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Approval</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Authorization</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Manager Approval</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Standing WFH</th>
                             <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Approver</th>
                           </tr>
                         </thead>
@@ -1605,7 +2348,9 @@ export function AttendanceClient({
                               <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.remoteWorkType || '—'}</td>
                               <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.supportingDocumentationSubmitted || '—'}</td>
                               <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.alternateInOfficeWorkDate || '—'}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] font-medium text-gray-900">{request.authorizationStatusLabel || 'Approval Missing'}</td>
                               <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.managerApprovalReceived || '—'}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.remoteWorkdayPolicyAssigned ? 'Yes' : 'No'}</td>
                               <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.managerName || '—'}</td>
                             </tr>
                           ))}
@@ -1670,7 +2415,100 @@ export function AttendanceClient({
             </div>
           ) : null}
 
-          {!isApprovedRemoteWorkView ? (
+          {isOfficeDayHoursView ? (
+            <div className="hidden rounded-xl border border-gray-200 bg-white md:block">
+              <div className="max-h-[70vh] overflow-auto">
+                <table className="min-w-[1180px] border-collapse">
+                  <thead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:bg-white/95 [&_th]:backdrop-blur">
+                    <tr className="border-b border-gray-100">
+                      <th
+                        className="sticky left-0 z-10 cursor-pointer select-none whitespace-nowrap bg-white px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900"
+                        onClick={() => handleSort('name')}
+                      >
+                        Employee {sortKey === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : ''}
+                      </th>
+                      <SortHeader label="Dept" colKey="department" />
+                      <SortHeader label="Office Days" colKey="total" align="right" />
+                      <SortHeader label="Avg In Office" colKey="avgOfficeDayHours" align="right" />
+                      <SortHeader label="Office Share" colKey="officeSharePct" align="right" />
+                      {weeks.map((week) => (
+                        <th key={week} className="min-w-52 whitespace-nowrap px-3 py-3 text-center text-[10px] font-medium uppercase tracking-wider text-gray-500">
+                          {getWeekLabel(week)}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {pageOfficeDayHourRows.map((row) => (
+                      <tr key={row.id} className="hover:bg-gray-50">
+                        <td className="sticky left-0 z-10 bg-white px-4 py-2">
+                          <button
+                            type="button"
+                            onClick={() => setDetail({ row: row.displayRow })}
+                            className="whitespace-nowrap text-[13px] font-medium text-gray-900 hover:underline"
+                          >
+                            {row.label}
+                          </button>
+                          <div className="mt-0.5 text-[11px] text-gray-400">{row.email}</div>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2 text-[12px] text-gray-600">{row.secondary}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-right text-[12px] font-semibold text-gray-900">{row.officeDayCount}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-right text-[12px] font-semibold text-gray-900">{formatHoursValue(row.avgOfficeDayHours)}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-right text-[12px] font-semibold text-gray-900">{formatPercentValue(row.officeSharePct)}</td>
+                        {weeks.map((week) => {
+                          const cell = row.weeks[week] ?? createOfficeDayHoursWeekCell(week);
+                          const tone = getOfficeWeekCellTone(cell, shortOfficeDayThreshold);
+                          return (
+                            <td key={week} className="min-w-52 px-2 py-2 align-top">
+                              <div className={`min-h-20 rounded-lg border px-2 py-2 ${tone}`}>
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-[11px] font-semibold">{cell.officeDayCount} day{cell.officeDayCount === 1 ? '' : 's'}</span>
+                                  <span className="text-[10px] font-medium">{formatHoursValue(cell.avgOfficeHours)} avg</span>
+                                </div>
+                                {cell.days.length > 0 ? (
+                                  <div className="mt-2 space-y-1.5">
+                                    {cell.days.map((day) => {
+                                      const officeShare = getOfficeDaySharePct(day);
+                                      const homeShare = Math.max(0, 100 - officeShare);
+                                      return (
+                                        <div key={day.date} className="rounded-md bg-white/75 px-2 py-1.5 shadow-sm">
+                                          <div className="flex items-center justify-between gap-2">
+                                            <span className="text-[10px] font-medium text-gray-600">{formatCompactDayLabel(day.date)}</span>
+                                            <span className={`text-[10px] font-semibold tabular-nums ${day.isShort ? 'text-red-600' : 'text-gray-900'}`}>
+                                              {formatHoursValue(day.officeHours)} / {officeShare}%
+                                            </span>
+                                          </div>
+                                          <div className="mt-1 flex h-1.5 overflow-hidden rounded-full bg-gray-200">
+                                            <div className="h-full bg-green-600" style={{ width: `${officeShare}%` }} />
+                                            <div className="h-full bg-amber-200" style={{ width: `${homeShare}%` }} />
+                                          </div>
+                                          <div className="mt-1 flex items-center justify-between text-[9px] text-gray-400">
+                                            <span>home {formatHoursValue(day.remoteHours)}</span>
+                                            <span>{formatActivityTime(day.officeFirstActivityAt)}-{formatActivityTime(day.officeLastActivityAt)}</span>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                ) : (
+                                  <div className="mt-3 text-center text-[11px] text-gray-400">No office days</div>
+                                )}
+                              </div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {sortedOfficeDayHourRows.length === 0 ? (
+                  <div className="p-12 text-center text-[13px] text-gray-500">No {resultLabel} match filters.</div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
+          {!isApprovedRemoteWorkView && !isOfficeDayHoursView ? (
             <div className="hidden rounded-xl border border-gray-200 bg-white md:block">
               <div ref={tableScrollRef} className="max-h-[70vh] overflow-auto">
               <table className="w-full border-collapse">
@@ -1892,7 +2730,7 @@ export function AttendanceClient({
       )}
 
       {/* Legend */}
-      {!isApprovedRemoteWorkView ? (
+      {!isApprovedRemoteWorkView && !isOfficeDayHoursView ? (
         <div className="flex flex-wrap gap-4 text-[11px] text-gray-500">
           <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.compliant}`} /> Compliant under adjusted policy</span>
           <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.partial}`} /> Below adjusted target</span>
@@ -1992,7 +2830,7 @@ export function AttendanceClient({
 
               {!isAggregateView && !isApprovedRemoteWorkView ? (
                 <div>
-                  <label className="mb-2 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Approved Coverage</label>
+                  <label className="mb-2 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Authorized WFH</label>
                   <select
                     value={wfhFilter}
                     onChange={(e) => {
@@ -2003,7 +2841,7 @@ export function AttendanceClient({
                   >
                     <option value="all">All Employees</option>
                     <option value="standard-only">Only Standard Policy</option>
-                    <option value="approved-only">Only Approved Coverage</option>
+                    <option value="approved-only">Only Authorized WFH</option>
                   </select>
                 </div>
               ) : null}
@@ -2016,7 +2854,7 @@ export function AttendanceClient({
                   onClick={() => {
                     setSearch('');
                     setSelectedDepts([]);
-                    setSelectedLocs(viewMode === 'employees' && locations.includes(DEFAULT_EMPLOYEE_LOCATION) ? [DEFAULT_EMPLOYEE_LOCATION] : []);
+                    setSelectedLocs((viewMode === 'employees' || viewMode === 'office-day-hours') && locations.includes(DEFAULT_EMPLOYEE_LOCATION) ? [DEFAULT_EMPLOYEE_LOCATION] : []);
                     setWfhFilter('all');
                     setPage(0);
                   }}

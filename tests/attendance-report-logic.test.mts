@@ -65,7 +65,7 @@ test('createAttendanceEmployeeAccumulator preserves standing and temporary appro
   );
 });
 
-test('createAttendanceEmployeeAccumulator keeps standing policy out of temporary approved coverage flag', () => {
+test('createAttendanceEmployeeAccumulator treats standing policy as authorized WFH coverage', () => {
   const email = 'alice@example.com';
   const approvalIndex = createApprovalIndex({
     standingPolicyEmails: new Set([email]),
@@ -76,8 +76,23 @@ test('createAttendanceEmployeeAccumulator keeps standing policy out of temporary
   assert.equal(employee.hasStandingWfhPolicy, true);
   assert.equal(employee.hasApprovedRemoteRequestInRange, false);
   assert.equal(employee.hasApprovedWorkAbroadRequestInRange, false);
-  assert.equal(employee.hasAnyApprovedWfhCoverageInRange, false);
+  assert.equal(employee.hasAnyApprovedWfhCoverageInRange, true);
   assert.equal(employee.remoteWorkStatusLabel, 'Standing WFH Policy');
+});
+
+test('createAttendanceEmployeeAccumulator shows Bamboo arrangements that are missing approval', () => {
+  const email = 'alice@example.com';
+  const approvalIndex = createApprovalIndex({
+    unapprovedRemoteRequestEmails: new Set([email]),
+    unapprovedRemoteWorkTypesByEmail: new Map([[email, new Set(['Permanent'])]]),
+  });
+
+  const employee = createAttendanceEmployeeAccumulator(email, createEmployeeMeta(), approvalIndex);
+
+  assert.equal(employee.hasStandingWfhPolicy, false);
+  assert.equal(employee.hasApprovedRemoteRequestInRange, false);
+  assert.equal(employee.hasAnyApprovedWfhCoverageInRange, false);
+  assert.equal(employee.remoteWorkStatusLabel, 'Bamboo Arrangement - Approval Missing (Permanent)');
 });
 
 test('ensureAttendanceEmployeeAccumulator reuses existing accumulators', () => {

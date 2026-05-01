@@ -29,6 +29,12 @@ function toDateKey(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
+function parseLocalDateTime(value: string | null | undefined): Date | null {
+  if (!value) return null;
+  const parsed = new Date(value.replace(' ', 'T'));
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 function normalizeOracleText(value: string | null | undefined): string | null {
   if (!value) return null;
   return value
@@ -261,16 +267,26 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
       PUBLIC_IP: string;
       DURATION_SECONDS: number;
       EVENT_COUNT: number;
+      FIRST_ACTIVITY_AT: Date | null;
+      LAST_ACTIVITY_AT: Date | null;
     }>();
     for (const row of officeIpActivity) {
       const email = normalizeEmailNullable(row.email);
       const publicIp = row.publicIp?.trim();
       if (!email || !publicIp) continue;
       const key = `${toDateKey(row.date)}|${email}|${publicIp}`;
+      const firstActivityAt = parseLocalDateTime(row.firstActivityAt);
+      const lastActivityAt = parseLocalDateTime(row.lastActivityAt);
       const existing = officeIpActivityByKey.get(key);
       if (existing) {
         existing.DURATION_SECONDS += row.durationSeconds || 0;
         existing.EVENT_COUNT += row.eventCount || 0;
+        if (firstActivityAt && (!existing.FIRST_ACTIVITY_AT || firstActivityAt < existing.FIRST_ACTIVITY_AT)) {
+          existing.FIRST_ACTIVITY_AT = firstActivityAt;
+        }
+        if (lastActivityAt && (!existing.LAST_ACTIVITY_AT || lastActivityAt > existing.LAST_ACTIVITY_AT)) {
+          existing.LAST_ACTIVITY_AT = lastActivityAt;
+        }
         if (!existing.DISPLAY_NAME && row.displayName) {
           existing.DISPLAY_NAME = row.displayName;
         }
@@ -283,6 +299,8 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
         PUBLIC_IP: publicIp,
         DURATION_SECONDS: row.durationSeconds || 0,
         EVENT_COUNT: row.eventCount || 0,
+        FIRST_ACTIVITY_AT: firstActivityAt,
+        LAST_ACTIVITY_AT: lastActivityAt,
       });
     }
     const officeIpActivityBinds = [...officeIpActivityByKey.values()];
@@ -290,9 +308,11 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     if (officeIpActivityBinds.length > 0) {
       await executeMany(
         `INSERT INTO TL_OFFICE_IP_ACTIVITY (
-           RECORD_DATE, EMAIL, DISPLAY_NAME, PUBLIC_IP, DURATION_SECONDS, EVENT_COUNT
+           RECORD_DATE, EMAIL, DISPLAY_NAME, PUBLIC_IP, DURATION_SECONDS, EVENT_COUNT,
+           FIRST_ACTIVITY_AT, LAST_ACTIVITY_AT
          ) VALUES (
-           :RECORD_DATE, :EMAIL, :DISPLAY_NAME, :PUBLIC_IP, :DURATION_SECONDS, :EVENT_COUNT
+           :RECORD_DATE, :EMAIL, :DISPLAY_NAME, :PUBLIC_IP, :DURATION_SECONDS, :EVENT_COUNT,
+           :FIRST_ACTIVITY_AT, :LAST_ACTIVITY_AT
          )`,
         officeIpActivityBinds,
       );

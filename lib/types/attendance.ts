@@ -5,6 +5,13 @@ export interface DayDetail {
   ptoType?: string | null;
   tbsReportedHours?: number;
   activeHours?: number;
+  officeHours?: number;
+  remoteHours?: number;
+  firstActivityAt?: string | null;
+  lastActivityAt?: string | null;
+  officeFirstActivityAt?: string | null;
+  officeLastActivityAt?: string | null;
+  officeIpMatches?: string | null;
 }
 
 export type WfhExceptionType =
@@ -68,6 +75,9 @@ export interface AttendanceRemoteWorkRequest {
   alternateInOfficeWorkDate: string | null;
   managerApprovalReceived: string | null;
   managerName: string | null;
+  remoteWorkdayPolicyAssigned?: boolean;
+  countsAsAuthorized?: boolean;
+  authorizationStatusLabel?: string;
 }
 
 export interface AttendanceWorkAbroadRequest {
