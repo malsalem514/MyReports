@@ -6,6 +6,7 @@ import {
   getAttendance,
   getTimeOff,
 } from '@/lib/dashboard-data';
+import { calculateEmployeeAttendanceSummary } from '@/lib/employee-attendance-summary';
 
 interface Params {
   email: string;
@@ -71,13 +72,14 @@ export default async function EmployeePage({
   }
   const resolvedEmployee = employee!;
 
-  let officeDays = 0, remoteDays = 0, totalHours = 0;
-  for (const r of attendance) {
-    if (r.location === 'Office') officeDays++;
-    else if (r.location === 'Remote') remoteDays++;
-    totalHours += r.totalHours;
-  }
-  const avgHours = attendance.length > 0 ? totalHours / attendance.length : 0;
+  const {
+    officeDays,
+    remoteDays,
+    totalHours,
+    workingDayCount,
+    avgHours,
+  } = calculateEmployeeAttendanceSummary(attendance, timeOff);
+  const workingDayLabel = workingDayCount === 1 ? '1 working day' : `${workingDayCount} working days`;
 
   // Weekly compliance
   const weeklyMap = new Map<string, number>();
@@ -144,6 +146,7 @@ export default async function EmployeePage({
         <div className="rounded-xl border border-gray-200 bg-white p-5">
           <p className="text-[12px] font-medium text-gray-500">Avg Hours/Day</p>
           <p className="mt-1 text-[28px] font-semibold tracking-tight text-gray-900">{avgHours.toFixed(1)}</p>
+          <p className="text-[11px] text-gray-400">{workingDayLabel}</p>
         </div>
       </div>
 
