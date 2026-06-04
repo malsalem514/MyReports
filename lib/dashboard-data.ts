@@ -878,12 +878,10 @@ export async function getAttendanceReport(
     const isApprovedRemoteWork = approvalValue === 'YES' || approvalValue === 'APPROVED';
     const hasStandingWfhPolicy = row.REMOTE_WORKDAY_POLICY_ASSIGNED === 1
       || (email ? standingPolicyEmails.has(email) : false);
-    const countsAsAuthorized = isApprovedRemoteWork || hasStandingWfhPolicy;
+    const countsAsAuthorized = isApprovedRemoteWork;
     const authorizationStatusLabel = isApprovedRemoteWork
       ? 'Approved Request'
-      : hasStandingWfhPolicy
-        ? 'Standing WFH Policy'
-        : 'Approval Missing';
+      : 'Approval Missing';
 
     if (email && isApprovedRemoteWork) {
       approvedRemoteRequestEmails.add(email);
@@ -1199,14 +1197,10 @@ export async function getAttendanceReport(
 
     for (const wk of weeks) {
       const temporaryCoverageWeekdays = getApprovedCoverageWeekdays(email, wk);
-      const hasStandingPolicyCoverage = data.hasStandingWfhPolicy;
-      const approvedCoverageWeekdays = hasStandingPolicyCoverage ? 5 : temporaryCoverageWeekdays;
-      const hasApprovedRemoteCoverage = hasStandingPolicyCoverage || hasApprovedRemoteCoverageForWeek(email, wk);
+      const approvedCoverageWeekdays = temporaryCoverageWeekdays;
+      const hasApprovedRemoteCoverage = hasApprovedRemoteCoverageForWeek(email, wk);
       const hasApprovedWorkAbroadCoverage = hasApprovedWorkAbroadCoverageForWeek(email, wk);
-      const temporaryExceptionLabel = getWeekExceptionLabel(email, wk);
-      const exceptionLabel = hasStandingPolicyCoverage
-        ? (temporaryExceptionLabel ? `Standing WFH Policy + ${temporaryExceptionLabel}` : 'Standing WFH Policy')
-        : temporaryExceptionLabel;
+      const exceptionLabel = getWeekExceptionLabel(email, wk);
       const nextCell = calculateAttendanceWeekCell({
         currentCell: data.weeks[wk],
         officeDaysRequired,
@@ -1215,7 +1209,6 @@ export async function getAttendanceReport(
         hasApprovedRemoteCoverage,
         hasApprovedWorkAbroadCoverage,
         exceptionLabel,
-        hasStandingPolicyCoverage,
       });
 
       if (nextCell.hasApprovedWfhCoverage && nextCell.adjustedOfficeTarget === 0) {

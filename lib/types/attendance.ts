@@ -17,7 +17,6 @@ export interface DayDetail {
 
 export type WfhExceptionType =
   | 'none'
-  | 'standing_policy'
   | 'temporary_partial'
   | 'temporary_full';
 

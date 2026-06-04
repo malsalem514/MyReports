@@ -72,7 +72,6 @@ export interface WeeklyAttendanceCellInput {
   hasApprovedRemoteCoverage: boolean;
   hasApprovedWorkAbroadCoverage: boolean;
   exceptionLabel: string | null;
-  hasStandingPolicyCoverage?: boolean;
 }
 
 function formatApprovalSuffix(values?: ReadonlySet<string>): string {
@@ -128,7 +127,7 @@ function getAttendanceRangeFlags(
   const hasApprovedRemoteRequestInRange = approvedRemoteWorkRequest;
   const hasApprovedWorkAbroadRequestInRange = approvalIndex.approvedWorkAbroadRequestEmails.has(email);
   const hasAnyApprovedWfhCoverageInRange =
-    hasStandingWfhPolicy || hasApprovedRemoteRequestInRange || hasApprovedWorkAbroadRequestInRange;
+    hasApprovedRemoteRequestInRange || hasApprovedWorkAbroadRequestInRange;
 
   return {
     approvedRemoteWorkRequest,
@@ -200,7 +199,6 @@ export function calculateAttendanceWeekCell({
   hasApprovedRemoteCoverage,
   hasApprovedWorkAbroadCoverage,
   exceptionLabel,
-  hasStandingPolicyCoverage = false,
 }: WeeklyAttendanceCellInput): WeekCell {
   const officeDays = currentCell?.officeDays ?? 0;
   const remoteDays = currentCell?.remoteDays ?? 0;
@@ -222,11 +220,7 @@ export function calculateAttendanceWeekCell({
 
     if (approvedCoverageWeekdays > 0) {
       targetAfterWfh = Math.max(0, officeDaysRequired - approvedCoverageWeekdays);
-      if (hasStandingPolicyCoverage) {
-        wfhExceptionType = 'standing_policy';
-      } else {
-        wfhExceptionType = targetAfterWfh === 0 ? 'temporary_full' : 'temporary_partial';
-      }
+      wfhExceptionType = targetAfterWfh === 0 ? 'temporary_full' : 'temporary_partial';
     }
 
     if (targetAfterWfh === 0) {

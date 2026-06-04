@@ -36,9 +36,9 @@ function parseLocalDateTime(value: string | null | undefined): Date | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-function normalizeOracleText(value: string | null | undefined): string | null {
+function normalizeOracleText(value: unknown): string | null {
   if (!value) return null;
-  return value
+  return String(value)
     .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
     .replace(/[\u201C\u201D\u201E]/g, '"')
     .replace(/[\u2013\u2014]/g, '-')

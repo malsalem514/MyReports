@@ -67,7 +67,7 @@ test('createAttendanceEmployeeAccumulator preserves standing and temporary appro
   );
 });
 
-test('createAttendanceEmployeeAccumulator treats standing policy as authorized WFH coverage', () => {
+test('createAttendanceEmployeeAccumulator keeps standing policy informational only', () => {
   const email = 'alice@example.com';
   const approvalIndex = createApprovalIndex({
     standingPolicyEmails: new Set([email]),
@@ -78,7 +78,7 @@ test('createAttendanceEmployeeAccumulator treats standing policy as authorized W
   assert.equal(employee.hasStandingWfhPolicy, true);
   assert.equal(employee.hasApprovedRemoteRequestInRange, false);
   assert.equal(employee.hasApprovedWorkAbroadRequestInRange, false);
-  assert.equal(employee.hasAnyApprovedWfhCoverageInRange, true);
+  assert.equal(employee.hasAnyApprovedWfhCoverageInRange, false);
   assert.equal(employee.remoteWorkStatusLabel, 'Standing WFH Policy');
 });
 
