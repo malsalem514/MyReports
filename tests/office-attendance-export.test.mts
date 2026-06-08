@@ -73,12 +73,16 @@ function createDisplayRow(overrides: Partial<DisplayRow> = {}): DisplayRow {
     hasStandingWfhPolicy: false,
     hasApprovedRemoteRequestInRange: false,
     hasApprovedWorkAbroadRequestInRange: false,
+    hasUnapprovedRemoteRequestInRange: false,
+    hasAnyAuthorizedWfhInRange: false,
+    hasAnyWfhPolicyInRange: false,
     hasAnyApprovedWfhCoverageInRange: false,
     remoteWorkStatusLabel: 'Standard Policy',
     weeks: {},
     total: 2,
     avgPerWeek: 2,
     scorePct: 100,
+    hasScoredWeeks: true,
     trend: 'flat',
     ...overrides,
   };
@@ -106,6 +110,7 @@ test('buildApprovalRequestExportData shares one header/row shape for request exp
     schedule: null,
     supportingDocumentationSubmitted: 'Yes',
     alternateInOfficeWorkDate: null,
+    alternateInOfficeWorkDateStatus: null,
   }];
 
   const exportData = buildApprovalRequestExportData(requests);
@@ -117,13 +122,13 @@ test('buildApprovalRequestExportData shares one header/row shape for request exp
   assert.equal(exportData.sheet.columnWidths[13], 24);
   assert.equal(
     toCsvRow(exportData.sheet.rows[0]!),
-    '"Remote Work","10","1","Alice ""Quoted"" Example","alice@example.com","Technology","Quebec","2026-03-01","2026-03-10","2026-03-11","Scheduled Office Day Remote Work","Approved","Approved Request","Manager Example","Family","","","Yes",""',
+    '"Remote Work","10","1","Alice ""Quoted"" Example","alice@example.com","Technology","Quebec","2026-03-01","2026-03-10","2026-03-11","Scheduled Office Day Remote Work","Approved","Approved Request","Manager Example","Family","","","Yes","",""',
   );
   assert.equal(
     buildApprovalRequestCsvContent(exportData),
     [
-      '"Source","Bamboo Row ID","Employee ID","Employee Name","Email","Department","Office Location","Request Date","Start Date","End Date","Category","Approval Status","Authorization Status","Approver","Reason","Address","Work Schedule","Supporting Documentation Submitted","Alternate In-Office Work Date"',
-      '"Remote Work","10","1","Alice ""Quoted"" Example","alice@example.com","Technology","Quebec","2026-03-01","2026-03-10","2026-03-11","Scheduled Office Day Remote Work","Approved","Approved Request","Manager Example","Family","","","Yes",""',
+      '"Source","Bamboo Row ID","Employee ID","Employee Name","Email","Department","Office Location","Request Date","Start Date","End Date","Category","Approval Status","Authorization Status","Approver","Reason","Address","Work Schedule","Supporting Documentation Submitted","Alternate In-Office Work Date","Alternate In-Office Fulfilled"',
+      '"Remote Work","10","1","Alice ""Quoted"" Example","alice@example.com","Technology","Quebec","2026-03-01","2026-03-10","2026-03-11","Scheduled Office Day Remote Work","Approved","Approved Request","Manager Example","Family","","","Yes","",""',
     ].join('\n'),
   );
 });
@@ -131,6 +136,10 @@ test('buildApprovalRequestExportData shares one header/row shape for request exp
 test('buildAttendanceExportData preserves employee export rows and week colors', () => {
   const week = '2026-03-03';
   const row = createDisplayRow({
+    hasApprovedRemoteRequestInRange: true,
+    hasAnyAuthorizedWfhInRange: true,
+    hasAnyWfhPolicyInRange: true,
+    hasAnyApprovedWfhCoverageInRange: true,
     weeks: {
       [week]: createWeekCell({
         officeDays: 1,
@@ -168,16 +177,28 @@ test('buildAttendanceExportData preserves employee export rows and week colors',
     'Standing WFH Policy',
   ]);
   assert.equal(exportData.mainSheet.summaryRow[0], '1 employees');
-  assert.equal(exportData.mainSheet.rows[0]?.[7], '1 [House]');
+  assert.equal(exportData.mainSheet.rows[0]?.[9], '1 [House]');
   assert.equal(exportData.mainSheet.rows[0]?.at(-1), 'down');
   assert.deepEqual(exportData.mainSheet.weekFillHexes[0], ['FFEDD5']);
-  assert.equal(exportData.mainSheet.weekColumnStartIndex, 7);
+  assert.equal(exportData.mainSheet.weekColumnStartIndex, 9);
+  assert.equal(exportData.legendSheet.title, 'Legend');
+  assert.equal(exportData.legendSheet.rows[0]?.[0], '[House]');
   assert.equal(exportData.detailSheet, undefined);
   assert.equal(
     buildAttendanceCsvContent(exportData),
     [
-      '"Employee","Department","Location","Coverage Status","Standing WFH Policy","Approved Coverage In Range","ActivTrak Coverage","Mar 3 - Mar 7","Total","Avg/Week","Score %","Trend"',
-      '"Alice Example","Technology","Quebec (Montreal Head Office)","Standard Policy","No","No","Covered","1 [House]","1","1","50%","down"',
+      '"Employee","Department","Location","Coverage Status","Standing WFH Policy","Temporary Remote In Range","Work Abroad Relief In Range","Approval Missing In Range","ActivTrak Coverage","Mar 3 - Mar 7","Total","Avg/Week","Score %","Trend"',
+      '"Alice Example","Technology","Quebec (Montreal Head Office)","Standard Policy","No","Yes","No","No","Covered","1 [House]","1","1","50%","down"',
+      '',
+      'Legend',
+      '"Marker","Meaning"',
+      '"[House]","Approved temporary remote-work request marker. This marker does not reduce the office target."',
+      '"[Plane]","Approved work-abroad / another-province marker. These approved weekdays reduce the office target."',
+      '"Green cell","Compliant under the adjusted target."',
+      '"Orange cell","Below the adjusted target with at least one office day."',
+      '"Red cell","No office days for a measured week."',
+      '"Blue cell","Week includes PTO."',
+      '"N/A score","No eligible measured weeks in the selected completed-week range."',
     ].join('\n'),
   );
 });

@@ -39,6 +39,9 @@ test('tab registry includes metadata for every controlled report', () => {
   assert.ok(TAB_KEYS.includes('activtrak-identities'));
   assert.equal(DASHBOARD_TAB_LABELS['activtrak-identities'], 'ActivTrak Identities');
   assert.equal(DASHBOARD_TAB_ROUTES['activtrak-identities'], '/dashboard/activtrak-identities');
+  assert.ok(TAB_KEYS.includes('duo-activtrak-reconciliation'));
+  assert.equal(DASHBOARD_TAB_LABELS['duo-activtrak-reconciliation'], 'Duo Reconciliation');
+  assert.equal(DASHBOARD_TAB_ROUTES['duo-activtrak-reconciliation'], '/dashboard/duo-activtrak-reconciliation');
 });
 
 test('fallback role defaults keep admin-only reports limited to root and HR', () => {
@@ -60,9 +63,14 @@ test('fallback role defaults keep admin-only reports limited to root and HR', ()
 test('dashboard nav exposes ActivTrak Identities through tab visibility once', () => {
   const navItems = buildDashboardNavItems([...TAB_KEYS], { isHRAdmin: true });
   const activtrakItems = navItems.filter((item) => item.key === 'activtrak-identities');
+  const duoItems = navItems.filter((item) => item.key === 'duo-activtrak-reconciliation');
 
   assert.equal(activtrakItems.length, 1);
   assert.equal(activtrakItems[0]?.label, 'ActivTrak Identities');
   assert.equal(activtrakItems[0]?.path, '/dashboard/activtrak-identities');
   assert.equal(activtrakItems[0]?.section, 'admin');
+  assert.equal(duoItems.length, 1);
+  assert.equal(duoItems[0]?.label, 'Duo Reconciliation');
+  assert.equal(duoItems[0]?.path, '/dashboard/duo-activtrak-reconciliation');
+  assert.equal(duoItems[0]?.section, 'admin');
 });

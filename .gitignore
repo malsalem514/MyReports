@@ -19,3 +19,7 @@ coverage
 .claude/
 .playwright-cli/
 output/
+docs/
+SERVER-ACCESS.md
+IT-HANDOFF.md
+NETWORK-DRIVE-SETUP.md

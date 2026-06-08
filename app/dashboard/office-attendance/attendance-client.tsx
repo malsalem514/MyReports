@@ -100,9 +100,18 @@ function getDefaultLocationSelection(
 
 function getInitialWfhFilter(searchParams: SearchParamReader): WfhFilterMode {
   const filter = searchParams.get('wfhFilter');
-  if (filter === 'standard-only' || filter === 'approved-only' || filter === 'all') {
+  if (
+    filter === 'standard-only'
+    || filter === 'authorized-only'
+    || filter === 'standing-only'
+    || filter === 'temporary-remote'
+    || filter === 'work-abroad'
+    || filter === 'approval-missing'
+    || filter === 'all'
+  ) {
     return filter;
   }
+  if (filter === 'approved-only') return 'authorized-only';
   if (searchParams.get('approvedRemoteWork') === 'include') {
     return 'all';
   }
@@ -127,6 +136,7 @@ interface OfficeDayHoursDay {
   officeFirstActivityAt: string | null;
   officeLastActivityAt: string | null;
   officeIpMatches: string | null;
+  isOfficeDay: boolean;
   isShort: boolean;
 }
 
@@ -271,6 +281,22 @@ function employeeMetricTone(isKnown: boolean, scorePct: number): string {
   return isKnown ? scoreTone(scorePct) : unknownTone();
 }
 
+function rowScoreTone(row: Pick<DisplayRow, 'hasActivTrakCoverage' | 'hasScoredWeeks' | 'scorePct'>, isAggregateView: boolean): string {
+  if (!isAggregateView && !row.hasActivTrakCoverage) return unknownTone();
+  if (!row.hasScoredWeeks) return unknownTone();
+  return scoreTone(row.scorePct);
+}
+
+function formatRowScore(row: Pick<DisplayRow, 'hasActivTrakCoverage' | 'hasScoredWeeks' | 'scorePct'>, isAggregateView: boolean): string {
+  if (!isAggregateView && !row.hasActivTrakCoverage) return UNKNOWN_DISPLAY_VALUE;
+  return row.hasScoredWeeks ? `${row.scorePct}%` : 'N/A';
+}
+
+function formatCompliancePct(compliance?: Pick<WeeklyCompliance, 'eligibleEmployees' | 'compliancePct'>): string {
+  if ((compliance?.eligibleEmployees ?? 0) <= 0) return 'N/A';
+  return `${compliance?.compliancePct ?? 0}%`;
+}
+
 function formatRangeLabel(startDate: string, endDate: string): string {
   const start = parseLocalDate(startDate);
   const end = parseLocalDate(endDate);
@@ -286,6 +312,10 @@ function getActiveLookbackWeeks(startDate: string, endDate: string): number | nu
   }
 
   return null;
+}
+
+function getMaxCompletedOfficeAttendanceDateParam(): string {
+  return toDateParam(getOfficeAttendanceDefaultRange(1).endDate);
 }
 
 function getAppliedDateFilterMode(
@@ -323,6 +353,18 @@ function formatOptionalDate(date: string | null): string {
     day: 'numeric',
     year: 'numeric',
   });
+}
+
+function getAlternateInOfficeStatusLabel(request: Pick<AttendanceRemoteWorkRequest, 'alternateInOfficeWorkDate' | 'alternateInOfficeWorkDateStatus'>): string {
+  if (!request.alternateInOfficeWorkDate) return 'No alternate date';
+  return request.alternateInOfficeWorkDateStatus || 'Unknown';
+}
+
+function alternateInOfficeStatusTone(status: string): string {
+  if (status === 'Fulfilled') return 'bg-green-50 text-green-700';
+  if (status === 'Not Fulfilled') return 'bg-red-50 text-red-700';
+  if (status === 'Pending') return 'bg-amber-50 text-amber-700';
+  return 'bg-gray-100 text-gray-600';
 }
 
 function formatCompactHours(value?: number | null): string {
@@ -393,9 +435,13 @@ function createOfficeDayHoursWeekCell(week: string): OfficeDayHoursWeekCell {
 }
 
 function formatOfficeWeekCellExportValue(cell: OfficeDayHoursWeekCell | undefined): string {
-  if (!cell || cell.officeDayCount === 0) return '';
+  if (!cell || cell.days.length === 0) return '';
   return cell.days
-    .map((day) => `${formatCompactDayLabel(day.date)}: ${formatHoursValue(day.officeWindowHours)} in office, first activity ${formatActivityTime(day.officeFirstActivityAt)}, last activity ${formatActivityTime(day.officeLastActivityAt)}, ${formatHoursValue(day.officeHours)} office activity, ${formatHoursValue(day.remoteHours)} home/other active, ${getOfficeDaySharePct(day)}% office activity`)
+    .map((day) => (
+      day.isOfficeDay
+        ? `${formatCompactDayLabel(day.date)}: ${formatHoursValue(day.officeWindowHours)} in office, first activity ${formatActivityTime(day.officeFirstActivityAt)}, last activity ${formatActivityTime(day.officeLastActivityAt)}, ${formatHoursValue(day.officeHours)} office activity, ${formatHoursValue(day.remoteHours)} home/other active, ${getOfficeDaySharePct(day)}% office activity`
+        : `${formatCompactDayLabel(day.date)}: no office activity, ${formatHoursValue(day.remoteHours)} home/other active, total active ${formatHoursValue(day.activeHours)}`
+    ))
     .join(' | ');
 }
 
@@ -485,8 +531,14 @@ export function AttendanceClient({
   const topScrollContentRef = useRef<HTMLDivElement>(null);
   const syncingScrollRef = useRef(false);
   const scoredWeeks = useMemo(
-    () => (currentWeek ? weeks.filter((week) => week !== currentWeek) : weeks),
-    [currentWeek, weeks],
+    () => {
+      const displayWeekSet = new Set(weeks);
+      const sourceWeeks = dataWeeks !== undefined
+        ? dataWeeks
+        : (currentWeek ? weeks.filter((week) => week !== currentWeek) : weeks);
+      return sourceWeeks.filter((week) => displayWeekSet.has(week));
+    },
+    [currentWeek, dataWeeks, weeks],
   );
   const syncedFields = useMemo<UrlStateField[]>(() => ([
     {
@@ -619,6 +671,7 @@ export function AttendanceClient({
   );
   const [customStartDate, setCustomStartDate] = useState(startDate);
   const [customEndDate, setCustomEndDate] = useState(endDate);
+  const maxCompletedDate = useMemo(() => getMaxCompletedOfficeAttendanceDateParam(), []);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -749,11 +802,13 @@ export function AttendanceClient({
   };
 
   const changeDates = (nextStart: string, nextEnd: string) => {
+    const boundedEnd = nextEnd > maxCompletedDate ? maxCompletedDate : nextEnd;
+    const boundedStart = nextStart > boundedEnd ? boundedEnd : nextStart;
     const params = new URLSearchParams(searchParams.toString());
     params.set('dateMode', 'custom');
     params.delete('lookbackWeeks');
-    params.set('startDate', nextStart);
-    params.set('endDate', nextEnd);
+    params.set('startDate', boundedStart);
+    params.set('endDate', boundedEnd);
     router.push(`/dashboard/office-attendance?${params.toString()}`, { scroll: false });
   };
 
@@ -838,7 +893,11 @@ export function AttendanceClient({
               : roundToTenth(Math.max(0, day.officeWindowHours));
             const activeHours = roundToTenth(Math.max(0, day.activeHours ?? 0));
             const isOfficeDay = day.location === 'Office' || officeHours > 0;
-            if (!isOfficeDay) continue;
+            const hasTrackedActivity = isOfficeDay
+              || day.location === 'Remote'
+              || activeHours > 0
+              || (day.tbsReportedHours ?? 0) > 0;
+            if (!hasTrackedActivity) continue;
 
             const remoteHours = roundToTenth(Math.max(0, day.remoteHours ?? activeHours - officeHours));
             days.push({
@@ -855,7 +914,8 @@ export function AttendanceClient({
               officeFirstActivityAt: day.officeFirstActivityAt ?? null,
               officeLastActivityAt: day.officeLastActivityAt ?? null,
               officeIpMatches: day.officeIpMatches ?? null,
-              isShort: officeWindowHours !== null && officeWindowHours < shortOfficeDayThreshold,
+              isOfficeDay,
+              isShort: isOfficeDay && officeWindowHours !== null && officeWindowHours < shortOfficeDayThreshold,
             });
           }
         }
@@ -867,9 +927,9 @@ export function AttendanceClient({
         for (const day of days) {
           if (!weekly[day.week]) weekly[day.week] = createOfficeDayHoursWeekCell(day.week);
           const weekCell = weekly[day.week]!;
-          weekCell.officeDayCount += 1;
+          weekCell.officeDayCount += day.isOfficeDay ? 1 : 0;
           weekCell.shortOfficeDayCount += day.isShort ? 1 : 0;
-          if (day.officeWindowHours !== null) {
+          if (day.isOfficeDay && day.officeWindowHours !== null) {
             weekCell.officeWindowDayCount += 1;
             weekCell.totalOfficeWindowHours = roundToTenth(weekCell.totalOfficeWindowHours + day.officeWindowHours);
           }
@@ -892,10 +952,10 @@ export function AttendanceClient({
             : 0;
         }
 
-        const officeDayCount = days.length;
+        const officeDayCount = days.filter((day) => day.isOfficeDay).length;
         const shortDays = days.filter((day) => day.isShort);
         const shortOfficeLongWorkdayCount = shortDays.filter((day) => day.activeHours >= FULL_WORKDAY_ACTIVE_HOURS).length;
-        const officeWindowDays = days.filter((day) => day.officeWindowHours !== null);
+        const officeWindowDays = days.filter((day) => day.isOfficeDay && day.officeWindowHours !== null);
         const totalOfficeWindowHours = roundToTenth(officeWindowDays.reduce((sum, day) => sum + (day.officeWindowHours ?? 0), 0));
         const totalOfficeHours = roundToTenth(days.reduce((sum, day) => sum + day.officeHours, 0));
         const totalRemoteHours = roundToTenth(days.reduce((sum, day) => sum + day.remoteHours, 0));
@@ -920,9 +980,9 @@ export function AttendanceClient({
           shortOfficeDayRate: officeDayCount > 0 ? Math.round((shortDays.length / officeDayCount) * 100) : 0,
           avgOfficeWindowHours: officeWindowDays.length > 0 ? roundToTenth(totalOfficeWindowHours / officeWindowDays.length) : null,
           avgOfficeDayHours: officeDayCount > 0 ? roundToTenth(totalOfficeHours / officeDayCount) : null,
-          avgRemoteDayHours: officeDayCount > 0 ? roundToTenth(totalRemoteHours / officeDayCount) : null,
-          avgTotalDayHours: officeDayCount > 0 ? roundToTenth(totalTrackedHours / officeDayCount) : null,
-          avgTbsReportedHours: officeDayCount > 0 ? roundToTenth(totalTbsReportedHours / officeDayCount) : null,
+          avgRemoteDayHours: days.length > 0 ? roundToTenth(totalRemoteHours / days.length) : null,
+          avgTotalDayHours: days.length > 0 ? roundToTenth(totalTrackedHours / days.length) : null,
+          avgTbsReportedHours: days.length > 0 ? roundToTenth(totalTbsReportedHours / days.length) : null,
           officeSharePct: totalTrackedHours > 0 ? Math.min(100, Math.round((totalOfficeHours / totalTrackedHours) * 100)) : 0,
           totalOfficeWindowHours,
           totalOfficeHours,
@@ -933,7 +993,7 @@ export function AttendanceClient({
           shortDays,
         };
       })
-      .filter((row) => row.officeDayCount > 0);
+      .filter((row) => row.days.length > 0);
   }, [displayRows, isAggregateView, shortOfficeDayThreshold, weeks]);
 
   const officeWindowRows = useMemo(() => {
@@ -1348,13 +1408,20 @@ export function AttendanceClient({
       applyColumnWidths(detailSheet, attendanceExportData.detailSheet.columnWidths);
     }
 
+    const legendSheet = wb.addWorksheet(attendanceExportData.legendSheet.title);
+    styleHeaderRow(legendSheet.addRow(attendanceExportData.legendSheet.headers));
+    attendanceExportData.legendSheet.rows.forEach((row) => {
+      legendSheet.addRow(row);
+    });
+    applyColumnWidths(legendSheet, attendanceExportData.legendSheet.columnWidths);
+
     applyColumnWidths(ws, attendanceExportData.mainSheet.columnWidths);
 
     const buffer = await wb.xlsx.writeBuffer();
     downloadBlob(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `office-attendance-${startDate}-${endDate}-${viewMode}.xlsx`);
   };
 
-  const resultLabel = isApprovedRemoteWorkView ? 'requests' : isOfficeDayHoursView ? 'employees with office days' : isAggregateView ? aggregatePluralLabel : 'employees';
+  const resultLabel = isApprovedRemoteWorkView ? 'requests' : isOfficeDayHoursView ? 'employees with tracked activity' : isAggregateView ? aggregatePluralLabel : 'employees';
   const primaryMetricLabel = isApprovedRemoteWorkView
     ? 'Request Records'
     : isOfficeDayHoursView
@@ -1376,12 +1443,19 @@ export function AttendanceClient({
   }) => {
     const alignClass =
       align === 'center' ? 'text-center' : align === 'right' ? 'text-right' : 'text-left';
+    const active = sortKey === colKey;
     return (
       <th
-        className={`cursor-pointer select-none whitespace-nowrap px-3 py-3 ${alignClass} text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900`}
-        onClick={() => handleSort(colKey)}
+        aria-sort={active ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+        className={`whitespace-nowrap px-3 py-3 ${alignClass} text-[11px] font-medium uppercase tracking-wider text-gray-500`}
       >
-        {label} {sortKey === colKey ? (sortDir === 'asc' ? '↑' : '↓') : ''}
+        <button
+          type="button"
+          onClick={() => handleSort(colKey)}
+          className={`w-full ${alignClass} hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400`}
+        >
+          {label} {active ? (sortDir === 'asc' ? '↑' : '↓') : ''}
+        </button>
       </th>
     );
   };
@@ -1400,10 +1474,16 @@ export function AttendanceClient({
     const active = officeWindowSortKey === colKey;
     return (
       <th
-        className={`cursor-pointer select-none whitespace-nowrap px-3 py-3 ${alignClass} text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900`}
-        onClick={() => handleOfficeWindowSort(colKey)}
+        aria-sort={active ? (officeWindowSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+        className={`whitespace-nowrap px-3 py-3 ${alignClass} text-[11px] font-medium uppercase tracking-wider text-gray-500`}
       >
-        {label} {active ? (officeWindowSortDir === 'asc' ? '↑' : '↓') : ''}
+        <button
+          type="button"
+          onClick={() => handleOfficeWindowSort(colKey)}
+          className={`w-full ${alignClass} hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400`}
+        >
+          {label} {active ? (officeWindowSortDir === 'asc' ? '↑' : '↓') : ''}
+        </button>
       </th>
     );
   };
@@ -1420,7 +1500,7 @@ export function AttendanceClient({
                   : isOfficeDayHoursView
                     ? 'One row per employee with per-day in-office time, office activity, home/other active time, and activity share by week.'
                     : isAggregateView
-                    ? `Weekly compliance is based on Quebec employees meeting the adjusted office target after approved week-level coverage and PTO exceptions.`
+                    ? `Weekly compliance is based on Quebec employees meeting the adjusted office target after work-abroad relief and PTO exceptions.`
                     : `${currentView.description} Target ${OFFICE_DAYS_REQUIRED} office days per week.`}
               </p>
               <p className="mt-1 text-[11px] text-gray-400">
@@ -1497,6 +1577,7 @@ export function AttendanceClient({
                       <input
                         type="date"
                         value={customStartDate}
+                        max={maxCompletedDate}
                         onChange={(e) => setCustomStartDate(e.target.value || customStartDate)}
                         className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
                       />
@@ -1506,6 +1587,7 @@ export function AttendanceClient({
                       <input
                         type="date"
                         value={customEndDate}
+                        max={maxCompletedDate}
                         onChange={(e) => setCustomEndDate(e.target.value || customEndDate)}
                         className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
                       />
@@ -1611,6 +1693,7 @@ export function AttendanceClient({
                   <input
                     type="date"
                     value={customStartDate}
+                    max={maxCompletedDate}
                     onChange={(e) => setCustomStartDate(e.target.value || customStartDate)}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
                   />
@@ -1620,6 +1703,7 @@ export function AttendanceClient({
                   <input
                     type="date"
                     value={customEndDate}
+                    max={maxCompletedDate}
                     onChange={(e) => setCustomEndDate(e.target.value || customEndDate)}
                     className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-[12px] text-gray-700 focus:border-gray-300 focus:outline-none"
                   />
@@ -1698,7 +1782,7 @@ export function AttendanceClient({
             </div>
             {!isAggregateView && !isApprovedRemoteWorkView && (
               <div className="w-full md:w-56">
-                <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Authorized WFH</label>
+                <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Policy Status</label>
                 <select
                   value={wfhFilter}
                   onChange={(e) => {
@@ -1709,7 +1793,11 @@ export function AttendanceClient({
                 >
                   <option value="all">All Employees</option>
                   <option value="standard-only">Only Standard Policy</option>
-                  <option value="approved-only">Only Authorized WFH</option>
+                  <option value="authorized-only">Only Authorized WFH</option>
+                  <option value="standing-only">Standing WFH Policy</option>
+                  <option value="temporary-remote">Temporary Remote Work</option>
+                  <option value="work-abroad">Work Abroad / Province</option>
+                  <option value="approval-missing">Approval Missing</option>
                 </select>
               </div>
             )}
@@ -1837,11 +1925,20 @@ export function AttendanceClient({
                         return (
                           <tr
                             key={row.id}
+                            tabIndex={0}
+                            role="button"
+                            aria-pressed={selected}
                             onClick={() => {
                               setSelectedOfficeWindowEmployeeId(selected ? null : row.id);
                               setPage(0);
                             }}
-                            className={`cursor-pointer hover:bg-gray-50 ${selected ? 'bg-gray-100' : 'bg-white'}`}
+                            onKeyDown={(event) => {
+                              if (event.key !== 'Enter' && event.key !== ' ') return;
+                              event.preventDefault();
+                              setSelectedOfficeWindowEmployeeId(selected ? null : row.id);
+                              setPage(0);
+                            }}
+                            className={`cursor-pointer hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 ${selected ? 'bg-gray-100' : 'bg-white'}`}
                           >
                             <td className="px-4 py-2.5">
                               <p className="text-[13px] font-medium text-gray-900">{row.label}</p>
@@ -1915,7 +2012,7 @@ export function AttendanceClient({
                   <p className={`mt-1 text-[22px] font-semibold ${filteredSummary.complianceRate >= 80 ? 'text-green-600' : filteredSummary.complianceRate >= 50 ? 'text-amber-600' : 'text-red-600'}`}>
                     {filteredSummary.complianceRate}%
                   </p>
-                  <p className="mt-1 text-[11px] text-gray-400">Scored against each week&apos;s adjusted office target after approved week-level coverage and PTO exceptions.</p>
+                  <p className="mt-1 text-[11px] text-gray-400">Scored against each week&apos;s adjusted office target after work-abroad relief and PTO exceptions.</p>
                 </>
               )}
             </div>
@@ -2013,6 +2110,12 @@ export function AttendanceClient({
                             <div className="space-y-2 rounded-lg border border-gray-200 bg-gray-50/80 px-3 py-3 text-[12px] text-gray-600">
                               <div><span className="font-medium text-gray-900">Supporting Docs:</span> {request.supportingDocumentationSubmitted || '—'}</div>
                               <div><span className="font-medium text-gray-900">Alternate In-Office Date:</span> {request.alternateInOfficeWorkDate || '—'}</div>
+                              <div>
+                                <span className="font-medium text-gray-900">Alternate Fulfilled:</span>{' '}
+                                <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${alternateInOfficeStatusTone(getAlternateInOfficeStatusLabel(request))}`}>
+                                  {getAlternateInOfficeStatusLabel(request)}
+                                </span>
+                              </div>
                               <div><span className="font-medium text-gray-900">Manager:</span> {request.managerName || '—'}</div>
                               <div><span className="font-medium text-gray-900">Office Location:</span> {request.officeLocation}</div>
                               <div><span className="font-medium text-gray-900">Bamboo Row ID:</span> {request.bambooRowId}</div>
@@ -2209,14 +2312,20 @@ export function AttendanceClient({
                         </p>
                         <p className="mt-0.5 text-[12px] text-gray-500">{row.officeLocation}</p>
                       </div>
-                      <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-medium ${isAggregateView ? scoreTone(row.scorePct) : employeeMetricTone(row.hasActivTrakCoverage, row.scorePct)}`}>
-                        {isAggregateView ? `${row.scorePct}%` : formatKnownValue(`${row.scorePct}%`, row.hasActivTrakCoverage)}
+                      <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-medium ${rowScoreTone(row, isAggregateView)}`}>
+                        {formatRowScore(row, isAggregateView)}
                       </span>
                     </div>
 
                     {!isAggregateView ? (
                       <div className="flex flex-wrap gap-2">
-                        <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-medium ${row.hasAnyApprovedWfhCoverageInRange ? 'bg-sky-50 text-sky-700' : 'bg-gray-100 text-gray-600'}`}>
+                        <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-medium ${
+                          row.hasUnapprovedRemoteRequestInRange
+                            ? 'bg-amber-50 text-amber-700'
+                            : row.hasAnyAuthorizedWfhInRange
+                              ? 'bg-sky-50 text-sky-700'
+                              : 'bg-gray-100 text-gray-600'
+                        }`}>
                           {row.remoteWorkStatusLabel}
                         </span>
                         <span className="inline-flex rounded-full bg-gray-100 px-2 py-1 text-[10px] font-medium text-gray-600">
@@ -2259,7 +2368,7 @@ export function AttendanceClient({
                       <div className="rounded-lg bg-gray-50 px-3 py-2">
                         <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">{isAggregateView ? 'Compliance' : 'Weeks'}</p>
                         <p className="mt-1 text-[16px] font-semibold text-gray-900">
-                          {isAggregateView ? `${row.scorePct}%` : formatKnownValue(weeks.length, row.hasActivTrakCoverage)}
+                          {isAggregateView ? formatRowScore(row, isAggregateView) : formatKnownValue(scoredWeeks.length, row.hasActivTrakCoverage)}
                         </p>
                       </div>
                     </div>
@@ -2284,7 +2393,7 @@ export function AttendanceClient({
                                     ? complianceValueTone(departmentCompliance?.compliancePct ?? 0, departmentCompliance?.eligibleEmployees ?? 0)
                                     : (row.hasActivTrakCoverage ? getEmployeeCellColor(cell) : unknownTone())
                                 }`}>
-                                  {isAggregateView ? `${departmentCompliance?.compliancePct ?? 0}%` : renderEmployeeWeekValue(cell, row.hasActivTrakCoverage)}
+                                  {isAggregateView ? formatCompliancePct(departmentCompliance) : renderEmployeeWeekValue(cell, row.hasActivTrakCoverage)}
                                 </span>
                               </div>
                               {isAggregateView ? (
@@ -2382,7 +2491,7 @@ export function AttendanceClient({
                       <p className="mt-1 text-[11px] text-gray-500">Requests synced from `TL_REMOTE_WORK_REQUESTS`.</p>
                     </div>
                     <div className="max-h-[34vh] overflow-auto">
-                      <table className="min-w-[1200px] border-collapse">
+                      <table className="min-w-[1320px] border-collapse">
                         <thead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:bg-white/95 [&_th]:backdrop-blur">
                           <tr className="border-b border-gray-100">
                             <th className="whitespace-nowrap px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Employee</th>
@@ -2393,6 +2502,7 @@ export function AttendanceClient({
                             <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Type</th>
                             <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Supporting Docs</th>
                             <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Alternate In-Office Date</th>
+                            <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Alternate Fulfilled</th>
                             <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Authorization</th>
                             <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Manager Approval</th>
                             <th className="whitespace-nowrap px-3 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500">Standing WFH</th>
@@ -2413,6 +2523,11 @@ export function AttendanceClient({
                               <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.remoteWorkType || '—'}</td>
                               <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.supportingDocumentationSubmitted || '—'}</td>
                               <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.alternateInOfficeWorkDate || '—'}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-[12px]">
+                                <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${alternateInOfficeStatusTone(getAlternateInOfficeStatusLabel(request))}`}>
+                                  {getAlternateInOfficeStatusLabel(request)}
+                                </span>
+                              </td>
                               <td className="whitespace-nowrap px-3 py-3 text-[12px] font-medium text-gray-900">{request.authorizationStatusLabel || 'Approval Missing'}</td>
                               <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.managerApprovalReceived || '—'}</td>
                               <td className="whitespace-nowrap px-3 py-3 text-[12px] text-gray-600">{request.remoteWorkdayPolicyAssigned ? 'Yes' : 'No'}</td>
@@ -2487,10 +2602,16 @@ export function AttendanceClient({
                   <thead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:bg-white/95 [&_th]:backdrop-blur">
                     <tr className="border-b border-gray-100">
                       <th
-                        className="sticky left-0 z-10 cursor-pointer select-none whitespace-nowrap bg-white px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900"
-                        onClick={() => handleSort('name')}
+                        aria-sort={sortKey === 'name' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+                        className="sticky left-0 z-10 whitespace-nowrap bg-white px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500"
                       >
-                        Employee {sortKey === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : ''}
+                        <button
+                          type="button"
+                          onClick={() => handleSort('name')}
+                          className="hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400"
+                        >
+                          Employee {sortKey === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : ''}
+                        </button>
                       </th>
                       <SortHeader label="Dept" colKey="department" />
                       <SortHeader label="Office Days" colKey="total" align="right" />
@@ -2586,10 +2707,16 @@ export function AttendanceClient({
                 <thead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:bg-white/95 [&_th]:backdrop-blur">
                   <tr className="border-b border-gray-100">
                     <th
-                      className="sticky left-0 z-10 cursor-pointer select-none whitespace-nowrap bg-white px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:text-gray-900"
-                      onClick={() => handleSort('name')}
+                      aria-sort={sortKey === 'name' ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+                      className="sticky left-0 z-10 whitespace-nowrap bg-white px-4 py-3 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500"
                     >
-                      {isAggregateView ? aggregateLabel : 'Employee'} {sortKey === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : ''}
+                      <button
+                        type="button"
+                        onClick={() => handleSort('name')}
+                        className="hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400"
+                      >
+                        {isAggregateView ? aggregateLabel : 'Employee'} {sortKey === 'name' ? (sortDir === 'asc' ? '↑' : '↓') : ''}
+                      </button>
                     </th>
                     <SortHeader label={isAggregateView ? 'Employees' : 'Dept'} colKey="department" />
                     {isAggregateView ? <SortHeader label="Quebec" colKey="quebecEmployeeCount" align="center" /> : null}
@@ -2600,12 +2727,18 @@ export function AttendanceClient({
                       return (
                         <th
                           key={w}
-                          className={`cursor-pointer select-none whitespace-nowrap px-2 py-3 text-center text-[10px] font-medium uppercase tracking-wider hover:text-gray-900 ${isCurrent ? 'bg-gray-50 text-gray-400' : 'text-gray-500'}`}
-                          onClick={() => handleSort(w)}
+                          aria-sort={sortKey === w ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+                          className={`whitespace-nowrap px-2 py-3 text-center text-[10px] font-medium uppercase tracking-wider ${isCurrent ? 'bg-gray-50 text-gray-400' : 'text-gray-500'}`}
                         >
-                          {getWeekLabel(w)}
-                          {isCurrent ? <span className="ml-1 normal-case tracking-normal text-[10px] text-gray-400">Current</span> : null}
-                          {sortKey === w ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ''}
+                          <button
+                            type="button"
+                            onClick={() => handleSort(w)}
+                            className="hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400"
+                          >
+                            {getWeekLabel(w)}
+                            {isCurrent ? <span className="ml-1 normal-case tracking-normal text-[10px] text-gray-400">Current</span> : null}
+                            {sortKey === w ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ''}
+                          </button>
                         </th>
                       );
                     })}
@@ -2656,10 +2789,14 @@ export function AttendanceClient({
                         return (
                           <td key={w} className="px-2 py-1.5 text-center">
                             <div className="group relative inline-flex">
-                              <span className={`inline-flex min-h-6 min-w-8 cursor-default items-center justify-center rounded px-1 text-[11px] font-medium ${color}`}>
-                                {isAggregateView ? `${departmentCompliance?.compliancePct ?? 0}%` : renderEmployeeWeekValue(cell, row.hasActivTrakCoverage)}
-                              </span>
-                              <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-80 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-3 py-2.5 opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
+                              <button
+                                type="button"
+                                aria-label={`${row.label}, ${getWeekLabel(w)}: ${isAggregateView ? formatCompliancePct(departmentCompliance) : `${office} office days`}`}
+                                className={`inline-flex min-h-6 min-w-8 cursor-default items-center justify-center rounded px-1 text-[11px] font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 ${color}`}
+                              >
+                                {isAggregateView ? formatCompliancePct(departmentCompliance) : renderEmployeeWeekValue(cell, row.hasActivTrakCoverage)}
+                              </button>
+                              <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-80 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-3 py-2.5 opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
                                 <div className="text-left text-[11px]">
                                   {isAggregateView ? (
                                     <div className="space-y-3 text-gray-600">
@@ -2668,7 +2805,7 @@ export function AttendanceClient({
                                         <div className="flex justify-between gap-3"><span>Compliant</span><span className="font-medium text-gray-900">{departmentCompliance?.compliantEmployees ?? 0}</span></div>
                                         <div className="flex justify-between gap-3"><span>Exempt</span><span className="font-medium text-gray-900">{departmentCompliance?.exemptEmployees ?? 0}</span></div>
                                         <div className="flex justify-between gap-3"><span>PTO Excused</span><span className="font-medium text-gray-900">{departmentCompliance?.excusedEmployees ?? 0}</span></div>
-                                        <div className="flex justify-between gap-3"><span>Compliance</span><span className="font-medium text-gray-900">{departmentCompliance?.compliancePct ?? 0}%</span></div>
+                                        <div className="flex justify-between gap-3"><span>Compliance</span><span className="font-medium text-gray-900">{formatCompliancePct(departmentCompliance)}</span></div>
                                         <div className="flex justify-between gap-3"><span>Office Days</span><span className="font-medium text-gray-900">{office}</span></div>
                                       </div>
                                       <div>
@@ -2700,7 +2837,7 @@ export function AttendanceClient({
                                         <div className="flex justify-between gap-3"><span>PTO days</span><span className="font-medium text-gray-900">{pto}</span></div>
                                         <div className="flex justify-between gap-3"><span>Adjusted target</span><span className="font-medium text-gray-900">{getAdjustedTargetDisplay(cell)}</span></div>
                                         <div className="flex justify-between gap-3"><span>Coverage source</span><span className="font-medium text-gray-900">{getCoverageSummaryLabel(cell)}</span></div>
-                                        <div className="flex justify-between gap-3"><span>Approved weekdays</span><span className="font-medium text-gray-900">{cell?.approvedCoverageWeekdays ?? 0}</span></div>
+                                        <div className="flex justify-between gap-3"><span>Target relief days</span><span className="font-medium text-gray-900">{cell?.approvedCoverageWeekdays ?? 0}</span></div>
                                       </div>
                                       <div>
                                         <p className="uppercase tracking-wider text-gray-400">Policy</p>
@@ -2746,8 +2883,8 @@ export function AttendanceClient({
                         {isAggregateView ? row.avgPerWeek : formatKnownValue(row.avgPerWeek, row.hasActivTrakCoverage)}
                       </td>
                       <td className="whitespace-nowrap px-3 py-1.5 text-center">
-                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${isAggregateView ? scoreTone(row.scorePct) : employeeMetricTone(row.hasActivTrakCoverage, row.scorePct)}`}>
-                          {isAggregateView ? `${row.scorePct}%` : formatKnownValue(`${row.scorePct}%`, row.hasActivTrakCoverage)}
+                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${rowScoreTone(row, isAggregateView)}`}>
+                          {formatRowScore(row, isAggregateView)}
                         </span>
                       </td>
                       <td className="whitespace-nowrap px-3 py-1.5 text-center text-[14px]">
@@ -2807,8 +2944,8 @@ export function AttendanceClient({
           <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.partial}`} /> Below adjusted target</span>
           <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.absent}`} /> No office days</span>
           <span className="flex items-center gap-1.5"><span className={`inline-block h-4 w-4 rounded ${CELL_COLORS.pto}`} /> Includes PTO this week</span>
-          <span className="flex items-center gap-1.5">{renderWeekCoverageMarkers({ hasApprovedRemoteCoverage: true, hasApprovedWorkAbroadCoverage: false }, 'h-3.5 w-3.5')} Approved remote-work coverage affected this week</span>
-          <span className="flex items-center gap-1.5">{renderWeekCoverageMarkers({ hasApprovedRemoteCoverage: false, hasApprovedWorkAbroadCoverage: true }, 'h-3.5 w-3.5')} Approved work-abroad coverage affected this week</span>
+          <span className="flex items-center gap-1.5">{renderWeekCoverageMarkers({ hasApprovedRemoteCoverage: true, hasApprovedWorkAbroadCoverage: false }, 'h-3.5 w-3.5')} Approved remote-work request this week</span>
+          <span className="flex items-center gap-1.5">{renderWeekCoverageMarkers({ hasApprovedRemoteCoverage: false, hasApprovedWorkAbroadCoverage: true }, 'h-3.5 w-3.5')} Approved work-abroad relief this week</span>
           {currentWeek ? <span className="flex items-center gap-1.5"><span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-300" /> Current week is excluded from score</span> : null}
         </div>
       ) : null}
@@ -2901,7 +3038,7 @@ export function AttendanceClient({
 
               {!isAggregateView && !isApprovedRemoteWorkView ? (
                 <div>
-                  <label className="mb-2 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Authorized WFH</label>
+                  <label className="mb-2 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Policy Status</label>
                   <select
                     value={wfhFilter}
                     onChange={(e) => {
@@ -2912,7 +3049,11 @@ export function AttendanceClient({
                   >
                     <option value="all">All Employees</option>
                     <option value="standard-only">Only Standard Policy</option>
-                    <option value="approved-only">Only Authorized WFH</option>
+                    <option value="authorized-only">Only Authorized WFH</option>
+                    <option value="standing-only">Standing WFH Policy</option>
+                    <option value="temporary-remote">Temporary Remote Work</option>
+                    <option value="work-abroad">Work Abroad / Province</option>
+                    <option value="approval-missing">Approval Missing</option>
                   </select>
                 </div>
               ) : null}
@@ -3057,7 +3198,11 @@ function AttendanceDetailModal({
                 </span>
               ) : null}
               <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                row.hasAnyApprovedWfhCoverageInRange ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-600'
+                row.hasUnapprovedRemoteRequestInRange
+                  ? 'bg-amber-50 text-amber-700'
+                  : row.hasAnyAuthorizedWfhInRange
+                    ? 'bg-blue-50 text-blue-700'
+                    : 'bg-gray-100 text-gray-600'
               }`}>
                 {row.remoteWorkStatusLabel}
               </span>
@@ -3094,7 +3239,7 @@ function AttendanceDetailModal({
         ) : null}
 
         <div className="grid gap-4 border-b border-gray-100 bg-gray-50/70 px-6 py-4 md:grid-cols-5">
-          <MetricCard label="Score" value={formatKnownValue(`${row.scorePct}%`, hasActivTrakCoverage)} tone={employeeMetricTone(hasActivTrakCoverage, row.scorePct)} />
+          <MetricCard label="Score" value={formatRowScore(row, false)} tone={rowScoreTone(row, false)} />
           <MetricCard label="Office Days" value={formatKnownValue(officeDays, hasActivTrakCoverage)} />
           <MetricCard label="Remote Days" value={formatKnownValue(remoteDays, hasActivTrakCoverage)} />
           <MetricCard label="PTO Days" value={String(ptoDays)} />
@@ -3181,7 +3326,7 @@ function AttendanceDetailModal({
             <section className="space-y-4">
               <div>
                 <h4 className="text-[13px] font-semibold uppercase tracking-wider text-gray-500">Weekly Compliance</h4>
-                <p className="mt-1 text-[12px] text-gray-400">Weeks are scored against the adjusted office target after approved week-level coverage and PTO exceptions.</p>
+                <p className="mt-1 text-[12px] text-gray-400">Weeks are scored against the adjusted office target after work-abroad relief and PTO exceptions.</p>
               </div>
               <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
                 <div className="divide-y divide-gray-100">

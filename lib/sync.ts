@@ -1,7 +1,13 @@
+import oracledb from 'oracledb';
 import { fetchEmployeeDirectory, fetchRemoteWorkRequests, fetchTimeOffRequests, fetchWorkAbroadRequests } from './bamboohr';
-import { fetchActivTrakIdentifiers, fetchActivTrakUserStats, fetchOfficeAttendanceData, fetchOfficeIpActivity, fetchProductivityData } from './bigquery';
+import { fetchActivTrakIdentifiers, fetchActivTrakIpActivity, fetchActivTrakUserStats, fetchOfficeAttendanceData, fetchOfficeIpActivity, fetchProductivityData } from './bigquery';
+import { fetchDuoAuthenticationLogs, isDuoConfigured } from './duo';
 import { execute, executeMany, initializeSchema, query } from './oracle';
 import { normalizeEmailNullable } from './email';
+
+const DUO_AUTH_LOG_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
+const DUO_AUTH_LOG_LAG_MS = 2 * 60 * 1000;
+const DUO_AUTH_LOG_SYNC_OVERLAP_MS = 24 * 60 * 60 * 1000;
 
 export interface SyncSummary {
   startedAt: string;
@@ -15,6 +21,8 @@ export interface SyncSummary {
   workAbroadRequestsSynced: number;
   tbsMapped: number;
   tbsTimeEntriesSynced: number;
+  activTrakIpActivitySynced: number;
+  duoAuthLogsSynced: number;
   errors: string[];
 }
 
@@ -45,6 +53,292 @@ function normalizeOracleText(value: unknown): string | null {
     .replace(/\u2026/g, '...')
     .replace(/\u00A0/g, ' ')
     .trim() || null;
+}
+
+function formatLocationParts(city: string | null, state: string | null, country: string | null): string | null {
+  const parts = [city, state, country].filter(Boolean);
+  return parts.length > 0 ? parts.join(', ') : null;
+}
+
+export function calculateDuoAuthenticationLogSyncWindow(params: {
+  startDate: Date;
+  now: Date;
+  checkpointMs: number | null | undefined;
+}): { mintimeMs: number; maxtimeMs: number } {
+  const { startDate, now, checkpointMs } = params;
+  const retentionFloorMs = now.getTime() - DUO_AUTH_LOG_RETENTION_MS;
+  const checkpointStartMs = checkpointMs == null
+    ? startDate.getTime()
+    : Math.max(startDate.getTime(), checkpointMs - DUO_AUTH_LOG_SYNC_OVERLAP_MS);
+
+  return {
+    mintimeMs: Math.max(checkpointStartMs, retentionFloorMs),
+    maxtimeMs: now.getTime() - DUO_AUTH_LOG_LAG_MS,
+  };
+}
+
+export function calculateNextDuoAuthenticationLogCheckpoint(params: {
+  checkpointMs: number | null | undefined;
+  maxtimeMs: number;
+  newestTimestampMs: number | null;
+}): number {
+  const { checkpointMs, maxtimeMs, newestTimestampMs } = params;
+  return Math.max(checkpointMs ?? Number.NEGATIVE_INFINITY, newestTimestampMs ?? Number.NEGATIVE_INFINITY, maxtimeMs);
+}
+
+async function syncActivTrakIpActivity(startDate: Date, now: Date): Promise<number> {
+  const [activityRows, officeIpRows] = await Promise.all([
+    fetchActivTrakIpActivity(startDate, now),
+    query<{ PUBLIC_IP: string; OFFICE_LOCATION: string | null }>(
+      `SELECT PUBLIC_IP, OFFICE_LOCATION FROM TL_OFFICE_IPS WHERE IS_ACTIVE = 1`,
+    ),
+  ]);
+  const officeLocationByIp = new Map(
+    officeIpRows
+      .map((row) => [row.PUBLIC_IP?.trim(), row.OFFICE_LOCATION || null] as const)
+      .filter(([ip]) => Boolean(ip)),
+  );
+
+  await execute(
+    `DELETE FROM TL_ACTIVTRAK_IP_ACTIVITY
+     WHERE TRUNC(RECORD_DATE) BETWEEN TRUNC(:sd) AND TRUNC(:ed)`,
+    { sd: startDate, ed: now },
+  );
+
+  const binds = activityRows
+    .map((row) => {
+      const email = normalizeEmailNullable(row.email);
+      const publicIp = row.publicIp?.trim();
+      if (!email || !publicIp) return null;
+      const officeLocation = officeLocationByIp.get(publicIp) || null;
+      return {
+        RECORD_DATE: row.date,
+        EMAIL: email,
+        USER_ID: row.userId,
+        DISPLAY_NAME: row.displayName || null,
+        PUBLIC_IP: publicIp,
+        DURATION_SECONDS: row.durationSeconds || 0,
+        EVENT_COUNT: row.eventCount || 0,
+        FIRST_ACTIVITY_AT: parseLocalDateTime(row.firstActivityAt),
+        LAST_ACTIVITY_AT: parseLocalDateTime(row.lastActivityAt),
+        IS_OFFICE_IP: officeLocationByIp.has(publicIp) ? 1 : 0,
+        OFFICE_LOCATION: officeLocation,
+      };
+    })
+    .filter((row): row is NonNullable<typeof row> => Boolean(row));
+
+  if (binds.length > 0) {
+    await executeMany(
+      `INSERT INTO TL_ACTIVTRAK_IP_ACTIVITY (
+         RECORD_DATE, EMAIL, USER_ID, DISPLAY_NAME, PUBLIC_IP, DURATION_SECONDS, EVENT_COUNT,
+         FIRST_ACTIVITY_AT, LAST_ACTIVITY_AT, IS_OFFICE_IP, OFFICE_LOCATION
+       ) VALUES (
+         :RECORD_DATE, :EMAIL, :USER_ID, :DISPLAY_NAME, :PUBLIC_IP, :DURATION_SECONDS, :EVENT_COUNT,
+         :FIRST_ACTIVITY_AT, :LAST_ACTIVITY_AT, :IS_OFFICE_IP, :OFFICE_LOCATION
+       )`,
+      binds,
+    );
+  }
+
+  return binds.length;
+}
+
+export async function syncDuoAuthenticationLogs(startDate: Date, now: Date): Promise<number> {
+  if (!isDuoConfigured()) {
+    console.log('[Sync] Duo authentication logs skipped: DUO_HOST, DUO_IKEY, or DUO_SKEY not configured');
+    return 0;
+  }
+
+  const stateRows = await query<{ LAST_EVENT_TS_MS: number | null }>(
+    `SELECT LAST_EVENT_TS_MS
+       FROM TL_DUO_SYNC_STATE
+      WHERE STATE_KEY = 'auth_logs'`,
+  );
+  const checkpointMs = stateRows[0]?.LAST_EVENT_TS_MS;
+  const { mintimeMs, maxtimeMs } = calculateDuoAuthenticationLogSyncWindow({
+    startDate,
+    now,
+    checkpointMs,
+  });
+
+  if (mintimeMs >= maxtimeMs) {
+    return 0;
+  }
+
+  const { logs, newestTimestampMs } = await fetchDuoAuthenticationLogs(mintimeMs, maxtimeMs);
+
+  if (logs.length > 0) {
+    await executeMany(
+      `MERGE INTO TL_DUO_AUTH_LOGS t
+       USING (SELECT
+         :TXID AS TXID,
+         :EVENT_TS AS EVENT_TS,
+         :EVENT_TS_MS AS EVENT_TS_MS,
+         :ISO_TIMESTAMP AS ISO_TIMESTAMP,
+         :EVENT_TYPE AS EVENT_TYPE,
+         :ALIAS AS ALIAS,
+         :RESULT AS RESULT,
+         :REASON AS REASON,
+         :FACTOR AS FACTOR,
+         :USER_KEY AS USER_KEY,
+         :USERNAME AS USERNAME,
+         :EMAIL AS EMAIL,
+         :APPLICATION_KEY AS APPLICATION_KEY,
+         :APPLICATION_NAME AS APPLICATION_NAME,
+         :DESTINATION_NAME AS DESTINATION_NAME,
+         :ACCESS_DEVICE_IP AS ACCESS_DEVICE_IP,
+         :ACCESS_DEVICE_HOSTNAME AS ACCESS_DEVICE_HOSTNAME,
+         :ACCESS_DEVICE_OS AS ACCESS_DEVICE_OS,
+         :ACCESS_DEVICE_OS_VERSION AS ACCESS_DEVICE_OS_VERSION,
+         :ACCESS_DEVICE_BROWSER AS ACCESS_DEVICE_BROWSER,
+         :ACCESS_DEVICE_BROWSER_VERSION AS ACCESS_DEVICE_BROWSER_VERSION,
+         :ACCESS_DEVICE_LOCATION AS ACCESS_DEVICE_LOCATION,
+         :ACCESS_DEVICE_CITY AS ACCESS_DEVICE_CITY,
+         :ACCESS_DEVICE_STATE AS ACCESS_DEVICE_STATE,
+         :ACCESS_DEVICE_COUNTRY AS ACCESS_DEVICE_COUNTRY,
+         :AUTH_DEVICE_IP AS AUTH_DEVICE_IP,
+         :AUTH_DEVICE_KEY AS AUTH_DEVICE_KEY,
+         :AUTH_DEVICE_NAME AS AUTH_DEVICE_NAME,
+         :TRUSTED_ENDPOINT_STATUS AS TRUSTED_ENDPOINT_STATUS,
+         :RAW_JSON AS RAW_JSON
+       FROM DUAL) s
+       ON (t.TXID = s.TXID)
+       WHEN MATCHED THEN UPDATE SET
+         t.EVENT_TS = s.EVENT_TS,
+         t.EVENT_TS_MS = s.EVENT_TS_MS,
+         t.ISO_TIMESTAMP = s.ISO_TIMESTAMP,
+         t.EVENT_TYPE = s.EVENT_TYPE,
+         t.ALIAS = s.ALIAS,
+         t.RESULT = s.RESULT,
+         t.REASON = s.REASON,
+         t.FACTOR = s.FACTOR,
+         t.USER_KEY = s.USER_KEY,
+         t.USERNAME = s.USERNAME,
+         t.EMAIL = s.EMAIL,
+         t.APPLICATION_KEY = s.APPLICATION_KEY,
+         t.APPLICATION_NAME = s.APPLICATION_NAME,
+         t.DESTINATION_NAME = s.DESTINATION_NAME,
+         t.ACCESS_DEVICE_IP = s.ACCESS_DEVICE_IP,
+         t.ACCESS_DEVICE_HOSTNAME = s.ACCESS_DEVICE_HOSTNAME,
+         t.ACCESS_DEVICE_OS = s.ACCESS_DEVICE_OS,
+         t.ACCESS_DEVICE_OS_VERSION = s.ACCESS_DEVICE_OS_VERSION,
+         t.ACCESS_DEVICE_BROWSER = s.ACCESS_DEVICE_BROWSER,
+         t.ACCESS_DEVICE_BROWSER_VERSION = s.ACCESS_DEVICE_BROWSER_VERSION,
+         t.ACCESS_DEVICE_LOCATION = s.ACCESS_DEVICE_LOCATION,
+         t.ACCESS_DEVICE_CITY = s.ACCESS_DEVICE_CITY,
+         t.ACCESS_DEVICE_STATE = s.ACCESS_DEVICE_STATE,
+         t.ACCESS_DEVICE_COUNTRY = s.ACCESS_DEVICE_COUNTRY,
+         t.AUTH_DEVICE_IP = s.AUTH_DEVICE_IP,
+         t.AUTH_DEVICE_KEY = s.AUTH_DEVICE_KEY,
+         t.AUTH_DEVICE_NAME = s.AUTH_DEVICE_NAME,
+         t.TRUSTED_ENDPOINT_STATUS = s.TRUSTED_ENDPOINT_STATUS,
+         t.RAW_JSON = s.RAW_JSON,
+         t.UPDATED_AT = CURRENT_TIMESTAMP
+       WHEN NOT MATCHED THEN INSERT (
+         TXID, EVENT_TS, EVENT_TS_MS, ISO_TIMESTAMP, EVENT_TYPE, ALIAS, RESULT, REASON, FACTOR,
+         USER_KEY, USERNAME, EMAIL, APPLICATION_KEY, APPLICATION_NAME, DESTINATION_NAME, ACCESS_DEVICE_IP,
+         ACCESS_DEVICE_HOSTNAME, ACCESS_DEVICE_OS, ACCESS_DEVICE_OS_VERSION, ACCESS_DEVICE_BROWSER,
+         ACCESS_DEVICE_BROWSER_VERSION, ACCESS_DEVICE_LOCATION, ACCESS_DEVICE_CITY, ACCESS_DEVICE_STATE,
+         ACCESS_DEVICE_COUNTRY, AUTH_DEVICE_IP, AUTH_DEVICE_KEY, AUTH_DEVICE_NAME, TRUSTED_ENDPOINT_STATUS, RAW_JSON
+       ) VALUES (
+         s.TXID, s.EVENT_TS, s.EVENT_TS_MS, s.ISO_TIMESTAMP, s.EVENT_TYPE, s.ALIAS, s.RESULT, s.REASON, s.FACTOR,
+         s.USER_KEY, s.USERNAME, s.EMAIL, s.APPLICATION_KEY, s.APPLICATION_NAME, s.DESTINATION_NAME, s.ACCESS_DEVICE_IP,
+         s.ACCESS_DEVICE_HOSTNAME, s.ACCESS_DEVICE_OS, s.ACCESS_DEVICE_OS_VERSION, s.ACCESS_DEVICE_BROWSER,
+         s.ACCESS_DEVICE_BROWSER_VERSION, s.ACCESS_DEVICE_LOCATION, s.ACCESS_DEVICE_CITY, s.ACCESS_DEVICE_STATE,
+         s.ACCESS_DEVICE_COUNTRY, s.AUTH_DEVICE_IP, s.AUTH_DEVICE_KEY, s.AUTH_DEVICE_NAME, s.TRUSTED_ENDPOINT_STATUS, s.RAW_JSON
+       )`,
+      logs.map((log) => ({
+        TXID: log.txid,
+        EVENT_TS: new Date(log.timestamp * 1000),
+        EVENT_TS_MS: log.timestamp * 1000,
+        ISO_TIMESTAMP: log.isotimestamp,
+        EVENT_TYPE: log.eventType,
+        ALIAS: log.alias,
+        RESULT: log.result,
+        REASON: log.reason,
+        FACTOR: log.factor,
+        USER_KEY: log.userKey,
+        USERNAME: log.username,
+        EMAIL: normalizeEmailNullable(log.email || log.username),
+        APPLICATION_KEY: log.applicationKey,
+        APPLICATION_NAME: log.applicationName,
+        DESTINATION_NAME: log.destinationName,
+        ACCESS_DEVICE_IP: log.accessDeviceIp,
+        ACCESS_DEVICE_HOSTNAME: log.accessDeviceHostname,
+        ACCESS_DEVICE_OS: log.accessDeviceOs,
+        ACCESS_DEVICE_OS_VERSION: log.accessDeviceOsVersion,
+        ACCESS_DEVICE_BROWSER: log.accessDeviceBrowser,
+        ACCESS_DEVICE_BROWSER_VERSION: log.accessDeviceBrowserVersion,
+        ACCESS_DEVICE_LOCATION: formatLocationParts(
+          log.accessDeviceLocationCity,
+          log.accessDeviceLocationState,
+          log.accessDeviceLocationCountry,
+        ),
+        ACCESS_DEVICE_CITY: log.accessDeviceLocationCity,
+        ACCESS_DEVICE_STATE: log.accessDeviceLocationState,
+        ACCESS_DEVICE_COUNTRY: log.accessDeviceLocationCountry,
+        AUTH_DEVICE_IP: log.authDeviceIp,
+        AUTH_DEVICE_KEY: log.authDeviceKey,
+        AUTH_DEVICE_NAME: log.authDeviceName,
+        TRUSTED_ENDPOINT_STATUS: log.trustedEndpointStatus,
+        RAW_JSON: JSON.stringify(log.raw),
+      })),
+      {
+        bindDefs: {
+          TXID: { type: oracledb.STRING, maxSize: 100 },
+          EVENT_TS: { type: oracledb.DATE },
+          EVENT_TS_MS: { type: oracledb.NUMBER },
+          ISO_TIMESTAMP: { type: oracledb.STRING, maxSize: 50 },
+          EVENT_TYPE: { type: oracledb.STRING, maxSize: 50 },
+          ALIAS: { type: oracledb.STRING, maxSize: 255 },
+          RESULT: { type: oracledb.STRING, maxSize: 50 },
+          REASON: { type: oracledb.STRING, maxSize: 255 },
+          FACTOR: { type: oracledb.STRING, maxSize: 100 },
+          USER_KEY: { type: oracledb.STRING, maxSize: 100 },
+          USERNAME: { type: oracledb.STRING, maxSize: 255 },
+          EMAIL: { type: oracledb.STRING, maxSize: 255 },
+          APPLICATION_KEY: { type: oracledb.STRING, maxSize: 100 },
+          APPLICATION_NAME: { type: oracledb.STRING, maxSize: 255 },
+          DESTINATION_NAME: { type: oracledb.STRING, maxSize: 255 },
+          ACCESS_DEVICE_IP: { type: oracledb.STRING, maxSize: 255 },
+          ACCESS_DEVICE_HOSTNAME: { type: oracledb.STRING, maxSize: 255 },
+          ACCESS_DEVICE_OS: { type: oracledb.STRING, maxSize: 255 },
+          ACCESS_DEVICE_OS_VERSION: { type: oracledb.STRING, maxSize: 100 },
+          ACCESS_DEVICE_BROWSER: { type: oracledb.STRING, maxSize: 255 },
+          ACCESS_DEVICE_BROWSER_VERSION: { type: oracledb.STRING, maxSize: 100 },
+          ACCESS_DEVICE_LOCATION: { type: oracledb.STRING, maxSize: 500 },
+          ACCESS_DEVICE_CITY: { type: oracledb.STRING, maxSize: 255 },
+          ACCESS_DEVICE_STATE: { type: oracledb.STRING, maxSize: 255 },
+          ACCESS_DEVICE_COUNTRY: { type: oracledb.STRING, maxSize: 255 },
+          AUTH_DEVICE_IP: { type: oracledb.STRING, maxSize: 255 },
+          AUTH_DEVICE_KEY: { type: oracledb.STRING, maxSize: 100 },
+          AUTH_DEVICE_NAME: { type: oracledb.STRING, maxSize: 255 },
+          TRUSTED_ENDPOINT_STATUS: { type: oracledb.STRING, maxSize: 100 },
+          RAW_JSON: { type: oracledb.CLOB },
+        },
+      },
+    );
+  }
+
+  await execute(
+    `MERGE INTO TL_DUO_SYNC_STATE t
+     USING (SELECT 'auth_logs' AS STATE_KEY, :lastEventTsMs AS LAST_EVENT_TS_MS FROM DUAL) s
+     ON (t.STATE_KEY = s.STATE_KEY)
+     WHEN MATCHED THEN UPDATE SET
+       t.LAST_EVENT_TS_MS = s.LAST_EVENT_TS_MS,
+       t.UPDATED_AT = CURRENT_TIMESTAMP
+     WHEN NOT MATCHED THEN INSERT (STATE_KEY, LAST_EVENT_TS_MS)
+    VALUES (s.STATE_KEY, s.LAST_EVENT_TS_MS)`,
+    {
+      lastEventTsMs: calculateNextDuoAuthenticationLogCheckpoint({
+        checkpointMs,
+        maxtimeMs,
+        newestTimestampMs,
+      }),
+    },
+  );
+
+  return logs.length;
 }
 
 /**
@@ -181,6 +475,8 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
   let workAbroadRequestsSynced = 0;
   let tbsMapped = 0;
   let tbsTimeEntriesSynced = 0;
+  let activTrakIpActivitySynced = 0;
+  let duoAuthLogsSynced = 0;
 
   try {
     const employees = await fetchEmployeeDirectory();
@@ -479,6 +775,12 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     attendanceSynced = attendanceBinds.length;
   } catch (error) {
     errors.push(`Attendance sync failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    activTrakIpActivitySynced = await syncActivTrakIpActivity(startDate, now);
+  } catch (error) {
+    errors.push(`ActivTrak IP activity sync failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   try {
@@ -904,6 +1206,12 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     errors.push(`TBS time entries sync failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  try {
+    duoAuthLogsSynced = await syncDuoAuthenticationLogs(startDate, now);
+  } catch (error) {
+    errors.push(`Duo authentication logs sync failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   const completedAt = new Date();
   const recordsSynced =
     employeesSynced +
@@ -913,7 +1221,9 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     remoteWorkRequestsSynced +
     workAbroadRequestsSynced +
     tbsMapped +
-    tbsTimeEntriesSynced;
+    tbsTimeEntriesSynced +
+    activTrakIpActivitySynced +
+    duoAuthLogsSynced;
 
   try {
     await execute(
@@ -950,6 +1260,8 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
     workAbroadRequestsSynced,
     tbsMapped,
     tbsTimeEntriesSynced,
+    activTrakIpActivitySynced,
+    duoAuthLogsSynced,
     errors,
   };
 

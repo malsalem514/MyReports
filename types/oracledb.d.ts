@@ -4,7 +4,10 @@ declare module 'oracledb' {
     let outFormat: number;
     let autoCommit: boolean;
     const BIND_OUT: number;
+    const CLOB: number;
+    const DATE: number;
     const NUMBER: number;
+    const STRING: number;
 
     function initOracleClient(options?: Record<string, unknown>): void;
     function createPool(config: Record<string, unknown>): Promise<Pool>;

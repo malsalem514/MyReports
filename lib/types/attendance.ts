@@ -49,6 +49,9 @@ export interface AttendanceRow {
   hasStandingWfhPolicy: boolean;
   hasApprovedRemoteRequestInRange: boolean;
   hasApprovedWorkAbroadRequestInRange: boolean;
+  hasUnapprovedRemoteRequestInRange: boolean;
+  hasAnyAuthorizedWfhInRange: boolean;
+  hasAnyWfhPolicyInRange: boolean;
   hasAnyApprovedWfhCoverageInRange: boolean;
   remoteWorkStatusLabel: string;
   weeks: Record<string, WeekCell>;
@@ -73,6 +76,8 @@ export interface AttendanceRemoteWorkRequest {
   reason: string | null;
   supportingDocumentationSubmitted: string | null;
   alternateInOfficeWorkDate: string | null;
+  alternateInOfficeWorkDateFulfilled?: boolean | null;
+  alternateInOfficeWorkDateStatus?: string | null;
   managerApprovalReceived: string | null;
   managerName: string | null;
   remoteWorkdayPolicyAssigned?: boolean;

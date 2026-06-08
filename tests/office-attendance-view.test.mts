@@ -46,6 +46,9 @@ function createAttendanceRow(overrides: Partial<AttendanceRow> = {}): Attendance
     hasStandingWfhPolicy: false,
     hasApprovedRemoteRequestInRange: false,
     hasApprovedWorkAbroadRequestInRange: false,
+    hasUnapprovedRemoteRequestInRange: false,
+    hasAnyAuthorizedWfhInRange: false,
+    hasAnyWfhPolicyInRange: false,
     hasAnyApprovedWfhCoverageInRange: false,
     remoteWorkStatusLabel: 'Standard Policy',
     weeks: {},
@@ -73,6 +76,7 @@ function createRemoteWorkRequest(overrides: Partial<AttendanceRemoteWorkRequest>
     reason: 'Family appointment',
     supportingDocumentationSubmitted: 'Yes',
     alternateInOfficeWorkDate: null,
+    alternateInOfficeWorkDateStatus: null,
     managerApprovalReceived: 'Approved',
     managerName: 'Manager Example',
     ...overrides,
@@ -100,11 +104,13 @@ function createWorkAbroadRequest(overrides: Partial<AttendanceWorkAbroadRequest>
   };
 }
 
-test('filterAttendanceRows preserves approved and standard-only filters', () => {
+test('filterAttendanceRows preserves policy-state filters', () => {
   const rows = [
     createAttendanceRow({
       name: 'Alice Example',
       email: 'alice@example.com',
+      hasAnyAuthorizedWfhInRange: true,
+      hasAnyWfhPolicyInRange: true,
       hasAnyApprovedWfhCoverageInRange: true,
       hasApprovedRemoteRequestInRange: true,
     }),
@@ -113,18 +119,27 @@ test('filterAttendanceRows preserves approved and standard-only filters', () => 
       email: 'bob@example.com',
       department: 'Operations',
       hasStandingWfhPolicy: true,
+      hasAnyAuthorizedWfhInRange: true,
+      hasAnyWfhPolicyInRange: true,
       hasAnyApprovedWfhCoverageInRange: false,
+    }),
+    createAttendanceRow({
+      name: 'Cara Example',
+      email: 'cara@example.com',
+      department: 'Operations',
+      hasUnapprovedRemoteRequestInRange: true,
+      hasAnyWfhPolicyInRange: true,
     }),
   ];
 
-  const approvedOnly = filterAttendanceRows({
+  const authorizedOnly = filterAttendanceRows({
     rows,
     selectedDepartments: [],
     selectedLocations: [],
     isAggregateView: false,
     isApprovedRemoteWorkView: false,
     search: '',
-    wfhFilter: 'approved-only',
+    wfhFilter: 'authorized-only',
   });
   const standardOnly = filterAttendanceRows({
     rows,
@@ -135,9 +150,19 @@ test('filterAttendanceRows preserves approved and standard-only filters', () => 
     search: '',
     wfhFilter: 'standard-only',
   });
+  const approvalMissing = filterAttendanceRows({
+    rows,
+    selectedDepartments: [],
+    selectedLocations: [],
+    isAggregateView: false,
+    isApprovedRemoteWorkView: false,
+    search: '',
+    wfhFilter: 'approval-missing',
+  });
 
-  assert.deepEqual(approvedOnly.map((row) => row.email), ['alice@example.com']);
-  assert.deepEqual(standardOnly.map((row) => row.email), ['bob@example.com']);
+  assert.deepEqual(authorizedOnly.map((row) => row.email), ['alice@example.com', 'bob@example.com']);
+  assert.deepEqual(standardOnly.map((row) => row.email), []);
+  assert.deepEqual(approvalMissing.map((row) => row.email), ['cara@example.com']);
 });
 
 test('buildGroupedRows does not fabricate missing manager fallback employees', () => {
@@ -229,6 +254,38 @@ test('buildGroupedRows and summary keep compliant and unknown coverage math inta
   assert.equal(summary.complianceRate, 100);
 });
 
+test('buildGroupedRows calculates averages from scored weeks only', () => {
+  const scoredWeek = '2026-03-02';
+  const visibleUnscoredWeek = '2026-03-09';
+  const groupedRows = buildGroupedRows({
+    filteredRows: [
+      createAttendanceRow({
+        total: 7,
+        weeks: {
+          [scoredWeek]: createWeekCell({
+            officeDays: 2,
+            adjustedOfficeTarget: 2,
+            adjustedCompliant: true,
+          }),
+          [visibleUnscoredWeek]: createWeekCell({
+            officeDays: 5,
+            adjustedOfficeTarget: 2,
+            adjustedCompliant: true,
+          }),
+        },
+      }),
+    ],
+    isManagerView: false,
+    weeks: [scoredWeek, visibleUnscoredWeek],
+    scoredWeeks: [scoredWeek],
+    defaultEmployeeLocation: 'Quebec (Montreal Head Office)',
+  });
+
+  assert.equal(groupedRows[0]?.total, 7);
+  assert.equal(groupedRows[0]?.scoredTotal, 2);
+  assert.equal(groupedRows[0]?.avgPerWeek, 2);
+});
+
 test('buildCombinedApprovalRequests merges both request sources in date order', () => {
   const combinedAsc = buildCombinedApprovalRequests({
     filteredRemoteWorkRequests: [createRemoteWorkRequest()],
@@ -265,12 +322,16 @@ test('sortDisplayRows keeps unknown coverage rows at the end for numeric sorts',
       hasStandingWfhPolicy: false,
       hasApprovedRemoteRequestInRange: false,
       hasApprovedWorkAbroadRequestInRange: false,
+      hasUnapprovedRemoteRequestInRange: false,
+      hasAnyAuthorizedWfhInRange: false,
+      hasAnyWfhPolicyInRange: false,
       hasAnyApprovedWfhCoverageInRange: false,
       remoteWorkStatusLabel: 'Standard Policy',
       weeks: {},
       total: 4,
       avgPerWeek: 2,
       scorePct: 100,
+      hasScoredWeeks: true,
       trend: 'up',
     },
     {
@@ -283,12 +344,16 @@ test('sortDisplayRows keeps unknown coverage rows at the end for numeric sorts',
       hasStandingWfhPolicy: false,
       hasApprovedRemoteRequestInRange: false,
       hasApprovedWorkAbroadRequestInRange: false,
+      hasUnapprovedRemoteRequestInRange: false,
+      hasAnyAuthorizedWfhInRange: false,
+      hasAnyWfhPolicyInRange: false,
       hasAnyApprovedWfhCoverageInRange: false,
       remoteWorkStatusLabel: 'Standard Policy',
       weeks: {},
       total: 0,
       avgPerWeek: 0,
       scorePct: 0,
+      hasScoredWeeks: false,
       trend: 'flat',
     },
   ];

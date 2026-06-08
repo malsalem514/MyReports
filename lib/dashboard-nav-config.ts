@@ -23,6 +23,7 @@ export const DASHBOARD_TAB_ROUTES: Record<TabKey, string> = {
   'working-hours': '/dashboard/working-hours',
   'bamboo-not-in-activtrak': '/dashboard/bamboo-not-in-activtrak',
   'activtrak-identities': '/dashboard/activtrak-identities',
+  'duo-activtrak-reconciliation': '/dashboard/duo-activtrak-reconciliation',
 };
 
 export const DASHBOARD_TAB_LABELS: Record<TabKey, string> = {
@@ -31,6 +32,7 @@ export const DASHBOARD_TAB_LABELS: Record<TabKey, string> = {
   'working-hours': 'Working Hours',
   'bamboo-not-in-activtrak': 'Users Mappings',
   'activtrak-identities': 'ActivTrak Identities',
+  'duo-activtrak-reconciliation': 'Duo Reconciliation',
 };
 
 export const OFFICE_ATTENDANCE_VIEW_OPTIONS: Array<{
@@ -77,7 +79,7 @@ export function buildDashboardNavItems(
   let workingHoursGroupAdded = false;
 
   for (const key of visibleTabs) {
-    if (key === 'bamboo-not-in-activtrak' || key === 'activtrak-identities') {
+    if (key === 'bamboo-not-in-activtrak' || key === 'activtrak-identities' || key === 'duo-activtrak-reconciliation') {
       navItems.push({
         key,
         path: DASHBOARD_TAB_ROUTES[key],

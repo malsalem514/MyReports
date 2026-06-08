@@ -32,6 +32,9 @@ export interface AttendanceEmployeeAccumulator {
   hasStandingWfhPolicy: boolean;
   hasApprovedRemoteRequestInRange: boolean;
   hasApprovedWorkAbroadRequestInRange: boolean;
+  hasUnapprovedRemoteRequestInRange: boolean;
+  hasAnyAuthorizedWfhInRange: boolean;
+  hasAnyWfhPolicyInRange: boolean;
   hasAnyApprovedWfhCoverageInRange: boolean;
   remoteWorkStatusLabel: string;
   weeks: Record<string, WeekCell>;
@@ -60,6 +63,9 @@ interface AttendanceRangeFlags {
   hasStandingWfhPolicy: boolean;
   hasApprovedRemoteRequestInRange: boolean;
   hasApprovedWorkAbroadRequestInRange: boolean;
+  hasUnapprovedRemoteRequestInRange: boolean;
+  hasAnyAuthorizedWfhInRange: boolean;
+  hasAnyWfhPolicyInRange: boolean;
   hasAnyApprovedWfhCoverageInRange: boolean;
   remoteWorkStatusLabel: string;
 }
@@ -72,6 +78,75 @@ export interface WeeklyAttendanceCellInput {
   hasApprovedRemoteCoverage: boolean;
   hasApprovedWorkAbroadCoverage: boolean;
   exceptionLabel: string | null;
+}
+
+export interface ApprovedCoverageDayCounts {
+  approvedRemoteWorkWeekdays: number;
+  approvedWorkAbroadWeekdays: number;
+}
+
+export function calculateApprovedTargetReliefWeekdays({
+  approvedWorkAbroadWeekdays,
+}: ApprovedCoverageDayCounts): number {
+  return Math.max(0, approvedWorkAbroadWeekdays);
+}
+
+const APPROVED_APPROVAL_VALUES = new Set([
+  '1',
+  'APPROVED',
+  'APPROVE',
+  'AUTHORISED',
+  'AUTHORIZED',
+  'CONFIRMED',
+  'OK',
+  'TRUE',
+  'Y',
+  'YES',
+]);
+
+export function isApprovedApprovalValue(value: string | null | undefined): boolean {
+  const normalized = (value || '').trim().toUpperCase();
+  if (!normalized) return false;
+  return APPROVED_APPROVAL_VALUES.has(normalized);
+}
+
+function parseIsoDateString(value: string): Date {
+  const [year, month, day] = value.slice(0, 10).split('-').map(Number);
+  return new Date(year!, month! - 1, day!);
+}
+
+function startOfLocalDay(date: Date): Date {
+  const next = new Date(date.getTime());
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function getIsoWeekMonday(date: Date): Date {
+  const monday = startOfLocalDay(date);
+  const day = monday.getDay();
+  monday.setDate(monday.getDate() + (day === 0 ? -6 : 1 - day));
+  return monday;
+}
+
+export function getScoredAttendanceWeeks(params: {
+  weeks: string[];
+  startDate: Date;
+  endDate: Date;
+  referenceDate?: Date;
+}): string[] {
+  const { weeks, startDate, endDate, referenceDate = new Date() } = params;
+  const selectedStart = startOfLocalDay(startDate);
+  const selectedEnd = startOfLocalDay(endDate);
+  const currentWeekStart = getIsoWeekMonday(referenceDate);
+
+  return weeks.filter((week) => {
+    const weekStart = parseIsoDateString(week);
+    const weekEnd = new Date(weekStart.getTime());
+    weekEnd.setDate(weekEnd.getDate() + 4);
+    return weekStart >= selectedStart
+      && weekEnd <= selectedEnd
+      && weekStart < currentWeekStart;
+  });
 }
 
 function formatApprovalSuffix(values?: ReadonlySet<string>): string {
@@ -126,6 +201,10 @@ function getAttendanceRangeFlags(
   const hasStandingWfhPolicy = approvalIndex.standingPolicyEmails.has(email);
   const hasApprovedRemoteRequestInRange = approvedRemoteWorkRequest;
   const hasApprovedWorkAbroadRequestInRange = approvalIndex.approvedWorkAbroadRequestEmails.has(email);
+  const hasUnapprovedRemoteRequestInRange = approvalIndex.unapprovedRemoteRequestEmails?.has(email) ?? false;
+  const hasAnyAuthorizedWfhInRange =
+    hasStandingWfhPolicy || hasApprovedRemoteRequestInRange || hasApprovedWorkAbroadRequestInRange;
+  const hasAnyWfhPolicyInRange = hasAnyAuthorizedWfhInRange || hasUnapprovedRemoteRequestInRange;
   const hasAnyApprovedWfhCoverageInRange =
     hasApprovedRemoteRequestInRange || hasApprovedWorkAbroadRequestInRange;
 
@@ -134,6 +213,9 @@ function getAttendanceRangeFlags(
     hasStandingWfhPolicy,
     hasApprovedRemoteRequestInRange,
     hasApprovedWorkAbroadRequestInRange,
+    hasUnapprovedRemoteRequestInRange,
+    hasAnyAuthorizedWfhInRange,
+    hasAnyWfhPolicyInRange,
     hasAnyApprovedWfhCoverageInRange,
     remoteWorkStatusLabel: getRemoteWorkStatusLabel(email, approvalIndex),
   };

@@ -8,7 +8,14 @@ import type {
 
 export type SortKey = 'name' | 'department' | 'officeLocation' | 'total' | 'avgPerWeek' | 'trend' | string;
 export type SortDir = 'asc' | 'desc';
-export type WfhFilterMode = 'all' | 'standard-only' | 'approved-only';
+export type WfhFilterMode =
+  | 'all'
+  | 'standard-only'
+  | 'authorized-only'
+  | 'standing-only'
+  | 'temporary-remote'
+  | 'work-abroad'
+  | 'approval-missing';
 export type EmployeeCellToneKey = keyof typeof CELL_COLORS;
 
 const UNKNOWN_DISPLAY_VALUE = '—';
@@ -39,6 +46,7 @@ export interface GroupRow {
   weeks: Record<string, WeekCell>;
   weeklyCompliance: Record<string, WeeklyCompliance>;
   total: number;
+  scoredTotal: number;
   avgPerWeek: number;
   scorePct: number;
   trend: 'up' | 'down' | 'flat';
@@ -54,12 +62,16 @@ export interface DisplayRow {
   hasStandingWfhPolicy: boolean;
   hasApprovedRemoteRequestInRange: boolean;
   hasApprovedWorkAbroadRequestInRange: boolean;
+  hasUnapprovedRemoteRequestInRange: boolean;
+  hasAnyAuthorizedWfhInRange: boolean;
+  hasAnyWfhPolicyInRange: boolean;
   hasAnyApprovedWfhCoverageInRange: boolean;
   remoteWorkStatusLabel: string;
   weeks: Record<string, WeekCell>;
   total: number;
   avgPerWeek: number;
   scorePct: number;
+  hasScoredWeeks: boolean;
   trend: 'up' | 'down' | 'flat';
   employeeCount?: number;
   quebecEmployeeCount?: number;
@@ -93,6 +105,7 @@ export interface ApprovalRequestRow {
   schedule: string | null;
   supportingDocumentationSubmitted: string | null;
   alternateInOfficeWorkDate: string | null;
+  alternateInOfficeWorkDateStatus: string | null;
 }
 
 export interface FilteredAttendanceSummary {
@@ -211,20 +224,14 @@ export function getWeekPoints(cell?: WeekCell): number {
 export function calculateScorePct(weeksByKey: Record<string, WeekCell>, scopedWeeks: string[]): number {
   let earned = 0;
   let capacity = 0;
-  let hadMeasuredWeek = false;
-  let allMeasuredWeeksCompliant = true;
 
   for (const week of scopedWeeks) {
     const cell = weeksByKey[week];
-    if (cell?.adjustedCompliant !== null && cell?.adjustedCompliant !== undefined) {
-      hadMeasuredWeek = true;
-      if (cell.adjustedCompliant === false) allMeasuredWeeksCompliant = false;
-    }
     earned += getWeekPoints(cell);
     capacity += getWeekPointCapacity(cell);
   }
 
-  if (capacity <= 0) return hadMeasuredWeek && allMeasuredWeeksCompliant ? 100 : 0;
+  if (capacity <= 0) return 0;
   return Math.round((earned / capacity) * 100);
 }
 
@@ -282,12 +289,20 @@ export function filterAttendanceRows(params: {
   }
 
   if (isApprovedRemoteWorkView) {
-    list = list.filter((row) => row.hasAnyApprovedWfhCoverageInRange);
+    list = list.filter((row) => row.hasAnyAuthorizedWfhInRange);
   } else if (!isAggregateView) {
     if (wfhFilter === 'standard-only') {
-      list = list.filter((row) => !row.hasAnyApprovedWfhCoverageInRange);
-    } else if (wfhFilter === 'approved-only') {
-      list = list.filter((row) => row.hasAnyApprovedWfhCoverageInRange);
+      list = list.filter((row) => !row.hasAnyWfhPolicyInRange);
+    } else if (wfhFilter === 'authorized-only') {
+      list = list.filter((row) => row.hasAnyAuthorizedWfhInRange);
+    } else if (wfhFilter === 'standing-only') {
+      list = list.filter((row) => row.hasStandingWfhPolicy);
+    } else if (wfhFilter === 'temporary-remote') {
+      list = list.filter((row) => row.hasApprovedRemoteRequestInRange);
+    } else if (wfhFilter === 'work-abroad') {
+      list = list.filter((row) => row.hasApprovedWorkAbroadRequestInRange);
+    } else if (wfhFilter === 'approval-missing') {
+      list = list.filter((row) => row.hasUnapprovedRemoteRequestInRange);
     }
   }
 
@@ -332,10 +347,11 @@ export function buildGroupedRows(params: {
     if (isQuebecEmployee && hasCoverage) {
       group.quebecEmployeeCount += 1;
       group.total += row.total;
+      group.scoredTotal += scoredWeeks.reduce((sum, week) => sum + (row.weeks[week]?.officeDays ?? 0), 0);
     } else if (isQuebecEmployee && !hasCoverage) {
       group.unknownCoverageCount += 1;
     }
-    if (!isQuebecEmployee || row.hasAnyApprovedWfhCoverageInRange) {
+    if (!isQuebecEmployee || row.hasAnyAuthorizedWfhInRange) {
       group.remoteEmployeeCount += 1;
     }
     if (group.officeLocation !== row.officeLocation) {
@@ -410,6 +426,7 @@ export function buildGroupedRows(params: {
       weeks: {},
       weeklyCompliance: {},
       total: 0,
+      scoredTotal: 0,
       avgPerWeek: 0,
       scorePct: 0,
       trend: 'flat' as const,
@@ -464,19 +481,14 @@ export function buildGroupedRows(params: {
     }
 
     const avgPerWeek = scoredWeeks.length > 0
-      ? Math.round((row.total / Math.max(1, row.quebecEmployeeCount) / scoredWeeks.length) * 10) / 10
+      ? Math.round((row.scoredTotal / Math.max(1, row.quebecEmployeeCount) / scoredWeeks.length) * 10) / 10
       : 0;
     const measuredWeeks = scoredWeeks.filter((week) => (row.weeklyCompliance[week]?.eligibleEmployees ?? 0) > 0);
-    const neutralOnlyWeeks = scoredWeeks.filter((week) => {
-      const compliance = row.weeklyCompliance[week];
-      return (compliance?.eligibleEmployees ?? 0) === 0
-        && (((compliance?.exemptEmployees ?? 0) > 0) || ((compliance?.excusedEmployees ?? 0) > 0));
-    });
     const scorePct = measuredWeeks.length > 0
       ? Math.round(
         measuredWeeks.reduce((sum, week) => sum + (row.weeklyCompliance[week]?.compliancePct ?? 0), 0) / measuredWeeks.length,
       )
-      : (neutralOnlyWeeks.length > 0 ? 100 : 0);
+      : 0;
     let trend: 'up' | 'down' | 'flat' = 'flat';
     if (measuredWeeks.length >= 2) {
       const prevWeek = measuredWeeks[measuredWeeks.length - 2]!;
@@ -515,12 +527,16 @@ export function buildDisplayRows(params: {
     hasStandingWfhPolicy: row.hasStandingWfhPolicy,
     hasApprovedRemoteRequestInRange: row.hasApprovedRemoteRequestInRange,
     hasApprovedWorkAbroadRequestInRange: row.hasApprovedWorkAbroadRequestInRange,
+    hasUnapprovedRemoteRequestInRange: row.hasUnapprovedRemoteRequestInRange,
+    hasAnyAuthorizedWfhInRange: row.hasAnyAuthorizedWfhInRange,
+    hasAnyWfhPolicyInRange: row.hasAnyWfhPolicyInRange,
     hasAnyApprovedWfhCoverageInRange: row.hasAnyApprovedWfhCoverageInRange,
     remoteWorkStatusLabel: row.remoteWorkStatusLabel,
     weeks: row.weeks,
     total: row.total,
     avgPerWeek: row.avgPerWeek,
-    scorePct: row.hasActivTrakCoverage ? calculateScorePct(row.weeks, scoredWeeks) : 0,
+    scorePct: row.hasActivTrakCoverage && hasEligibleEmployeeWeek(row, scoredWeeks) ? calculateScorePct(row.weeks, scoredWeeks) : 0,
+    hasScoredWeeks: row.hasActivTrakCoverage && hasEligibleEmployeeWeek(row, scoredWeeks),
     trend: row.trend,
     managerName: row.managerName,
     managerEmail: row.managerEmail,
@@ -529,6 +545,7 @@ export function buildDisplayRows(params: {
   }));
 
   const aggregateRows: DisplayRow[] = groupedRows.map((row) => ({
+    hasScoredWeeks: hasEligibleGroupWeek(row, scoredWeeks),
     id: row.id,
     label: row.groupLabel,
     secondary: String(row.employeeCount),
@@ -538,6 +555,9 @@ export function buildDisplayRows(params: {
     hasStandingWfhPolicy: false,
     hasApprovedRemoteRequestInRange: false,
     hasApprovedWorkAbroadRequestInRange: false,
+    hasUnapprovedRemoteRequestInRange: false,
+    hasAnyAuthorizedWfhInRange: false,
+    hasAnyWfhPolicyInRange: false,
     hasAnyApprovedWfhCoverageInRange: false,
     remoteWorkStatusLabel: '—',
     weeks: Object.fromEntries(
@@ -611,8 +631,8 @@ export function sortDisplayRows(params: {
     }
     if (sortKey === 'status') {
       return compareMaybeNumber(
-        !isAggregateView && !left.hasActivTrakCoverage ? null : left.scorePct,
-        !isAggregateView && !right.hasActivTrakCoverage ? null : right.scorePct,
+        (!isAggregateView && !left.hasActivTrakCoverage) || !left.hasScoredWeeks ? null : left.scorePct,
+        (!isAggregateView && !right.hasActivTrakCoverage) || !right.hasScoredWeeks ? null : right.scorePct,
         direction,
       );
     }
@@ -852,6 +872,7 @@ export function buildCombinedApprovalRequests(params: {
       schedule: null,
       supportingDocumentationSubmitted: request.supportingDocumentationSubmitted,
       alternateInOfficeWorkDate: request.alternateInOfficeWorkDate,
+      alternateInOfficeWorkDateStatus: request.alternateInOfficeWorkDateStatus ?? null,
     })),
     ...filteredWorkAbroadRequests.map((request) => ({
       source: 'work-abroad' as const,
@@ -874,6 +895,7 @@ export function buildCombinedApprovalRequests(params: {
       schedule: request.workSchedule,
       supportingDocumentationSubmitted: null,
       alternateInOfficeWorkDate: null,
+      alternateInOfficeWorkDateStatus: null,
     })),
   ].sort((left, right) => {
     if (sortDir === 'asc') {

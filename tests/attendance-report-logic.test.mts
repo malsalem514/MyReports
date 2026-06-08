@@ -14,9 +14,12 @@ function getModuleExports<T extends object>(mod: T): T {
 }
 
 const {
+  calculateApprovedTargetReliefWeekdays,
   calculateAttendanceWeekCell,
   createAttendanceEmployeeAccumulator,
   ensureAttendanceEmployeeAccumulator,
+  getScoredAttendanceWeeks,
+  isApprovedApprovalValue,
   toWeekDayDetails,
 } = getModuleExports(attendanceReportLogic);
 
@@ -60,6 +63,9 @@ test('createAttendanceEmployeeAccumulator preserves standing and temporary appro
   assert.equal(employee.hasStandingWfhPolicy, true);
   assert.equal(employee.hasApprovedRemoteRequestInRange, true);
   assert.equal(employee.hasApprovedWorkAbroadRequestInRange, true);
+  assert.equal(employee.hasUnapprovedRemoteRequestInRange, false);
+  assert.equal(employee.hasAnyAuthorizedWfhInRange, true);
+  assert.equal(employee.hasAnyWfhPolicyInRange, true);
   assert.equal(employee.hasAnyApprovedWfhCoverageInRange, true);
   assert.equal(
     employee.remoteWorkStatusLabel,
@@ -78,6 +84,9 @@ test('createAttendanceEmployeeAccumulator keeps standing policy informational on
   assert.equal(employee.hasStandingWfhPolicy, true);
   assert.equal(employee.hasApprovedRemoteRequestInRange, false);
   assert.equal(employee.hasApprovedWorkAbroadRequestInRange, false);
+  assert.equal(employee.hasUnapprovedRemoteRequestInRange, false);
+  assert.equal(employee.hasAnyAuthorizedWfhInRange, true);
+  assert.equal(employee.hasAnyWfhPolicyInRange, true);
   assert.equal(employee.hasAnyApprovedWfhCoverageInRange, false);
   assert.equal(employee.remoteWorkStatusLabel, 'Standing WFH Policy');
 });
@@ -93,8 +102,33 @@ test('createAttendanceEmployeeAccumulator shows Bamboo arrangements that are mis
 
   assert.equal(employee.hasStandingWfhPolicy, false);
   assert.equal(employee.hasApprovedRemoteRequestInRange, false);
+  assert.equal(employee.hasUnapprovedRemoteRequestInRange, true);
+  assert.equal(employee.hasAnyAuthorizedWfhInRange, false);
+  assert.equal(employee.hasAnyWfhPolicyInRange, true);
   assert.equal(employee.hasAnyApprovedWfhCoverageInRange, false);
   assert.equal(employee.remoteWorkStatusLabel, 'Bamboo Arrangement - Approval Missing (Permanent)');
+});
+
+test('isApprovedApprovalValue accepts common approved values only', () => {
+  assert.equal(isApprovedApprovalValue('Approved'), true);
+  assert.equal(isApprovedApprovalValue('yes'), true);
+  assert.equal(isApprovedApprovalValue('Y'), true);
+  assert.equal(isApprovedApprovalValue('AUTHORIZED'), true);
+  assert.equal(isApprovedApprovalValue('Pending'), false);
+  assert.equal(isApprovedApprovalValue('No'), false);
+  assert.equal(isApprovedApprovalValue(null), false);
+});
+
+test('getScoredAttendanceWeeks excludes partial, current, and future weeks', () => {
+  assert.deepEqual(
+    getScoredAttendanceWeeks({
+      weeks: ['2026-05-25', '2026-06-01', '2026-06-08', '2026-06-15'],
+      startDate: new Date('2026-05-27T00:00:00'),
+      endDate: new Date('2026-06-19T23:59:59'),
+      referenceDate: new Date('2026-06-08T12:00:00'),
+    }),
+    ['2026-06-01'],
+  );
 });
 
 test('ensureAttendanceEmployeeAccumulator reuses existing accumulators', () => {
@@ -161,15 +195,32 @@ test('toWeekDayDetails includes elapsed office window separately from activity h
   assert.equal(detail?.officeIpMatches, '203.0.113.2, 203.0.113.7');
 });
 
-test('calculateAttendanceWeekCell marks fully approved coverage as compliant with zero target', () => {
+test('calculateApprovedTargetReliefWeekdays keeps remote-work markers from reducing target', () => {
+  assert.equal(
+    calculateApprovedTargetReliefWeekdays({
+      approvedRemoteWorkWeekdays: 2,
+      approvedWorkAbroadWeekdays: 0,
+    }),
+    0,
+  );
+  assert.equal(
+    calculateApprovedTargetReliefWeekdays({
+      approvedRemoteWorkWeekdays: 2,
+      approvedWorkAbroadWeekdays: 1,
+    }),
+    1,
+  );
+});
+
+test('calculateAttendanceWeekCell marks fully approved target relief as compliant with zero target', () => {
   const cell = calculateAttendanceWeekCell({
     currentCell: { officeDays: 0, remoteDays: 3, ptoDays: 0, days: [] },
     officeDaysRequired: 2,
     hasActivTrakCoverage: true,
     approvedCoverageWeekdays: 2,
-    hasApprovedRemoteCoverage: true,
-    hasApprovedWorkAbroadCoverage: false,
-    exceptionLabel: 'Temporary Remote Work',
+    hasApprovedRemoteCoverage: false,
+    hasApprovedWorkAbroadCoverage: true,
+    exceptionLabel: 'Work Abroad / Another Province (Morocco)',
   });
 
   assert.equal(cell.adjustedOfficeTarget, 0);

@@ -122,6 +122,10 @@ export interface OfficeIpActivityRecord {
   lastActivityAt: string | null;
 }
 
+export interface ActivTrakIpActivityRecord extends OfficeIpActivityRecord {
+  userId: number | null;
+}
+
 // ============================================================================
 // Client
 // ============================================================================
@@ -361,6 +365,67 @@ export async function fetchOfficeIpActivity(
   const [rows] = await client.query({ query: sql, params, location: 'US' });
   return (rows as Array<Record<string, unknown>>).map((row) => ({
     date: parseLocalDate((row.local_date as { value?: string })?.value || String(row.local_date)),
+    email: String(row.email || '').toLowerCase(),
+    displayName: row.display_name ? String(row.display_name) : null,
+    publicIp: String(row.public_ip || ''),
+    durationSeconds: Number(row.duration_seconds) || 0,
+    eventCount: Number(row.event_count) || 0,
+    firstActivityAt: normalizeBigQueryDateTime(row.first_activity_datetime),
+    lastActivityAt: normalizeBigQueryDateTime(row.last_activity_datetime),
+  }));
+}
+
+export async function fetchActivTrakIpActivity(
+  startDate: Date,
+  endDate: Date,
+  emails?: string[],
+): Promise<ActivTrakIpActivityRecord[]> {
+  const client = getBigQueryClient();
+  let sql = `
+    WITH user_emails AS (
+      SELECT userid, LOWER(email) AS email,
+        ROW_NUMBER() OVER (PARTITION BY userid ORDER BY email) AS rn
+      FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.user_identifiers\`
+      WHERE email IS NOT NULL
+    )
+    SELECT
+      e.local_date,
+      e.user_id,
+      ue.email,
+      ARRAY_AGG(NULLIF(TRIM(e.user_name), '') IGNORE NULLS LIMIT 1)[OFFSET(0)] AS display_name,
+      e.public_ip,
+      SUM(COALESCE(e.duration_sec, 0)) AS duration_seconds,
+      COUNT(*) AS event_count,
+      MIN(e.local_datetime) AS first_activity_datetime,
+      MAX(DATETIME_ADD(e.local_datetime, INTERVAL COALESCE(e.duration_sec, 0) SECOND)) AS last_activity_datetime
+    FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.events\` e
+    LEFT JOIN user_emails ue
+      ON e.user_id = ue.userid
+     AND ue.rn = 1
+    WHERE e.local_date BETWEEN @startDate AND @endDate
+      AND e.public_ip IS NOT NULL
+      AND ue.email IS NOT NULL
+  `;
+
+  const params: Record<string, unknown> = {
+    startDate: formatDate(startDate),
+    endDate: formatDate(endDate),
+  };
+
+  if (emails && emails.length > 0) {
+    sql += ` AND ue.email IN UNNEST(@emails)`;
+    params.emails = emails.map((email) => email.toLowerCase());
+  }
+
+  sql += `
+    GROUP BY e.local_date, e.user_id, ue.email, e.public_ip
+    ORDER BY e.local_date DESC, ue.email, e.public_ip
+  `;
+
+  const [rows] = await client.query({ query: sql, params, location: 'US' });
+  return (rows as Array<Record<string, unknown>>).map((row) => ({
+    date: parseLocalDate((row.local_date as { value?: string })?.value || String(row.local_date)),
+    userId: row.user_id == null ? null : Number(row.user_id),
     email: String(row.email || '').toLowerCase(),
     displayName: row.display_name ? String(row.display_name) : null,
     publicIp: String(row.public_ip || ''),

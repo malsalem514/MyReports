@@ -1,8 +1,11 @@
 import { query } from './oracle';
 import {
+  calculateApprovedTargetReliefWeekdays,
   calculateAttendanceWeekCell,
   createAttendanceEmployeeAccumulator,
   ensureAttendanceEmployeeAccumulator,
+  getScoredAttendanceWeeks,
+  isApprovedApprovalValue,
   toWeekDayDetails,
   type AttendanceApprovalIndex,
   type AttendanceDayAccumulator,
@@ -105,6 +108,60 @@ export interface SuspiciousActivTrakIdentity {
   hasNonEmailIdentifier: boolean;
   hasNonCorporateDomain: boolean;
   hasNoActivity: boolean;
+}
+
+export interface DuoActivTrakReconciliationRow {
+  date: Date;
+  email: string;
+  displayName: string | null;
+  department: string | null;
+  employeeOfficeLocation: string | null;
+  duoLoginCount: number;
+  firstDuoLoginAt: Date | null;
+  lastDuoLoginAt: Date | null;
+  duoApplications: string | null;
+  duoIps: string | null;
+  duoLocations: string | null;
+  duoOfficeIpMatch: boolean;
+  hasActivTrakDay: boolean;
+  activTrakFirstActivityAt: Date | null;
+  activTrakLastActivityAt: Date | null;
+  activTrakTotalSeconds: number;
+  activTrakLocation: string | null;
+  activTrakIpDurationSeconds: number;
+  activTrakIpEventCount: number;
+  firstIpActivityAt: Date | null;
+  lastIpActivityAt: Date | null;
+  activTrakIps: string | null;
+  activTrakOfficeIpMatch: boolean;
+  evidenceStatus: string;
+  locationConfidence: string;
+  needsReview: boolean;
+}
+
+export interface DuoDeviceWithoutActivTrakRow {
+  eventTs: Date;
+  date: Date;
+  email: string;
+  displayName: string | null;
+  department: string | null;
+  applicationName: string | null;
+  destinationName: string | null;
+  accessDeviceIp: string | null;
+  accessDeviceHostname: string | null;
+  accessDeviceOs: string | null;
+  accessDeviceOsVersion: string | null;
+  accessDeviceBrowser: string | null;
+  accessDeviceBrowserVersion: string | null;
+  accessDeviceCity: string | null;
+  accessDeviceState: string | null;
+  accessDeviceCountry: string | null;
+  trustedEndpointStatus: string | null;
+  hasActivTrakIdentifier: boolean;
+  hasActivTrakDay: boolean;
+  hasActivTrakSameIp: boolean;
+  lastActivTrakActivity: Date | null;
+  issueReason: string;
 }
 
 // ============================================================================
@@ -259,6 +316,143 @@ export async function getSuspiciousActivTrakIdentities(): Promise<SuspiciousActi
     hasNonCorporateDomain: row.HAS_NON_CORPORATE_DOMAIN === 1,
     hasNoActivity: row.HAS_NO_ACTIVITY === 1,
   }));
+}
+
+export async function getDuoActivTrakReconciliationReport(
+  startDate: Date,
+  endDate: Date,
+): Promise<{
+  rows: DuoActivTrakReconciliationRow[];
+  deviceRows: DuoDeviceWithoutActivTrakRow[];
+  lastSyncedAt: Date | null;
+}> {
+  const [rows, deviceRows, syncRows] = await Promise.all([
+    query<{
+      RECORD_DATE: Date;
+      EMAIL: string;
+      DISPLAY_NAME: string | null;
+      DEPARTMENT: string | null;
+      EMPLOYEE_OFFICE_LOCATION: string | null;
+      DUO_LOGIN_COUNT: number | null;
+      FIRST_DUO_LOGIN_AT: Date | null;
+      LAST_DUO_LOGIN_AT: Date | null;
+      DUO_APPLICATIONS: string | null;
+      DUO_IPS: string | null;
+      DUO_LOCATIONS: string | null;
+      DUO_OFFICE_IP_MATCH: number | null;
+      HAS_ACTIVTRAK_DAY: number | null;
+      ACTIVTRAK_FIRST_ACTIVITY_AT: Date | null;
+      ACTIVTRAK_LAST_ACTIVITY_AT: Date | null;
+      ACTIVTRAK_TOTAL_SECONDS: number | null;
+      ACTIVTRAK_LOCATION: string | null;
+      ACTIVTRAK_IP_DURATION_SECONDS: number | null;
+      ACTIVTRAK_IP_EVENT_COUNT: number | null;
+      FIRST_IP_ACTIVITY_AT: Date | null;
+      LAST_IP_ACTIVITY_AT: Date | null;
+      ACTIVTRAK_IPS: string | null;
+      ACTIVTRAK_OFFICE_IP_MATCH: number | null;
+      EVIDENCE_STATUS: string;
+      LOCATION_CONFIDENCE: string;
+      NEEDS_REVIEW: number | null;
+    }>(
+      `SELECT *
+       FROM V_DUO_ACTIVTRAK_DAILY
+       WHERE RECORD_DATE BETWEEN :sd AND :ed
+       ORDER BY NEEDS_REVIEW DESC, RECORD_DATE DESC, DISPLAY_NAME, EMAIL`,
+      { sd: startDate, ed: endDate },
+    ),
+    query<{
+      EVENT_TS: Date;
+      RECORD_DATE: Date;
+      EMAIL: string;
+      DISPLAY_NAME: string | null;
+      DEPARTMENT: string | null;
+      APPLICATION_NAME: string | null;
+      DESTINATION_NAME: string | null;
+      ACCESS_DEVICE_IP: string | null;
+      ACCESS_DEVICE_HOSTNAME: string | null;
+      ACCESS_DEVICE_OS: string | null;
+      ACCESS_DEVICE_OS_VERSION: string | null;
+      ACCESS_DEVICE_BROWSER: string | null;
+      ACCESS_DEVICE_BROWSER_VERSION: string | null;
+      ACCESS_DEVICE_CITY: string | null;
+      ACCESS_DEVICE_STATE: string | null;
+      ACCESS_DEVICE_COUNTRY: string | null;
+      TRUSTED_ENDPOINT_STATUS: string | null;
+      HAS_ACTIVTRAK_IDENTIFIER: number | null;
+      HAS_ACTIVTRAK_DAY: number | null;
+      HAS_ACTIVTRAK_SAME_IP: number | null;
+      LAST_ACTIVTRAK_ACTIVITY: Date | null;
+      ISSUE_REASON: string;
+    }>(
+      `SELECT *
+       FROM V_DUO_DEVICES_WITHOUT_ACTIVTRAK
+       WHERE RECORD_DATE BETWEEN :sd AND :ed
+       ORDER BY EVENT_TS DESC, DISPLAY_NAME, EMAIL`,
+      { sd: startDate, ed: endDate },
+    ),
+    query<{ UPDATED_AT: Date | null }>(
+      `SELECT UPDATED_AT
+       FROM TL_DUO_SYNC_STATE
+       WHERE STATE_KEY = 'auth_logs'`,
+    ),
+  ]);
+
+  return {
+    rows: rows.map((row) => ({
+      date: row.RECORD_DATE,
+      email: row.EMAIL,
+      displayName: row.DISPLAY_NAME,
+      department: row.DEPARTMENT,
+      employeeOfficeLocation: row.EMPLOYEE_OFFICE_LOCATION,
+      duoLoginCount: row.DUO_LOGIN_COUNT || 0,
+      firstDuoLoginAt: row.FIRST_DUO_LOGIN_AT,
+      lastDuoLoginAt: row.LAST_DUO_LOGIN_AT,
+      duoApplications: row.DUO_APPLICATIONS,
+      duoIps: row.DUO_IPS,
+      duoLocations: row.DUO_LOCATIONS,
+      duoOfficeIpMatch: row.DUO_OFFICE_IP_MATCH === 1,
+      hasActivTrakDay: row.HAS_ACTIVTRAK_DAY === 1,
+      activTrakFirstActivityAt: row.ACTIVTRAK_FIRST_ACTIVITY_AT,
+      activTrakLastActivityAt: row.ACTIVTRAK_LAST_ACTIVITY_AT,
+      activTrakTotalSeconds: row.ACTIVTRAK_TOTAL_SECONDS || 0,
+      activTrakLocation: row.ACTIVTRAK_LOCATION,
+      activTrakIpDurationSeconds: row.ACTIVTRAK_IP_DURATION_SECONDS || 0,
+      activTrakIpEventCount: row.ACTIVTRAK_IP_EVENT_COUNT || 0,
+      firstIpActivityAt: row.FIRST_IP_ACTIVITY_AT,
+      lastIpActivityAt: row.LAST_IP_ACTIVITY_AT,
+      activTrakIps: row.ACTIVTRAK_IPS,
+      activTrakOfficeIpMatch: row.ACTIVTRAK_OFFICE_IP_MATCH === 1,
+      evidenceStatus: row.EVIDENCE_STATUS,
+      locationConfidence: row.LOCATION_CONFIDENCE,
+      needsReview: row.NEEDS_REVIEW === 1,
+    })),
+    deviceRows: deviceRows.map((row) => ({
+      eventTs: row.EVENT_TS,
+      date: row.RECORD_DATE,
+      email: row.EMAIL,
+      displayName: row.DISPLAY_NAME,
+      department: row.DEPARTMENT,
+      applicationName: row.APPLICATION_NAME,
+      destinationName: row.DESTINATION_NAME,
+      accessDeviceIp: row.ACCESS_DEVICE_IP,
+      accessDeviceHostname: row.ACCESS_DEVICE_HOSTNAME,
+      accessDeviceOs: row.ACCESS_DEVICE_OS,
+      accessDeviceOsVersion: row.ACCESS_DEVICE_OS_VERSION,
+      accessDeviceBrowser: row.ACCESS_DEVICE_BROWSER,
+      accessDeviceBrowserVersion: row.ACCESS_DEVICE_BROWSER_VERSION,
+      accessDeviceCity: row.ACCESS_DEVICE_CITY,
+      accessDeviceState: row.ACCESS_DEVICE_STATE,
+      accessDeviceCountry: row.ACCESS_DEVICE_COUNTRY,
+      trustedEndpointStatus: row.TRUSTED_ENDPOINT_STATUS,
+      hasActivTrakIdentifier: row.HAS_ACTIVTRAK_IDENTIFIER === 1,
+      hasActivTrakDay: row.HAS_ACTIVTRAK_DAY === 1,
+      hasActivTrakSameIp: row.HAS_ACTIVTRAK_SAME_IP === 1,
+      lastActivTrakActivity: row.LAST_ACTIVTRAK_ACTIVITY,
+      issueReason: row.ISSUE_REASON,
+    })),
+    lastSyncedAt: syncRows[0]?.UPDATED_AT || null,
+  };
 }
 
 export async function getEmployeeByEmail(email: string): Promise<Employee | null> {
@@ -418,7 +612,24 @@ export async function getAttendanceReport(
     emails.forEach((email, i) => { empParams[`em${i}`] = email.toLowerCase(); });
   }
 
-  const [attRows, empRows, dailyRows, ptoDailyRows, remoteWorkRows, workAbroadRows] = await Promise.all([
+  const now = new Date();
+  const today = new Date(now.getTime());
+  today.setHours(0, 0, 0, 0);
+
+  const normalizeDateOnly = (value: Date | string | null | undefined): string | null => {
+    if (!value) return null;
+    if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : toDateStr(value);
+
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const isoMatch = trimmed.match(/\d{4}-\d{2}-\d{2}/);
+    if (isoMatch) return isoMatch[0];
+
+    const parsed = new Date(trimmed);
+    return Number.isNaN(parsed.getTime()) ? null : toDateStr(parsed);
+  };
+
+  const [attRows, empRows, remoteWorkRows, workAbroadRows] = await Promise.all([
     query<{
       EMAIL: string; DISPLAY_NAME: string; DEPARTMENT: string;
       OFFICE_LOCATION: string; WEEK_START: Date;
@@ -442,44 +653,6 @@ export async function getAttendanceReport(
          ON LOWER(e.EMAIL) = m.EMAIL
        WHERE 1 = 1${empEmailFilter}`,
       empParams,
-    ),
-    // Daily detail (deduped, Office wins, weekdays only) — includes PTO flag from ActivTrak
-    query<{ EMAIL: string; RECORD_DATE: Date; LOCATION: string; IS_PTO: number; PTO_TYPE: string | null }>(
-      `SELECT EMAIL, RECORD_DATE, LOCATION, IS_PTO, PTO_TYPE FROM (
-        SELECT LOWER(t.EMAIL) AS EMAIL, t.RECORD_DATE, t.LOCATION, NVL(t.IS_PTO, 0) AS IS_PTO, t.PTO_TYPE,
-          ROW_NUMBER() OVER (PARTITION BY LOWER(t.EMAIL), TRUNC(t.RECORD_DATE)
-            ORDER BY DECODE(t.LOCATION, 'Office', 1, 'Remote', 2, 3)) AS rn
-        FROM TL_ATTENDANCE t
-        WHERE t.RECORD_DATE BETWEEN :sd AND :ed
-          AND TO_CHAR(t.RECORD_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')${emailFilter}
-      ) WHERE rn = 1`,
-      params,
-    ),
-    query<{ EMAIL: string; PTO_DATE: string; TYPE: string | null }>(
-      `SELECT DISTINCT
-         LOWER(t.EMAIL) AS EMAIL,
-         TO_CHAR(TRUNC(PTO_DATE), 'YYYY-MM-DD') AS PTO_DATE,
-         t.TYPE
-       FROM (
-        SELECT EMAIL, TRUNC(START_DATE) + LEVEL - 1 AS PTO_DATE, TYPE
-        FROM TL_TIME_OFF t
-        WHERE START_DATE <= :ed AND END_DATE >= :sd
-          AND STATUS != 'denied'${emails && emails.length > 0
-            ? ` AND LOWER(EMAIL) IN (${emails.map((_, i) => `:pe${i}`).join(',')})`
-            : ''}
-        CONNECT BY LEVEL <= (TRUNC(END_DATE) - TRUNC(START_DATE) + 1)
-          AND PRIOR ROWID = ROWID
-          AND PRIOR SYS_GUID() IS NOT NULL
-      ) t
-      WHERE TRUNC(PTO_DATE) BETWEEN :sd AND :ed
-        AND TO_CHAR(PTO_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')`,
-      {
-        sd: startDate,
-        ed: endDate,
-        ...(emails && emails.length > 0
-          ? Object.fromEntries(emails.map((email, i) => [`pe${i}`, email.toLowerCase()]))
-          : {}),
-      },
     ),
     query<{
       BAMBOO_ROW_ID: number;
@@ -583,6 +756,91 @@ export async function getAttendanceReport(
     ),
   ]);
 
+  const selectedStartDate = toDateStr(startDate);
+  const selectedEndDate = toDateStr(endDate);
+  const alternateInOfficeLookupByKey = new Map<string, { email: string; date: string; dateValue: Date }>();
+  for (const row of remoteWorkRows) {
+    const email = row.EMAIL?.toLowerCase();
+    const date = normalizeDateOnly(row.ALTERNATE_IN_OFFICE_WORK_DATE);
+    if (!email || !date) continue;
+
+    const dateValue = parseLocalDate(date);
+    if (dateValue > today) continue;
+    if (date >= selectedStartDate && date <= selectedEndDate) continue;
+
+    alternateInOfficeLookupByKey.set(`${email}|${date}`, { email, date, dateValue });
+  }
+  const alternateInOfficeLookups = [...alternateInOfficeLookupByKey.values()];
+
+  const buildAlternateInOfficePredicate = (alias: string) => {
+    const bindParams: Record<string, unknown> = {};
+    const clauses = alternateInOfficeLookups.map((lookup, i) => {
+      bindParams[`altEmail${i}`] = lookup.email;
+      bindParams[`altDate${i}`] = lookup.dateValue;
+      return `(LOWER(${alias}.EMAIL) = :altEmail${i} AND TRUNC(${alias}.RECORD_DATE) = TRUNC(:altDate${i}))`;
+    });
+    return {
+      sql: clauses.length > 0 ? clauses.join(' OR ') : '1 = 0',
+      params: bindParams,
+    };
+  };
+  const alternateAttendanceFilter = buildAlternateInOfficePredicate('t');
+  const alternateOfficeIpFilter = buildAlternateInOfficePredicate('o');
+
+  const [dailyRows, ptoDailyRows, alternateDailyRows] = await Promise.all([
+    // Daily detail (deduped, Office wins, weekdays only) — includes PTO flag from ActivTrak
+    query<{ EMAIL: string; RECORD_DATE: Date; LOCATION: string; IS_PTO: number; PTO_TYPE: string | null }>(
+      `SELECT EMAIL, RECORD_DATE, LOCATION, IS_PTO, PTO_TYPE FROM (
+        SELECT LOWER(t.EMAIL) AS EMAIL, t.RECORD_DATE, t.LOCATION, NVL(t.IS_PTO, 0) AS IS_PTO, t.PTO_TYPE,
+          ROW_NUMBER() OVER (PARTITION BY LOWER(t.EMAIL), TRUNC(t.RECORD_DATE)
+            ORDER BY DECODE(t.LOCATION, 'Office', 1, 'Remote', 2, 3)) AS rn
+        FROM TL_ATTENDANCE t
+        WHERE t.RECORD_DATE BETWEEN :sd AND :ed
+          AND TO_CHAR(t.RECORD_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')${emailFilter}
+      ) WHERE rn = 1`,
+      params,
+    ),
+    query<{ EMAIL: string; PTO_DATE: string; TYPE: string | null }>(
+      `SELECT DISTINCT
+         LOWER(t.EMAIL) AS EMAIL,
+         TO_CHAR(TRUNC(PTO_DATE), 'YYYY-MM-DD') AS PTO_DATE,
+         t.TYPE
+       FROM (
+        SELECT EMAIL, TRUNC(START_DATE) + LEVEL - 1 AS PTO_DATE, TYPE
+        FROM TL_TIME_OFF t
+        WHERE START_DATE <= :ed AND END_DATE >= :sd
+          AND STATUS != 'denied'${emails && emails.length > 0
+            ? ` AND LOWER(EMAIL) IN (${emails.map((_, i) => `:pe${i}`).join(',')})`
+            : ''}
+        CONNECT BY LEVEL <= (TRUNC(END_DATE) - TRUNC(START_DATE) + 1)
+          AND PRIOR ROWID = ROWID
+          AND PRIOR SYS_GUID() IS NOT NULL
+      ) t
+      WHERE TRUNC(PTO_DATE) BETWEEN :sd AND :ed
+        AND TO_CHAR(PTO_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')`,
+      {
+        sd: startDate,
+        ed: endDate,
+        ...(emails && emails.length > 0
+          ? Object.fromEntries(emails.map((email, i) => [`pe${i}`, email.toLowerCase()]))
+          : {}),
+      },
+    ),
+    alternateInOfficeLookups.length > 0
+      ? query<{ EMAIL: string; RECORD_DATE: Date; LOCATION: string; IS_PTO: number; PTO_TYPE: string | null }>(
+        `SELECT EMAIL, RECORD_DATE, LOCATION, IS_PTO, PTO_TYPE FROM (
+          SELECT LOWER(t.EMAIL) AS EMAIL, t.RECORD_DATE, t.LOCATION, NVL(t.IS_PTO, 0) AS IS_PTO, t.PTO_TYPE,
+            ROW_NUMBER() OVER (PARTITION BY LOWER(t.EMAIL), TRUNC(t.RECORD_DATE)
+              ORDER BY DECODE(t.LOCATION, 'Office', 1, 'Remote', 2, 3)) AS rn
+          FROM TL_ATTENDANCE t
+          WHERE (${alternateAttendanceFilter.sql})
+            AND TO_CHAR(t.RECORD_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')
+        ) WHERE rn = 1`,
+        alternateAttendanceFilter.params,
+      )
+      : Promise.resolve([]),
+  ]);
+
   const officeEmployeeEmails = [...new Set(
     empRows
       .map((employee) => employee.EMAIL?.toLowerCase())
@@ -665,6 +923,29 @@ export async function getAttendanceReport(
         ),
       ])
     : [[], [], []];
+
+  const alternateOfficeIpActivityRows = alternateInOfficeLookups.length > 0
+    ? await query<{
+        EMAIL: string;
+        RECORD_DATE: Date;
+        PUBLIC_IP: string | null;
+        DURATION_SECONDS: number | null;
+        FIRST_ACTIVITY_AT: Date | null;
+        LAST_ACTIVITY_AT: Date | null;
+      }>(
+        `SELECT
+           LOWER(o.EMAIL) AS EMAIL,
+           o.RECORD_DATE,
+           o.PUBLIC_IP,
+           o.DURATION_SECONDS,
+           ${officeFirstActivitySelect},
+           ${officeLastActivitySelect}
+         FROM TL_OFFICE_IP_ACTIVITY o
+         WHERE (${alternateOfficeIpFilter.sql})
+           AND TO_CHAR(o.RECORD_DATE, 'DY', 'NLS_DATE_LANGUAGE=ENGLISH') NOT IN ('SAT', 'SUN')`,
+        alternateOfficeIpFilter.params,
+      )
+    : [];
 
   const tbsEmployeeNos = [...new Set(
     tbsMapRows
@@ -781,6 +1062,7 @@ export async function getAttendanceReport(
   };
 
   const getWeekKey = (email: string, weekStart: string) => `${email}|${weekStart}`;
+  const getEmployeeDateKey = (email: string, date: string) => `${email}|${date}`;
 
   const formatCoverageLabels = (labels?: Set<string>) => {
     if (!labels || labels.size === 0) return '';
@@ -807,6 +1089,14 @@ export async function getAttendanceReport(
     return current;
   };
 
+  const alternateInOfficeFulfilledByKey = new Map<string, boolean>();
+  const markAlternateInOfficeFulfilled = (email: string | null | undefined, dateInput: Date | string | null | undefined) => {
+    if (!email || !dateInput) return;
+    const date = normalizeDateOnly(dateInput);
+    if (!date) return;
+    alternateInOfficeFulfilledByKey.set(getEmployeeDateKey(email.toLowerCase(), date), true);
+  };
+
   for (const r of dailyRows) {
     const email = r.EMAIL?.toLowerCase();
     if (!email) continue;
@@ -814,6 +1104,11 @@ export async function getAttendanceReport(
     const entry = ensureDailyEntry(email, d);
     entry.location = r.IS_PTO === 1 ? 'PTO' : (r.LOCATION || 'Unknown');
     entry.ptoType = r.IS_PTO === 1 ? r.PTO_TYPE : null;
+  }
+
+  for (const r of alternateDailyRows) {
+    if (r.IS_PTO === 1 || r.LOCATION !== 'Office') continue;
+    markAlternateInOfficeFulfilled(r.EMAIL, r.RECORD_DATE);
   }
 
   for (const r of ptoDailyRows) {
@@ -861,6 +1156,45 @@ export async function getAttendanceReport(
     }
   }
 
+  for (const record of alternateOfficeIpActivityRows) {
+    if ((record.DURATION_SECONDS ?? 0) <= 0) continue;
+    markAlternateInOfficeFulfilled(record.EMAIL, record.RECORD_DATE);
+  }
+
+  const getAlternateInOfficeStatus = (
+    email: string | null | undefined,
+    rawAlternateDate: string | null,
+  ): {
+    date: string | null;
+    fulfilled: boolean | null;
+    status: string;
+  } => {
+    const date = normalizeDateOnly(rawAlternateDate);
+    if (!date) {
+      return { date: rawAlternateDate || null, fulfilled: null, status: 'No alternate date' };
+    }
+    if (!email) {
+      return { date, fulfilled: null, status: 'Unknown employee' };
+    }
+
+    const normalizedEmail = email.toLowerCase();
+    const alternateDate = parseLocalDate(date);
+    if (alternateDate > today) {
+      return { date, fulfilled: null, status: 'Pending' };
+    }
+
+    const weekStart = toDateStr(getWeekStartForDate(alternateDate));
+    const entry = dailyEntriesByKey.get(getWeekKey(normalizedEmail, weekStart))?.get(date);
+    const fulfilled = entry?.location === 'Office'
+      || (entry?.officeDurationSeconds ?? 0) > 0
+      || alternateInOfficeFulfilledByKey.get(getEmployeeDateKey(normalizedEmail, date)) === true;
+    return {
+      date,
+      fulfilled,
+      status: fulfilled ? 'Fulfilled' : 'Not Fulfilled',
+    };
+  };
+
   for (const entry of tbsDailyRows) {
     const email = tbsToEmail.get(entry.EMPLOYEE_NO);
     if (!email) continue;
@@ -874,19 +1208,21 @@ export async function getAttendanceReport(
 
   for (const row of remoteWorkRows) {
     const email = row.EMAIL?.toLowerCase();
-    const approvalValue = (row.MANAGER_APPROVAL_RECEIVED || '').trim().toUpperCase();
-    const isApprovedRemoteWork = approvalValue === 'YES' || approvalValue === 'APPROVED';
+    const isApprovedRemoteWork = isApprovedApprovalValue(row.MANAGER_APPROVAL_RECEIVED);
     const hasStandingWfhPolicy = row.REMOTE_WORKDAY_POLICY_ASSIGNED === 1
       || (email ? standingPolicyEmails.has(email) : false);
-    const countsAsAuthorized = isApprovedRemoteWork;
+    const countsAsAuthorized = isApprovedRemoteWork || hasStandingWfhPolicy;
     const authorizationStatusLabel = isApprovedRemoteWork
       ? 'Approved Request'
-      : 'Approval Missing';
+      : hasStandingWfhPolicy
+        ? 'Standing WFH Policy'
+        : 'Approval Missing';
+    const alternateInOfficeStatus = getAlternateInOfficeStatus(email, row.ALTERNATE_IN_OFFICE_WORK_DATE);
 
     if (email && isApprovedRemoteWork) {
       approvedRemoteRequestEmails.add(email);
     }
-    if (email && !isApprovedRemoteWork) {
+    if (email && !countsAsAuthorized) {
       unapprovedRemoteRequestEmails.add(email);
     }
     const type = row.REMOTE_WORK_TYPE?.trim();
@@ -896,7 +1232,7 @@ export async function getAttendanceReport(
       }
       approvedRemoteWorkTypesByEmail.get(email)!.add(type);
     }
-    if (email && type && !isApprovedRemoteWork) {
+    if (email && type && !countsAsAuthorized) {
       if (!unapprovedRemoteWorkTypesByEmail.has(email)) {
         unapprovedRemoteWorkTypesByEmail.set(email, new Set());
       }
@@ -915,7 +1251,9 @@ export async function getAttendanceReport(
       remoteWorkType: row.REMOTE_WORK_TYPE || null,
       reason: row.REASON || null,
       supportingDocumentationSubmitted: row.SUPPORTING_DOCUMENTATION_SUBMITTED || null,
-      alternateInOfficeWorkDate: row.ALTERNATE_IN_OFFICE_WORK_DATE || null,
+      alternateInOfficeWorkDate: alternateInOfficeStatus.date,
+      alternateInOfficeWorkDateFulfilled: alternateInOfficeStatus.fulfilled,
+      alternateInOfficeWorkDateStatus: alternateInOfficeStatus.status,
       managerApprovalReceived: row.MANAGER_APPROVAL_RECEIVED || null,
       managerName: row.MANAGER_NAME || null,
       remoteWorkdayPolicyAssigned: hasStandingWfhPolicy,
@@ -960,8 +1298,7 @@ export async function getAttendanceReport(
 
   for (const row of workAbroadRows) {
     const email = row.EMAIL?.toLowerCase();
-    const approvalValue = (row.REQUEST_APPROVED || '').trim().toUpperCase();
-    const isApprovedWorkAbroad = approvalValue === 'YES' || approvalValue === 'APPROVED';
+    const isApprovedWorkAbroad = isApprovedApprovalValue(row.REQUEST_APPROVED);
     const countryOrProvince = row.COUNTRY_OR_PROVINCE?.trim();
 
     if (email && isApprovedWorkAbroad) {
@@ -1132,7 +1469,6 @@ export async function getAttendanceReport(
   }
 
   // --- Current-week detection (partial week — exclude from compliance/avg) ---
-  const now = new Date();
   const currentDow = now.getDay(); // 0=Sun
   const currentMondayOffset = currentDow === 0 ? -6 : 1 - currentDow;
   const currentMonday = new Date(now.getTime());
@@ -1161,25 +1497,34 @@ export async function getAttendanceReport(
   const weeks = allIsoWeeks;
   const isCurrentWeekInRange = weeks.includes(currentWeekStr);
 
-  // --- Completed weeks in the selected range (current week excluded when present) ---
-  const completedDataWeeks = weeks.filter((w) => w !== currentWeekStr);
+  // --- Completed full weeks in the selected range (current/future/partial weeks excluded from scoring) ---
+  const completedDataWeeks = getScoredAttendanceWeeks({
+    weeks,
+    startDate,
+    endDate,
+    referenceDate: now,
+  });
   const numCompletedWeeks = completedDataWeeks.length;
 
-  const getApprovedCoverageWeekdays = (email: string, weekStart: string) => (
-    approvedCoverageDatesByEmailWeek.get(getWeekKey(email, weekStart))?.size ?? 0
+  const getApprovedRemoteWorkWeekdays = (email: string, weekStart: string) => (
+    approvedRemoteWorkDatesByEmailWeek.get(getWeekKey(email, weekStart))?.size ?? 0
+  );
+
+  const getApprovedWorkAbroadWeekdays = (email: string, weekStart: string) => (
+    approvedWorkAbroadDatesByEmailWeek.get(getWeekKey(email, weekStart))?.size ?? 0
   );
 
   const hasApprovedRemoteCoverageForWeek = (email: string, weekStart: string) => (
-    (approvedRemoteWorkDatesByEmailWeek.get(getWeekKey(email, weekStart))?.size ?? 0) > 0
+    getApprovedRemoteWorkWeekdays(email, weekStart) > 0
   );
 
   const hasApprovedWorkAbroadCoverageForWeek = (email: string, weekStart: string) => (
-    (approvedWorkAbroadDatesByEmailWeek.get(getWeekKey(email, weekStart))?.size ?? 0) > 0
+    getApprovedWorkAbroadWeekdays(email, weekStart) > 0
   );
 
   const getWeekExceptionLabel = (email: string, weekStart: string) => {
     const labels = approvedCoverageLabelsByEmailWeek.get(getWeekKey(email, weekStart));
-    const hasTemporaryCoverage = getApprovedCoverageWeekdays(email, weekStart) > 0;
+    const hasTemporaryCoverage = (approvedCoverageDatesByEmailWeek.get(getWeekKey(email, weekStart))?.size ?? 0) > 0;
     if (hasTemporaryCoverage) return formatCoverageLabels(labels) || 'Approved Coverage';
     return null;
   };
@@ -1196,8 +1541,12 @@ export async function getAttendanceReport(
     let exemptWeekCount = 0;
 
     for (const wk of weeks) {
-      const temporaryCoverageWeekdays = getApprovedCoverageWeekdays(email, wk);
-      const approvedCoverageWeekdays = temporaryCoverageWeekdays;
+      const approvedRemoteWorkWeekdays = getApprovedRemoteWorkWeekdays(email, wk);
+      const approvedWorkAbroadWeekdays = getApprovedWorkAbroadWeekdays(email, wk);
+      const approvedCoverageWeekdays = calculateApprovedTargetReliefWeekdays({
+        approvedRemoteWorkWeekdays,
+        approvedWorkAbroadWeekdays,
+      });
       const hasApprovedRemoteCoverage = hasApprovedRemoteCoverageForWeek(email, wk);
       const hasApprovedWorkAbroadCoverage = hasApprovedWorkAbroadCoverageForWeek(email, wk);
       const exceptionLabel = getWeekExceptionLabel(email, wk);
@@ -1262,6 +1611,9 @@ export async function getAttendanceReport(
       hasStandingWfhPolicy: data.hasStandingWfhPolicy,
       hasApprovedRemoteRequestInRange: data.hasApprovedRemoteRequestInRange,
       hasApprovedWorkAbroadRequestInRange: data.hasApprovedWorkAbroadRequestInRange,
+      hasUnapprovedRemoteRequestInRange: data.hasUnapprovedRemoteRequestInRange,
+      hasAnyAuthorizedWfhInRange: data.hasAnyAuthorizedWfhInRange,
+      hasAnyWfhPolicyInRange: data.hasAnyWfhPolicyInRange,
       hasAnyApprovedWfhCoverageInRange: data.hasAnyApprovedWfhCoverageInRange,
       remoteWorkStatusLabel: data.remoteWorkStatusLabel,
       weeks: data.weeks,

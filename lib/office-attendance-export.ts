@@ -26,6 +26,9 @@ export interface AttendanceExportData {
     weekFillHexes: string[][];
     weekColumnStartIndex: number;
   };
+  legendSheet: ExportSheetData & {
+    title: string;
+  };
   detailSheet?: ExportSheetData & {
     title: string;
   };
@@ -51,6 +54,7 @@ const APPROVAL_REQUEST_HEADERS = [
   'Work Schedule',
   'Supporting Documentation Submitted',
   'Alternate In-Office Work Date',
+  'Alternate In-Office Fulfilled',
 ];
 
 const AGGREGATE_WEEKLY_BREAKDOWN_HEADERS = [
@@ -65,6 +69,16 @@ const AGGREGATE_WEEKLY_BREAKDOWN_HEADERS = [
   'Non-compliant',
   'Exempt this week',
   'PTO Excused',
+];
+
+const ATTENDANCE_EXPORT_LEGEND_ROWS: ExportCell[][] = [
+  ['[House]', 'Approved temporary remote-work request marker. This marker does not reduce the office target.'],
+  ['[Plane]', 'Approved work-abroad / another-province marker. These approved weekdays reduce the office target.'],
+  ['Green cell', 'Compliant under the adjusted target.'],
+  ['Orange cell', 'Below the adjusted target with at least one office day.'],
+  ['Red cell', 'No office days for a measured week.'],
+  ['Blue cell', 'Week includes PTO.'],
+  ['N/A score', 'No eligible measured weeks in the selected completed-week range.'],
 ];
 
 export function toCsvRow(cells: ExportCell[]): string {
@@ -101,6 +115,11 @@ export function buildAttendanceCsvContent(data: AttendanceExportData): string {
     lines.push(...data.detailSheet.rows.map(toCsvRow));
   }
 
+  lines.push('');
+  lines.push(data.legendSheet.title);
+  lines.push(toCsvRow(data.legendSheet.headers));
+  lines.push(...data.legendSheet.rows.map(toCsvRow));
+
   return lines.join('\n');
 }
 
@@ -128,6 +147,7 @@ export function buildApprovalRequestExportData(combinedApprovalRequests: Approva
         request.schedule || '',
         request.supportingDocumentationSubmitted || '',
         request.alternateInOfficeWorkDate || '',
+        request.alternateInOfficeWorkDateStatus || '',
       ]),
       columnWidths: APPROVAL_REQUEST_HEADERS.map((_, index) => (index >= 13 ? 24 : 18)),
     },
@@ -165,7 +185,13 @@ export function buildAttendanceExportData(params: {
     ...(isAggregateView ? ['Quebec Employees', 'Remote/Exempt Employees'] : []),
     'Location',
     'Coverage Status',
-    ...(isAggregateView ? [] : ['Standing WFH Policy', 'Approved Coverage In Range', 'ActivTrak Coverage']),
+    ...(isAggregateView ? [] : [
+      'Standing WFH Policy',
+      'Temporary Remote In Range',
+      'Work Abroad Relief In Range',
+      'Approval Missing In Range',
+      'ActivTrak Coverage',
+    ]),
     ...weeks.map((week) => getWeekLabel(week)),
     isAggregateView ? 'Total Office Days' : 'Total',
     'Avg/Week',
@@ -178,7 +204,7 @@ export function buildAttendanceExportData(params: {
     isAggregateView ? `${filteredSummary.totalEmployees} employees` : '',
     ...(isAggregateView ? ['', ''] : []),
     '',
-    ...(isAggregateView ? [] : ['', '', filteredSummary.unknownCoverageCount > 0 ? `${filteredSummary.unknownCoverageCount} unknown` : '']),
+    ...(isAggregateView ? [] : ['', '', '', '', filteredSummary.unknownCoverageCount > 0 ? `${filteredSummary.unknownCoverageCount} unknown` : '']),
     `${filteredSummary.complianceRate}% score`,
     ...weeks.map(() => ''),
     '',
@@ -204,15 +230,19 @@ export function buildAttendanceExportData(params: {
     isAggregateView ? '—' : row.remoteWorkStatusLabel,
     ...(isAggregateView ? [] : [
       row.hasStandingWfhPolicy ? 'Yes' : 'No',
-      row.hasAnyApprovedWfhCoverageInRange ? 'Yes' : 'No',
+      row.hasApprovedRemoteRequestInRange ? 'Yes' : 'No',
+      row.hasApprovedWorkAbroadRequestInRange ? 'Yes' : 'No',
+      row.hasUnapprovedRemoteRequestInRange ? 'Yes' : 'No',
       row.hasActivTrakCoverage ? 'Covered' : 'Unknown',
     ]),
     ...weeks.map((week) => isAggregateView
-      ? `${row.weeklyCompliance?.[week]?.compliancePct ?? 0}%`
+      ? ((row.weeklyCompliance?.[week]?.eligibleEmployees ?? 0) > 0
+        ? `${row.weeklyCompliance?.[week]?.compliancePct ?? 0}%`
+        : 'N/A')
       : formatEmployeeWeekValue(row.weeks[week], row.hasActivTrakCoverage)),
     isAggregateView ? row.total : (row.hasActivTrakCoverage ? row.total : ''),
     isAggregateView ? row.avgPerWeek : (row.hasActivTrakCoverage ? row.avgPerWeek : ''),
-    isAggregateView ? row.scorePct : (row.hasActivTrakCoverage ? row.scorePct : ''),
+    row.hasScoredWeeks ? row.scorePct : 'N/A',
     isAggregateView ? row.trend : (row.hasActivTrakCoverage ? row.trend : ''),
   ]);
 
@@ -222,15 +252,23 @@ export function buildAttendanceExportData(params: {
     rows: mainRows,
     columnWidths: headers.map((_, index) => (index === 0 ? 24 : 14)),
     weekFillHexes,
-    weekColumnStartIndex: isAggregateView ? 6 : 7,
+    weekColumnStartIndex: isAggregateView ? 6 : 9,
+  };
+
+  const legendSheet: AttendanceExportData['legendSheet'] = {
+    title: 'Legend',
+    headers: ['Marker', 'Meaning'],
+    rows: ATTENDANCE_EXPORT_LEGEND_ROWS,
+    columnWidths: [18, 80],
   };
 
   if (!isAggregateView) {
-    return { mainSheet };
+    return { mainSheet, legendSheet };
   }
 
   return {
     mainSheet,
+    legendSheet,
     detailSheet: {
       title: 'Weekly Breakdown',
       headers: AGGREGATE_WEEKLY_BREAKDOWN_HEADERS,
@@ -241,7 +279,7 @@ export function buildAttendanceExportData(params: {
           return [[
             row.label,
             getWeekLabel(week),
-            `${compliance.compliancePct}%`,
+            compliance.eligibleEmployees > 0 ? `${compliance.compliancePct}%` : 'N/A',
             compliance.eligibleEmployees,
             compliance.compliantEmployees,
             compliance.exemptEmployees,
