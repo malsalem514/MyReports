@@ -1,6 +1,7 @@
 import { BigQuery } from '@google-cloud/bigquery';
 import { z } from 'zod';
 import { cachified } from './cache';
+import { expandEmailIdentityCandidates, normalizeEmail } from './email';
 
 // ============================================================================
 // Configuration
@@ -70,7 +71,7 @@ export const DailyUserSummarySchema = RawDailyUserSummarySchema.transform((raw) 
   return {
     date: raw.local_date,
     username: raw.user_name,
-    email: raw.user_name,
+    email: normalizeEmail(raw.user_name),
     productive_active_time: raw.productive_active_duration_seconds || 0,
     productive_passive_time: raw.productive_passive_duration_seconds || 0,
     unproductive_active_time: raw.unproductive_active_duration_seconds || 0,
@@ -174,11 +175,11 @@ async function _fetchProductivityDataUncached(
   const params: Record<string, unknown> = { startDate: startDateStr, endDate: endDateStr };
 
   if (emails && emails.length > 0) {
-    sql += ` AND ue.email IN UNNEST(@emails)`;
-    params.emails = emails.map((e) => e.toLowerCase());
+    sql += ` AND LOWER(COALESCE(ue.email, d.user_name)) IN UNNEST(@emails)`;
+    params.emails = expandEmailIdentityCandidates(emails);
   }
 
-  sql += ` ORDER BY d.local_date DESC, ue.email`;
+  sql += ` ORDER BY d.local_date DESC, user_email`;
 
   const [rows] = await client.query({ query: sql, params, location: 'US' });
 
@@ -244,7 +245,7 @@ export async function fetchProductivityStats(
 
   if (emails && emails.length > 0) {
     sql += ` AND LOWER(user_name) IN UNNEST(@emails)`;
-    params.emails = emails.map((e) => e.toLowerCase());
+    params.emails = expandEmailIdentityCandidates(emails);
   }
 
   const [rows] = await client.query({ query: sql, params, location: 'US' });
@@ -330,7 +331,7 @@ export async function fetchOfficeIpActivity(
     )
     SELECT
       e.local_date,
-      ue.email,
+      LOWER(COALESCE(ue.email, e.user_name)) AS email,
       ARRAY_AGG(NULLIF(TRIM(e.user_name), '') IGNORE NULLS LIMIT 1)[OFFSET(0)] AS display_name,
       e.public_ip,
       SUM(COALESCE(e.duration_sec, 0)) AS duration_seconds,
@@ -343,7 +344,7 @@ export async function fetchOfficeIpActivity(
      AND ue.rn = 1
     WHERE e.local_date BETWEEN @startDate AND @endDate
       AND e.public_ip IN UNNEST(@officeIps)
-      AND ue.email IS NOT NULL
+      AND COALESCE(ue.email, e.user_name) IS NOT NULL
   `;
 
   const params: Record<string, unknown> = {
@@ -353,19 +354,19 @@ export async function fetchOfficeIpActivity(
   };
 
   if (emails && emails.length > 0) {
-    sql += ` AND ue.email IN UNNEST(@emails)`;
-    params.emails = emails.map((email) => email.toLowerCase());
+    sql += ` AND LOWER(COALESCE(ue.email, e.user_name)) IN UNNEST(@emails)`;
+    params.emails = expandEmailIdentityCandidates(emails);
   }
 
   sql += `
-    GROUP BY e.local_date, ue.email, e.public_ip
-    ORDER BY e.local_date DESC, ue.email, e.public_ip
+    GROUP BY e.local_date, LOWER(COALESCE(ue.email, e.user_name)), e.public_ip
+    ORDER BY e.local_date DESC, email, e.public_ip
   `;
 
   const [rows] = await client.query({ query: sql, params, location: 'US' });
   return (rows as Array<Record<string, unknown>>).map((row) => ({
     date: parseLocalDate((row.local_date as { value?: string })?.value || String(row.local_date)),
-    email: String(row.email || '').toLowerCase(),
+    email: normalizeEmail(String(row.email || '')),
     displayName: row.display_name ? String(row.display_name) : null,
     publicIp: String(row.public_ip || ''),
     durationSeconds: Number(row.duration_seconds) || 0,
@@ -391,7 +392,7 @@ export async function fetchActivTrakIpActivity(
     SELECT
       e.local_date,
       e.user_id,
-      ue.email,
+      LOWER(COALESCE(ue.email, e.user_name)) AS email,
       ARRAY_AGG(NULLIF(TRIM(e.user_name), '') IGNORE NULLS LIMIT 1)[OFFSET(0)] AS display_name,
       e.public_ip,
       SUM(COALESCE(e.duration_sec, 0)) AS duration_seconds,
@@ -404,7 +405,7 @@ export async function fetchActivTrakIpActivity(
      AND ue.rn = 1
     WHERE e.local_date BETWEEN @startDate AND @endDate
       AND e.public_ip IS NOT NULL
-      AND ue.email IS NOT NULL
+      AND COALESCE(ue.email, e.user_name) IS NOT NULL
   `;
 
   const params: Record<string, unknown> = {
@@ -413,20 +414,20 @@ export async function fetchActivTrakIpActivity(
   };
 
   if (emails && emails.length > 0) {
-    sql += ` AND ue.email IN UNNEST(@emails)`;
-    params.emails = emails.map((email) => email.toLowerCase());
+    sql += ` AND LOWER(COALESCE(ue.email, e.user_name)) IN UNNEST(@emails)`;
+    params.emails = expandEmailIdentityCandidates(emails);
   }
 
   sql += `
-    GROUP BY e.local_date, e.user_id, ue.email, e.public_ip
-    ORDER BY e.local_date DESC, ue.email, e.public_ip
+    GROUP BY e.local_date, e.user_id, LOWER(COALESCE(ue.email, e.user_name)), e.public_ip
+    ORDER BY e.local_date DESC, email, e.public_ip
   `;
 
   const [rows] = await client.query({ query: sql, params, location: 'US' });
   return (rows as Array<Record<string, unknown>>).map((row) => ({
     date: parseLocalDate((row.local_date as { value?: string })?.value || String(row.local_date)),
     userId: row.user_id == null ? null : Number(row.user_id),
-    email: String(row.email || '').toLowerCase(),
+    email: normalizeEmail(String(row.email || '')),
     displayName: row.display_name ? String(row.display_name) : null,
     publicIp: String(row.public_ip || ''),
     durationSeconds: Number(row.duration_seconds) || 0,
@@ -465,7 +466,8 @@ async function _fetchOfficeAttendanceDataUncached(
       FROM \`${bigQueryConfig.projectId}.${ACTIVTRAK_DATASET}.user_identifiers\`
       WHERE email IS NOT NULL
     )
-    SELECT DISTINCT d.local_date, d.user_name, d.user_id, ue.email,
+    SELECT DISTINCT d.local_date, d.user_name, d.user_id,
+      LOWER(COALESCE(ue.email, d.user_name)) AS email,
       COALESCE(d.location, 'Unknown') as location,
       ROUND(COALESCE(d.total_duration_seconds, 0) / 3600, 2) as total_hours,
       COALESCE(d.time_off_duration_seconds, 0) as time_off_seconds,
@@ -478,11 +480,11 @@ async function _fetchOfficeAttendanceDataUncached(
   const params: Record<string, unknown> = { startDate: startDateStr, endDate: endDateStr };
 
   if (emails && emails.length > 0) {
-    sql += ` AND ue.email IN UNNEST(@emails)`;
-    params.emails = emails.map((e) => e.toLowerCase());
+    sql += ` AND LOWER(COALESCE(ue.email, d.user_name)) IN UNNEST(@emails)`;
+    params.emails = expandEmailIdentityCandidates(emails);
   }
 
-  sql += ` ORDER BY d.local_date DESC, ue.email`;
+  sql += ` ORDER BY d.local_date DESC, email`;
 
   const [rows] = await client.query({ query: sql, params, location: 'US' });
 
@@ -491,7 +493,7 @@ async function _fetchOfficeAttendanceDataUncached(
     const isPTO = ptoHours > 0 || ((row.time_off_day_count as number) > 0);
     return {
       date: parseLocalDate((row.local_date as { value: string })?.value || (row.local_date as string)),
-      email: ((row.email as string) || '').toLowerCase(),
+      email: normalizeEmail(((row.email as string) || (row.user_name as string) || '')),
       displayName: (row.user_name as string) || '',
       location: normalizeLocation(row.location as string),
       totalHours: Number(row.total_hours) || 0,

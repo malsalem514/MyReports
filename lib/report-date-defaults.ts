@@ -111,11 +111,13 @@ export function getTrailingWeeksParamRange(
 
 export function getOfficeAttendanceDefaultRange(
   lookbackWeeks = DEFAULT_OFFICE_ATTENDANCE_LOOKBACK_WEEKS,
+  referenceDate = new Date(),
 ): {
   startDate: Date;
   endDate: Date;
 } {
-  const endDate = getLastCompletedFriday();
+  const endDate = new Date(referenceDate);
+  endDate.setHours(23, 59, 59, 999);
   const startDate = subWeeks(getIsoWeekMonday(endDate), Math.max(lookbackWeeks - 1, 0));
 
   return { startDate, endDate };
