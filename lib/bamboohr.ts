@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { cachified } from './cache';
 import { normalizeEmail, normalizeEmailNullable } from './email';
+import { getSupervisorEmployeeId } from './bamboohr-identifiers';
 
 // ============================================================================
 // Helpers
@@ -282,7 +283,7 @@ export async function buildSupervisorMap(): Promise<
   }
 
   for (const emp of employees) {
-    const supId = emp.supervisorId || emp.supervisorEId;
+    const supId = getSupervisorEmployeeId(emp);
     if (supId) {
       map.set(emp.id, {
         supervisorId: supId,

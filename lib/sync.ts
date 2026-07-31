@@ -1,5 +1,6 @@
 import oracledb from 'oracledb';
 import { fetchEmployeeDirectory, fetchRemoteWorkRequests, fetchTimeOffRequests, fetchWorkAbroadRequests } from './bamboohr';
+import { getSupervisorEmployeeId } from './bamboohr-identifiers';
 import { fetchActivTrakIdentifiers, fetchActivTrakIpActivity, fetchActivTrakUserStats, fetchOfficeAttendanceData, fetchOfficeIpActivity, fetchProductivityData } from './bigquery';
 import { fetchDuoAuthenticationLogs, isDuoConfigured } from './duo';
 import { execute, executeMany, initializeSchema, query } from './oracle';
@@ -495,7 +496,7 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
         DEPARTMENT: emp.department || null,
         DIVISION: emp.division || null,
         LOCATION: emp.location || null,
-        SUPERVISOR_ID: emp.supervisorId || emp.supervisorEId || null,
+        SUPERVISOR_ID: getSupervisorEmployeeId(emp),
         SUPERVISOR_NAME: emp.supervisor || null,
         SUPERVISOR_EMAIL: normalizeEmailNullable(emp.supervisorEmail),
         HIRE_DATE: emp.hireDate ? parseDateOnly(emp.hireDate) : null,
