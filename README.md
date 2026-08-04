@@ -110,3 +110,7 @@ Additional vars for container E2E setup:
 
 - `ORACLE_DB_HOST`, `ORACLE_DB_IP` (for `extra_hosts` DNS mapping inside container)
 - `GOOGLE_SA_JSON_PATH` (host path mounted to `/run/secrets/google-sa.json`)
+
+Scheduler:
+
+- `SYNC_DAYS_BACK` controls the daily refresh window. It defaults to 112 days so TBS-backed reports have data for every configured lookback option.

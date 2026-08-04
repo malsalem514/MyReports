@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@/auth';
 import { isAdminEmail } from '@/lib/admin';
 import { query as oracleQuery } from '@/lib/oracle';
+import { assessSyncHealth } from '@/lib/sync-health';
 
 interface CheckResult {
   ok: boolean;
@@ -27,6 +28,43 @@ async function checkOracle(): Promise<CheckResult> {
   try {
     const rows = await oracleQuery<{ RESULT: number }>('SELECT 1 AS RESULT FROM DUAL');
     return { ok: rows[0]?.RESULT === 1 };
+  } catch (error) {
+    return { ok: false, error: normalizeError(error) };
+  }
+}
+
+async function checkSyncFreshness(): Promise<CheckResult> {
+  try {
+    const rows = await oracleQuery<{
+      LAST_SUCCESS_COMPLETED_AT: Date | null;
+      LATEST_ATTEMPT_STARTED_AT: Date | null;
+      LATEST_ATTEMPT_STATUS: string | null;
+      OLDEST_RUNNING_STARTED_AT: Date | null;
+    }>(
+      `SELECT
+         (SELECT MAX(COMPLETED_AT)
+            FROM TL_SYNC_LOG
+           WHERE STATUS = 'completed') AS LAST_SUCCESS_COMPLETED_AT,
+         (SELECT STARTED_AT
+            FROM (SELECT STARTED_AT FROM TL_SYNC_LOG ORDER BY STARTED_AT DESC, ID DESC)
+           WHERE ROWNUM = 1) AS LATEST_ATTEMPT_STARTED_AT,
+         (SELECT STATUS
+            FROM (SELECT STATUS FROM TL_SYNC_LOG ORDER BY STARTED_AT DESC, ID DESC)
+           WHERE ROWNUM = 1) AS LATEST_ATTEMPT_STATUS,
+         (SELECT MIN(STARTED_AT)
+            FROM TL_SYNC_LOG
+           WHERE STATUS = 'running') AS OLDEST_RUNNING_STARTED_AT
+       FROM DUAL`,
+    );
+    const row = rows[0];
+    const assessment = assessSyncHealth({
+      now: new Date(),
+      latestSuccessfulCompletedAt: row?.LAST_SUCCESS_COMPLETED_AT ?? null,
+      latestAttemptStartedAt: row?.LATEST_ATTEMPT_STARTED_AT ?? null,
+      latestAttemptStatus: row?.LATEST_ATTEMPT_STATUS ?? null,
+      oldestRunningStartedAt: row?.OLDEST_RUNNING_STARTED_AT ?? null,
+    });
+    return { ok: assessment.ok, metrics: { ...assessment } };
   } catch (error) {
     return { ok: false, error: normalizeError(error) };
   }
@@ -82,11 +120,22 @@ export async function GET(request: NextRequest) {
   const deep = request.nextUrl.searchParams.get('deep') === '1';
 
   if (!deep) {
-    return NextResponse.json({
-      status: 'ok',
-      service: 'myreports',
-      timestamp: new Date().toISOString(),
-    });
+    const syncResult = await withTimeout(
+      checkSyncFreshness(),
+      2500,
+      { ok: false, error: 'Sync freshness check timeout' },
+    );
+    return NextResponse.json(
+      {
+        status: syncResult.ok ? 'ok' : 'degraded',
+        service: 'myreports',
+        timestamp: new Date().toISOString(),
+        checks: {
+          syncFreshness: syncResult.ok,
+        },
+      },
+      { status: syncResult.ok ? 200 : 503 },
+    );
   }
 
   // Deep diagnostic exposes internal error messages — restrict to admins.
@@ -99,12 +148,13 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
-  const [oracleResult, dataFlowResult] = await Promise.all([
+  const [oracleResult, dataFlowResult, syncResult] = await Promise.all([
     withTimeout(checkOracle(), 2500, { ok: false, error: 'Oracle check timeout' }),
     withTimeout(checkOracleDataFlow(), 3500, { ok: false, error: 'Oracle data-flow check timeout' }),
+    withTimeout(checkSyncFreshness(), 2500, { ok: false, error: 'Sync freshness check timeout' }),
   ]);
 
-  const ok = oracleResult.ok && dataFlowResult.ok;
+  const ok = oracleResult.ok && dataFlowResult.ok && syncResult.ok;
 
   return NextResponse.json(
     {
@@ -114,10 +164,12 @@ export async function GET(request: NextRequest) {
       checks: {
         oracle: oracleResult.ok,
         oracleDataFlow: dataFlowResult.ok,
+        syncFreshness: syncResult.ok,
       },
       details: {
         oracle: oracleResult,
         oracleDataFlow: dataFlowResult,
+        syncFreshness: syncResult,
       },
     },
     { status: ok ? 200 : 503 },

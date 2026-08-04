@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import * as syncConfig from '../lib/sync-config.ts';
 import * as sync from '../lib/sync.ts';
 
 function getModuleExports<T extends object>(mod: T): T {
@@ -12,6 +13,19 @@ const {
   calculateDuoAuthenticationLogSyncWindow,
   calculateNextDuoAuthenticationLogCheckpoint,
 } = getModuleExports(sync);
+const {
+  DEFAULT_SYNC_LOOKBACK_DAYS,
+  getSyncDaysBackFromEnv,
+  parseSyncDaysBack,
+} = getModuleExports(syncConfig);
+
+test('default sync lookback covers the longest configured TBS report window', () => {
+  assert.equal(DEFAULT_SYNC_LOOKBACK_DAYS, 112);
+  assert.equal(parseSyncDaysBack(undefined), DEFAULT_SYNC_LOOKBACK_DAYS);
+  assert.equal(parseSyncDaysBack('42'), 42);
+  assert.equal(parseSyncDaysBack('0'), DEFAULT_SYNC_LOOKBACK_DAYS);
+  assert.equal(getSyncDaysBackFromEnv({ SYNC_DAYS_BACK: '113.2' }), 114);
+});
 
 test('calculateDuoAuthenticationLogSyncWindow reopens a rolling overlap after a checkpoint', () => {
   const now = new Date('2026-06-08T12:00:00Z');
