@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as oracleModule from '../lib/oracle.ts';
 
-const { runOracleTransaction } = oracleModule.default ?? oracleModule;
+function getModuleExports<T extends object>(mod: T): T {
+  return ((mod as T & { default?: T }).default ?? mod) as T;
+}
+
+const { runOracleTransaction } = getModuleExports(oracleModule);
 
 test('runOracleTransaction commits successful operations', async () => {
   const calls: string[] = [];

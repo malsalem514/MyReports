@@ -2,11 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as dataFlowHealthModule from '../lib/data-flow-health.ts';
 
+function getModuleExports<T extends object>(mod: T): T {
+  return ((mod as T & { default?: T }).default ?? mod) as T;
+}
+
 const {
   assessDataFlowHealth,
   businessDayLag,
   getDataFreshnessMaxBusinessDays,
-} = dataFlowHealthModule.default ?? dataFlowHealthModule;
+} = getModuleExports(dataFlowHealthModule);
 
 test('businessDayLag ignores weekends', () => {
   assert.equal(businessDayLag(new Date(2026, 7, 14), new Date(2026, 7, 17)), 1);
