@@ -294,16 +294,19 @@ public health endpoint reports stale data:
    docker compose -f docker-compose.production.yml up -d --force-recreate myreports
    ```
 
-5. Confirm the scheduler accepts the credential, then run a 112-day catch-up sync:
+5. Confirm the scheduler accepts the credential, then trigger a 112-day catch-up sync. Set
+   `SYNC_DAYS_BACK=112` and `RUN_SYNC_ON_START=true` in `myreports.env`, recreate the app,
+   and follow the logs:
 
    ```bash
-   docker logs myreports --tail=100
-   docker exec myreports node -e 'require("./.next/server/lib/sync.js").runFullSync(112).then(s=>{console.log(JSON.stringify(s));process.exit(s.errors.length?1:0)}).catch(e=>{console.error(e);process.exit(1)})'
+   docker compose -f docker-compose.production.yml up -d --force-recreate myreports
+   docker logs myreports --follow --tail=100
    ```
 
-6. Verify `curl http://localhost:3000/api/health` returns HTTP `200` with both freshness
-   checks set to `true`. Revoke the superseded key in Google Cloud after the replacement is
-   verified.
+6. Once the log records a successful startup sync, immediately set `RUN_SYNC_ON_START=false`
+   and recreate the app again so future restarts do not repeat the catch-up. Verify
+   `curl http://localhost:3000/api/health` returns HTTP `200` with both freshness checks set
+   to `true`. Revoke the superseded key in Google Cloud after the replacement is verified.
 
 ---
 

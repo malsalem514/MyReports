@@ -4,6 +4,7 @@ import { initializeSchema } from './oracle';
 import { getSyncDaysBackFromEnv } from './sync-config';
 
 let schedulerInitialized = false;
+let syncInProgress = false;
 
 export const SCHEDULED_SYNC_RETRY_DELAYS_MS = Object.freeze(
   Array.from({ length: 12 }, () => 30 * 60 * 1000),
@@ -82,18 +83,7 @@ export function initializeScheduler(): void {
   // 6 AM — daily source exports and Oracle refresh
   cron.schedule('0 6 * * *', async () => {
     try {
-      await runWithRetry(
-        () => runFullSync(daysBack),
-        SCHEDULED_SYNC_RETRY_DELAYS_MS,
-        sleep,
-        ({ attempt, delayMs, error }) => {
-          console.error(
-            `[Scheduler] 6 AM sync attempt ${attempt} failed; retrying in ${delayMs / 60000} minutes:`,
-            error,
-          );
-        },
-        shouldRetryScheduledSync,
-      );
+      await runExclusiveSync(daysBack, '6 AM');
     } catch (error) {
       console.error('[Scheduler] 6 AM sync failed after all retries:', error);
     }
@@ -105,6 +95,41 @@ export function initializeScheduler(): void {
 
   schedulerInitialized = true;
   console.log(`Scheduler initialized. Syncs the last ${daysBack} day(s) once daily at 6 AM ET.`);
+
+  if (process.env.RUN_SYNC_ON_START === 'true') {
+    console.log(`[Scheduler] One-time startup sync requested for the last ${daysBack} day(s).`);
+    setImmediate(() => {
+      void runExclusiveSync(daysBack, 'startup').catch((error) => {
+        console.error('[Scheduler] Startup sync failed after all retries:', error);
+      });
+    });
+  }
+}
+
+export async function runExclusiveSync(daysBack: number, label: string): Promise<boolean> {
+  if (syncInProgress) {
+    console.warn(`[Scheduler] Skipping ${label} sync because another sync is already running.`);
+    return false;
+  }
+
+  syncInProgress = true;
+  try {
+    await runWithRetry(
+      () => runFullSync(daysBack),
+      SCHEDULED_SYNC_RETRY_DELAYS_MS,
+      sleep,
+      ({ attempt, delayMs, error }) => {
+        console.error(
+          `[Scheduler] ${label} sync attempt ${attempt} failed; retrying in ${delayMs / 60000} minutes:`,
+          error,
+        );
+      },
+      shouldRetryScheduledSync,
+    );
+    return true;
+  } finally {
+    syncInProgress = false;
+  }
 }
 
 export async function initializeDataStore(runBackfill: boolean = false): Promise<void> {
