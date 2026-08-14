@@ -21,6 +21,7 @@ import { OFFICE_ATTENDANCE_VIEW_OPTIONS, type OfficeAttendanceViewKey } from '@/
 import { getOfficeAttendanceDefaultRange, toDateParam } from '@/lib/report-date-defaults';
 import {
   arraysEqual,
+  buildPathWithParams,
   parseEnumParam,
   parseListParam,
   parsePageParam,
@@ -790,26 +791,34 @@ export function AttendanceClient({
     router.replace(`/dashboard/office-attendance?${params.toString()}`, { scroll: false });
   };
 
+  const navigateWithSyncedParams = (mutate: (params: URLSearchParams) => void) => {
+    const params = new URLSearchParams(buildStateParams.toString());
+    mutate(params);
+    params.delete('page');
+    setPage(0);
+    router.replace(buildPathWithParams(pathname, params), { scroll: false });
+  };
+
   const changeLookback = (val: string) => {
     const weeksBack = Number(val);
     if (!LOOKBACK_OPTIONS.includes(weeksBack as (typeof LOOKBACK_OPTIONS)[number])) return;
-    const params = new URLSearchParams(searchParams.toString());
-    params.set('dateMode', 'quick');
-    params.set('lookbackWeeks', String(weeksBack));
-    params.delete('startDate');
-    params.delete('endDate');
-    router.push(`/dashboard/office-attendance?${params.toString()}`, { scroll: false });
+    navigateWithSyncedParams((params) => {
+      params.set('dateMode', 'quick');
+      params.set('lookbackWeeks', String(weeksBack));
+      params.delete('startDate');
+      params.delete('endDate');
+    });
   };
 
   const changeDates = (nextStart: string, nextEnd: string) => {
     const boundedEnd = nextEnd > maxCompletedDate ? maxCompletedDate : nextEnd;
     const boundedStart = nextStart > boundedEnd ? boundedEnd : nextStart;
-    const params = new URLSearchParams(searchParams.toString());
-    params.set('dateMode', 'custom');
-    params.delete('lookbackWeeks');
-    params.set('startDate', boundedStart);
-    params.set('endDate', boundedEnd);
-    router.push(`/dashboard/office-attendance?${params.toString()}`, { scroll: false });
+    navigateWithSyncedParams((params) => {
+      params.set('dateMode', 'custom');
+      params.delete('lookbackWeeks');
+      params.set('startDate', boundedStart);
+      params.set('endDate', boundedEnd);
+    });
   };
 
   const applyCustomDates = () => {
