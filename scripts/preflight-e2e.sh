@@ -56,7 +56,13 @@ fi
 
 echo "== Checking local files =="
 if [[ -f "${GOOGLE_SA_JSON_PATH:-}" ]]; then
-  echo "[OK] GOOGLE_SA_JSON_PATH file exists"
+  credential_type="$(node -e 'const fs=require("fs"); try { const value=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(String(value.type || "")); } catch { process.exit(2); }' "$GOOGLE_SA_JSON_PATH")" || credential_type=""
+  if [[ "$credential_type" == "service_account" ]]; then
+    echo "[OK] GOOGLE_SA_JSON_PATH contains a service-account credential"
+  else
+    echo "[INVALID] GOOGLE_SA_JSON_PATH must contain credential type service_account"
+    missing=1
+  fi
 else
   echo "[MISSING] GOOGLE_SA_JSON_PATH file not found: ${GOOGLE_SA_JSON_PATH:-<unset>}"
   missing=1

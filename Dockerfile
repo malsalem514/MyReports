@@ -26,6 +26,8 @@ RUN npx tsc \
     lib/cache.ts \
     lib/bamboohr.ts \
     lib/bigquery.ts \
+    lib/google-credentials.ts \
+    lib/integration-config.ts \
     lib/oracle.ts \
     lib/scheduler.ts \
     lib/sync.ts && \

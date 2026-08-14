@@ -6,7 +6,11 @@ function getModuleExports<T extends object>(mod: T): T {
   return ((mod as T & { default?: T }).default ?? mod) as T;
 }
 
-const { runWithRetry } = getModuleExports(schedulerModule);
+const {
+  assertSyncSummarySucceeded,
+  runWithRetry,
+  shouldRetryScheduledSync,
+} = getModuleExports(schedulerModule);
 
 test('runWithRetry retries failed scheduler operations using the configured delays', async () => {
   let attempts = 0;
@@ -42,4 +46,34 @@ test('runWithRetry surfaces the final scheduler failure after retries are exhaus
     /still unavailable/,
   );
   assert.equal(attempts, 3);
+});
+
+test('runWithRetry stops immediately for permanent authentication failures', async () => {
+  let attempts = 0;
+  const waits: number[] = [];
+
+  await assert.rejects(
+    runWithRetry(
+      async () => {
+        attempts += 1;
+        throw new Error('invalid_grant: Account has been deleted');
+      },
+      [10, 20],
+      async (delayMs) => { waits.push(delayMs); },
+      undefined,
+      shouldRetryScheduledSync,
+    ),
+    /invalid_grant/,
+  );
+
+  assert.equal(attempts, 1);
+  assert.deepEqual(waits, []);
+});
+
+test('partial sync summaries fail the scheduled operation', () => {
+  assert.doesNotThrow(() => assertSyncSummarySucceeded({ errors: [] }));
+  assert.throws(
+    () => assertSyncSummarySucceeded({ errors: ['Productivity sync failed: temporary outage'] }),
+    /scheduled sync completed with 1 error/i,
+  );
 });

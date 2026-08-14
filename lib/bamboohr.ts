@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { cachified } from './cache';
+import { getIntegrationTimeouts } from './integration-config';
 import { normalizeEmail, normalizeEmailNullable } from './email';
 import { getSupervisorEmployeeId } from './bamboohr-identifiers';
 
@@ -21,6 +22,7 @@ function formatLocalDate(date: Date): string {
 const BAMBOOHR_API_KEY = process.env.BAMBOOHR_API_KEY || '';
 const BAMBOOHR_SUBDOMAIN = process.env.BAMBOOHR_SUBDOMAIN || 'jestais';
 const BAMBOOHR_BASE_URL = `https://api.bamboohr.com/api/gateway.php/${BAMBOOHR_SUBDOMAIN}/v1`;
+const { externalHttpMs: BAMBOOHR_HTTP_TIMEOUT_MS } = getIntegrationTimeouts();
 
 // ============================================================================
 // Schemas
@@ -171,6 +173,7 @@ async function bambooFetch<T>(endpoint: string, options: RequestInit = {}): Prom
 
   const response = await fetch(url, {
     ...options,
+    signal: options.signal ?? AbortSignal.timeout(BAMBOOHR_HTTP_TIMEOUT_MS),
     headers: {
       Authorization: `Basic ${authHeader}`,
       Accept: 'application/json',

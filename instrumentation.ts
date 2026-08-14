@@ -3,7 +3,7 @@ export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
   const startupEnabled =
-    process.env.NODE_ENV === 'production' ||
+    (process.env.NODE_ENV === 'production' && process.env.ENABLE_SCHEDULER !== 'false') ||
     process.env.ENABLE_SCHEDULER === 'true';
 
   if (!startupEnabled) {

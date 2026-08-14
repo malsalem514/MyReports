@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@/auth';
 import { isAdminEmail } from '@/lib/admin';
+import { assessDataFlowHealth, getDataFreshnessMaxBusinessDays } from '@/lib/data-flow-health';
 import { query as oracleQuery } from '@/lib/oracle';
 import { assessSyncHealth } from '@/lib/sync-health';
 
@@ -70,6 +71,32 @@ async function checkSyncFreshness(): Promise<CheckResult> {
   }
 }
 
+async function checkDataFreshness(): Promise<CheckResult> {
+  try {
+    const rows = await oracleQuery<{
+      ATTENDANCE_MAX_DATE: Date | null;
+      PRODUCTIVITY_MAX_DATE: Date | null;
+    }>(
+      `SELECT
+         (SELECT MAX(RECORD_DATE) FROM TL_ATTENDANCE) AS ATTENDANCE_MAX_DATE,
+         (SELECT MAX(RECORD_DATE) FROM TL_PRODUCTIVITY) AS PRODUCTIVITY_MAX_DATE
+       FROM DUAL`,
+    );
+    const row = rows[0];
+    const assessment = assessDataFlowHealth({
+      now: new Date(),
+      maxBusinessDayLag: getDataFreshnessMaxBusinessDays(),
+      sources: [
+        { name: 'attendance', latestDate: row?.ATTENDANCE_MAX_DATE ?? null },
+        { name: 'productivity', latestDate: row?.PRODUCTIVITY_MAX_DATE ?? null },
+      ],
+    });
+    return { ok: assessment.ok, metrics: { ...assessment } };
+  } catch (error) {
+    return { ok: false, error: normalizeError(error) };
+  }
+}
+
 async function checkOracleDataFlow(): Promise<CheckResult> {
   try {
     const rows = await oracleQuery<{
@@ -80,6 +107,8 @@ async function checkOracleDataFlow(): Promise<CheckResult> {
       PRODUCTIVITY_MAX_DATE: Date | null;
       OFFICE_IP_ROWS: number;
       OFFICE_IP_MAX_DATE: Date | null;
+      TBS_MAPPED_EMPLOYEES: number;
+      TBS_UNMAPPED_ACTIVE_EMPLOYEES: number;
       TBS_TIME_ENTRIES: number;
       TBS_MAX_DATE: Date | null;
       REMOTE_WORK_REQUESTS: number;
@@ -94,6 +123,16 @@ async function checkOracleDataFlow(): Promise<CheckResult> {
          (SELECT MAX(RECORD_DATE) FROM TL_PRODUCTIVITY) AS PRODUCTIVITY_MAX_DATE,
          (SELECT COUNT(*) FROM TL_OFFICE_IP_ACTIVITY) AS OFFICE_IP_ROWS,
          (SELECT MAX(RECORD_DATE) FROM TL_OFFICE_IP_ACTIVITY) AS OFFICE_IP_MAX_DATE,
+         (SELECT COUNT(*) FROM TL_TBS_EMPLOYEE_MAP) AS TBS_MAPPED_EMPLOYEES,
+         (SELECT COUNT(*)
+            FROM TL_EMPLOYEES e
+           WHERE e.EMAIL IS NOT NULL
+             AND (e.STATUS IS NULL OR UPPER(e.STATUS) != 'INACTIVE')
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM TL_TBS_EMPLOYEE_MAP m
+                WHERE LOWER(m.EMAIL) = LOWER(e.EMAIL)
+             )) AS TBS_UNMAPPED_ACTIVE_EMPLOYEES,
          (SELECT COUNT(*) FROM TL_TBS_TIME_ENTRIES) AS TBS_TIME_ENTRIES,
          (SELECT MAX(ENTRY_DATE) FROM TL_TBS_TIME_ENTRIES) AS TBS_MAX_DATE,
          (SELECT COUNT(*) FROM TL_REMOTE_WORK_REQUESTS) AS REMOTE_WORK_REQUESTS,
@@ -107,7 +146,9 @@ async function checkOracleDataFlow(): Promise<CheckResult> {
       metrics &&
       metrics.ACTIVE_EMPLOYEES > 0 &&
       metrics.ATTENDANCE_ROWS > 0 &&
-      metrics.PRODUCTIVITY_ROWS > 0,
+      metrics.PRODUCTIVITY_ROWS > 0 &&
+      metrics.TBS_MAPPED_EMPLOYEES > 0 &&
+      metrics.TBS_TIME_ENTRIES > 0,
     );
 
     return { ok, metrics };
@@ -120,21 +161,22 @@ export async function GET(request: NextRequest) {
   const deep = request.nextUrl.searchParams.get('deep') === '1';
 
   if (!deep) {
-    const syncResult = await withTimeout(
-      checkSyncFreshness(),
-      2500,
-      { ok: false, error: 'Sync freshness check timeout' },
-    );
+    const [syncResult, dataFreshnessResult] = await Promise.all([
+      withTimeout(checkSyncFreshness(), 2500, { ok: false, error: 'Sync freshness check timeout' }),
+      withTimeout(checkDataFreshness(), 2500, { ok: false, error: 'Data freshness check timeout' }),
+    ]);
+    const ok = syncResult.ok && dataFreshnessResult.ok;
     return NextResponse.json(
       {
-        status: syncResult.ok ? 'ok' : 'degraded',
+        status: ok ? 'ok' : 'degraded',
         service: 'myreports',
         timestamp: new Date().toISOString(),
         checks: {
           syncFreshness: syncResult.ok,
+          dataFreshness: dataFreshnessResult.ok,
         },
       },
-      { status: syncResult.ok ? 200 : 503 },
+      { status: ok ? 200 : 503 },
     );
   }
 
@@ -148,13 +190,14 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
-  const [oracleResult, dataFlowResult, syncResult] = await Promise.all([
+  const [oracleResult, dataFlowResult, syncResult, dataFreshnessResult] = await Promise.all([
     withTimeout(checkOracle(), 2500, { ok: false, error: 'Oracle check timeout' }),
     withTimeout(checkOracleDataFlow(), 3500, { ok: false, error: 'Oracle data-flow check timeout' }),
     withTimeout(checkSyncFreshness(), 2500, { ok: false, error: 'Sync freshness check timeout' }),
+    withTimeout(checkDataFreshness(), 2500, { ok: false, error: 'Data freshness check timeout' }),
   ]);
 
-  const ok = oracleResult.ok && dataFlowResult.ok && syncResult.ok;
+  const ok = oracleResult.ok && dataFlowResult.ok && syncResult.ok && dataFreshnessResult.ok;
 
   return NextResponse.json(
     {
@@ -165,11 +208,13 @@ export async function GET(request: NextRequest) {
         oracle: oracleResult.ok,
         oracleDataFlow: dataFlowResult.ok,
         syncFreshness: syncResult.ok,
+        dataFreshness: dataFreshnessResult.ok,
       },
       details: {
         oracle: oracleResult,
         oracleDataFlow: dataFlowResult,
         syncFreshness: syncResult,
+        dataFreshness: dataFreshnessResult,
       },
     },
     { status: ok ? 200 : 503 },

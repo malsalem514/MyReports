@@ -2,6 +2,7 @@ import { BigQuery } from '@google-cloud/bigquery';
 import { z } from 'zod';
 import { cachified } from './cache';
 import { expandEmailIdentityCandidates, normalizeEmail } from './email';
+import { getIntegrationTimeouts } from './integration-config';
 
 // ============================================================================
 // Configuration
@@ -14,6 +15,11 @@ const bigQueryConfig = {
 
 const ACTIVTRAK_DATASET = process.env.BIGQUERY_DATASET || '672561';
 const DAILY_USER_SUMMARY_TABLE = 'daily_user_summary';
+const { bigQueryQueryMs: BIGQUERY_QUERY_TIMEOUT_MS } = getIntegrationTimeouts();
+const BIGQUERY_QUERY_RUNTIME_OPTIONS = {
+  timeoutMs: BIGQUERY_QUERY_TIMEOUT_MS,
+  jobTimeoutMs: BIGQUERY_QUERY_TIMEOUT_MS,
+} as const;
 
 // ============================================================================
 // Schemas
@@ -181,7 +187,7 @@ async function _fetchProductivityDataUncached(
 
   sql += ` ORDER BY d.local_date DESC, user_email`;
 
-  const [rows] = await client.query({ query: sql, params, location: 'US' });
+  const [rows] = await client.query({ query: sql, params, location: 'US', ...BIGQUERY_QUERY_RUNTIME_OPTIONS });
 
   const validated: DailyUserSummary[] = [];
   for (const row of rows) {
@@ -248,7 +254,7 @@ export async function fetchProductivityStats(
     params.emails = expandEmailIdentityCandidates(emails);
   }
 
-  const [rows] = await client.query({ query: sql, params, location: 'US' });
+  const [rows] = await client.query({ query: sql, params, location: 'US', ...BIGQUERY_QUERY_RUNTIME_OPTIONS });
   const row = rows[0] || {};
   return {
     totalEmployees: Number(row.total_employees) || 0,
@@ -269,7 +275,7 @@ export async function fetchActivTrakIdentifiers(): Promise<ActivTrakIdentifierRe
     ORDER BY userid, email
   `;
 
-  const [rows] = await client.query({ query: sql, location: 'US' });
+  const [rows] = await client.query({ query: sql, location: 'US', ...BIGQUERY_QUERY_RUNTIME_OPTIONS });
   return (rows as Array<Record<string, unknown>>).map((row) => ({
     userId: Number(row.userid),
     identifierEmail: String(row.email || '').toLowerCase(),
@@ -302,6 +308,7 @@ export async function fetchActivTrakUserStats(daysBack: number = 365): Promise<A
     query: sql,
     params: { daysBack },
     location: 'US',
+    ...BIGQUERY_QUERY_RUNTIME_OPTIONS,
   });
 
   return (rows as Array<Record<string, unknown>>).map((row) => ({
@@ -363,7 +370,7 @@ export async function fetchOfficeIpActivity(
     ORDER BY e.local_date DESC, email, e.public_ip
   `;
 
-  const [rows] = await client.query({ query: sql, params, location: 'US' });
+  const [rows] = await client.query({ query: sql, params, location: 'US', ...BIGQUERY_QUERY_RUNTIME_OPTIONS });
   return (rows as Array<Record<string, unknown>>).map((row) => ({
     date: parseLocalDate((row.local_date as { value?: string })?.value || String(row.local_date)),
     email: normalizeEmail(String(row.email || '')),
@@ -423,7 +430,7 @@ export async function fetchActivTrakIpActivity(
     ORDER BY e.local_date DESC, email, e.public_ip
   `;
 
-  const [rows] = await client.query({ query: sql, params, location: 'US' });
+  const [rows] = await client.query({ query: sql, params, location: 'US', ...BIGQUERY_QUERY_RUNTIME_OPTIONS });
   return (rows as Array<Record<string, unknown>>).map((row) => ({
     date: parseLocalDate((row.local_date as { value?: string })?.value || String(row.local_date)),
     userId: row.user_id == null ? null : Number(row.user_id),
@@ -486,7 +493,7 @@ async function _fetchOfficeAttendanceDataUncached(
 
   sql += ` ORDER BY d.local_date DESC, email`;
 
-  const [rows] = await client.query({ query: sql, params, location: 'US' });
+  const [rows] = await client.query({ query: sql, params, location: 'US', ...BIGQUERY_QUERY_RUNTIME_OPTIONS });
 
   return rows.map((row: Record<string, unknown>) => {
     const ptoHours = Number(row.time_off_seconds || 0) / 3600;
@@ -568,7 +575,11 @@ export class BigQueryError extends Error {
 export async function healthCheck(): Promise<boolean> {
   try {
     const client = getBigQueryClient();
-    const [rows] = await client.query({ query: 'SELECT 1 as result', location: 'US' });
+    const [rows] = await client.query({
+      query: 'SELECT 1 as result',
+      location: 'US',
+      ...BIGQUERY_QUERY_RUNTIME_OPTIONS,
+    });
     return rows[0]?.result === 1;
   } catch {
     return false;
