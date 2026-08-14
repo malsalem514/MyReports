@@ -1006,6 +1006,7 @@ export async function initializeSchema(): Promise<void> {
       'bamboo-not-in-activtrak',
       'activtrak-identities',
       'duo-activtrak-reconciliation',
+      'raw-data',
     ];
     const roleDefaults = [
       { roleName: 'root-admin', visibleTabs: allTabs },
@@ -1035,9 +1036,9 @@ export async function initializeSchema(): Promise<void> {
     `);
     await conn.execute(`
       UPDATE TL_TAB_ROLES
-         SET VISIBLE = 0
+       SET VISIBLE = 0
        WHERE ROLE_NAME NOT IN ('root-admin', 'hr-admin')
-         AND TAB_KEY IN ('bamboo-not-in-activtrak', 'activtrak-identities', 'duo-activtrak-reconciliation')
+         AND TAB_KEY IN ('bamboo-not-in-activtrak', 'activtrak-identities', 'duo-activtrak-reconciliation', 'raw-data')
     `);
 
     const roleList = `'root-admin', 'hr-admin', 'director', 'manager', 'employee'`;

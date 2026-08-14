@@ -14,6 +14,7 @@ export const TAB_KEYS = [
   'bamboo-not-in-activtrak',
   'activtrak-identities',
   'duo-activtrak-reconciliation',
+  'raw-data',
 ] as const;
 
 export type TabKey = (typeof TAB_KEYS)[number];
@@ -22,6 +23,7 @@ export const ADMIN_ONLY_TAB_KEYS = [
   'bamboo-not-in-activtrak',
   'activtrak-identities',
   'duo-activtrak-reconciliation',
+  'raw-data',
 ] as const satisfies readonly TabKey[];
 
 export const TAB_ROLES = [
