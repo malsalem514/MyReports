@@ -35,9 +35,16 @@ npm run dev
 ## Production build
 
 ```bash
+npm test
+npm run typecheck
 npm run build
 npm start
 ```
+
+Type checking uses the native TypeScript 7 CLI. The `typescript` dependency remains on
+TypeScript 6 because Next.js still consumes the compiler API, which TypeScript 7 intentionally
+does not provide. `@types/node` follows the Node.js 22 production runtime. NextAuth stays on its
+v5 prerelease line; npm reports the older v4 release as its `latest` tag.
 
 ## Docker
 
@@ -124,6 +131,7 @@ Scheduler:
 
 - `SYNC_DAYS_BACK` controls the daily refresh window. It defaults to 112 days so TBS-backed reports have data for every configured lookback option.
 - `ENABLE_SCHEDULER=false` explicitly disables scheduling. Production defaults to enabled when the variable is omitted; development requires `true`.
+- `RUN_SYNC_ON_START=true` launches one immediate catch-up sync using `SYNC_DAYS_BACK`. Reset it to `false` after the catch-up finishes.
 
 Reliability controls:
 

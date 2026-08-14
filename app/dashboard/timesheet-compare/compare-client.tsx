@@ -320,7 +320,7 @@ export function CompareClient({
         </div>
       </div>
 
-      <div className="grid gap-3 rounded-xl border border-gray-200 bg-white p-4 md:grid-cols-[minmax(0,220px),minmax(0,180px),minmax(0,180px),1fr] md:items-end">
+      <div className="grid gap-3 rounded-xl border border-gray-200 bg-white p-4 md:grid-cols-[minmax(0,220px)_minmax(0,180px)_minmax(0,180px)_1fr] md:items-end">
         <div>
           <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Quick Range</label>
           <select
