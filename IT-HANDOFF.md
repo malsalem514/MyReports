@@ -225,6 +225,8 @@ Once the container is running, all future code updates are fully automatic:
 ```
 Developer pushes to main
        ↓
+GitHub Actions runs tests, native TypeScript checks, and a production build
+       ↓
 GitHub Actions builds image (~3-5 min)
        ↓
 Image pushed to ghcr.io/malsalem514/myreports:latest
