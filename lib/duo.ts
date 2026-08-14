@@ -1,10 +1,12 @@
 import crypto from 'node:crypto';
 import { z } from 'zod';
+import { getIntegrationTimeouts } from './integration-config';
 
 const DUO_AUTH_LOG_PATH = '/admin/v2/logs/authentication';
 const DEFAULT_LIMIT = 1000;
 const DEFAULT_RATE_LIMIT_RETRY_MS = 65_000;
 const MAX_RATE_LIMIT_RETRIES = 6;
+const { externalHttpMs: DUO_HTTP_TIMEOUT_MS } = getIntegrationTimeouts();
 
 export interface DuoAuthLog {
   accessDeviceBrowserVersion: string | null;
@@ -203,6 +205,7 @@ async function fetchDuoAuthenticationLogPage(
     const url = `https://${config.host}${DUO_AUTH_LOG_PATH}?${canonicalParams}`;
 
     response = await fetch(url, {
+      signal: AbortSignal.timeout(DUO_HTTP_TIMEOUT_MS),
       headers: {
         Authorization: `Basic ${Buffer.from(`${config.ikey}:${signature}`).toString('base64')}`,
         Date: date,

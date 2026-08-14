@@ -17,6 +17,9 @@ const {
   createEmptyWeekCell,
   filterAttendanceRows,
   getDefaultSortDirectionForKey,
+  formatEmployeeWeekValue,
+  getEmployeeCellHex,
+  getEmployeeCellToneKey,
   sortDisplayRows,
 } = getModuleExports(officeAttendanceView);
 import type {
@@ -103,6 +106,39 @@ function createWorkAbroadRequest(overrides: Partial<AttendanceWorkAbroadRequest>
     ...overrides,
   };
 }
+
+test('[House] marker does not make a below-target employee week compliant', () => {
+  const belowTargetHouseWeek = createWeekCell({
+    officeDays: 0,
+    adjustedOfficeTarget: 2,
+    adjustedCompliant: false,
+    hasApprovedRemoteCoverage: true,
+  });
+  const partialHouseWeek = createWeekCell({
+    officeDays: 1,
+    adjustedOfficeTarget: 2,
+    adjustedCompliant: false,
+    hasApprovedRemoteCoverage: true,
+  });
+  const compliantHouseWeek = createWeekCell({
+    officeDays: 2,
+    adjustedOfficeTarget: 2,
+    adjustedCompliant: true,
+    hasApprovedRemoteCoverage: true,
+  });
+
+  assert.equal(formatEmployeeWeekValue(belowTargetHouseWeek, true), '0 [House]');
+  assert.equal(getEmployeeCellToneKey(belowTargetHouseWeek), 'absent');
+  assert.equal(getEmployeeCellHex(belowTargetHouseWeek), 'FEE2E2');
+
+  assert.equal(formatEmployeeWeekValue(partialHouseWeek, true), '1 [House]');
+  assert.equal(getEmployeeCellToneKey(partialHouseWeek), 'partial');
+  assert.equal(getEmployeeCellHex(partialHouseWeek), 'FFEDD5');
+
+  assert.equal(formatEmployeeWeekValue(compliantHouseWeek, true), '2 [House]');
+  assert.equal(getEmployeeCellToneKey(compliantHouseWeek), 'compliant');
+  assert.equal(getEmployeeCellHex(compliantHouseWeek), 'C6EFCE');
+});
 
 test('filterAttendanceRows preserves policy-state filters', () => {
   const rows = [

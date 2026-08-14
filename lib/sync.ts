@@ -3,7 +3,7 @@ import { fetchEmployeeDirectory, fetchRemoteWorkRequests, fetchTimeOffRequests, 
 import { getSupervisorEmployeeId } from './bamboohr-identifiers';
 import { fetchActivTrakIdentifiers, fetchActivTrakIpActivity, fetchActivTrakUserStats, fetchOfficeAttendanceData, fetchOfficeIpActivity, fetchProductivityData } from './bigquery';
 import { fetchDuoAuthenticationLogs, isDuoConfigured } from './duo';
-import { execute, executeMany, initializeSchema, query } from './oracle';
+import { execute, executeMany, initializeSchema, query, withTransaction } from './oracle';
 import { normalizeEmailNullable } from './email';
 
 const DUO_AUTH_LOG_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
@@ -100,12 +100,6 @@ async function syncActivTrakIpActivity(startDate: Date, now: Date): Promise<numb
       .filter(([ip]) => Boolean(ip)),
   );
 
-  await execute(
-    `DELETE FROM TL_ACTIVTRAK_IP_ACTIVITY
-     WHERE TRUNC(RECORD_DATE) BETWEEN TRUNC(:sd) AND TRUNC(:ed)`,
-    { sd: startDate, ed: now },
-  );
-
   const binds = activityRows
     .map((row) => {
       const email = normalizeEmailNullable(row.email);
@@ -128,18 +122,26 @@ async function syncActivTrakIpActivity(startDate: Date, now: Date): Promise<numb
     })
     .filter((row): row is NonNullable<typeof row> => Boolean(row));
 
-  if (binds.length > 0) {
-    await executeMany(
-      `INSERT INTO TL_ACTIVTRAK_IP_ACTIVITY (
-         RECORD_DATE, EMAIL, USER_ID, DISPLAY_NAME, PUBLIC_IP, DURATION_SECONDS, EVENT_COUNT,
-         FIRST_ACTIVITY_AT, LAST_ACTIVITY_AT, IS_OFFICE_IP, OFFICE_LOCATION
-       ) VALUES (
-         :RECORD_DATE, :EMAIL, :USER_ID, :DISPLAY_NAME, :PUBLIC_IP, :DURATION_SECONDS, :EVENT_COUNT,
-         :FIRST_ACTIVITY_AT, :LAST_ACTIVITY_AT, :IS_OFFICE_IP, :OFFICE_LOCATION
-       )`,
-      binds,
+  await withTransaction(async (transaction) => {
+    await transaction.execute(
+      `DELETE FROM TL_ACTIVTRAK_IP_ACTIVITY
+       WHERE TRUNC(RECORD_DATE) BETWEEN TRUNC(:sd) AND TRUNC(:ed)`,
+      { sd: startDate, ed: now },
     );
-  }
+
+    if (binds.length > 0) {
+      await transaction.executeMany(
+        `INSERT INTO TL_ACTIVTRAK_IP_ACTIVITY (
+           RECORD_DATE, EMAIL, USER_ID, DISPLAY_NAME, PUBLIC_IP, DURATION_SECONDS, EVENT_COUNT,
+           FIRST_ACTIVITY_AT, LAST_ACTIVITY_AT, IS_OFFICE_IP, OFFICE_LOCATION
+         ) VALUES (
+           :RECORD_DATE, :EMAIL, :USER_ID, :DISPLAY_NAME, :PUBLIC_IP, :DURATION_SECONDS, :EVENT_COUNT,
+           :FIRST_ACTIVITY_AT, :LAST_ACTIVITY_AT, :IS_OFFICE_IP, :OFFICE_LOCATION
+         )`,
+        binds,
+      );
+    }
+  });
 
   return binds.length;
 }
@@ -579,12 +581,6 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
         : Promise.resolve([]),
     ]);
 
-    await execute(
-      `DELETE FROM TL_OFFICE_IP_ACTIVITY
-       WHERE TRUNC(RECORD_DATE) BETWEEN TRUNC(:sd) AND TRUNC(:ed)`,
-      { sd: startDate, ed: now },
-    );
-
     const officeIpActivityByKey = new Map<string, {
       RECORD_DATE: Date;
       EMAIL: string | null;
@@ -629,19 +625,6 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
       });
     }
     const officeIpActivityBinds = [...officeIpActivityByKey.values()];
-
-    if (officeIpActivityBinds.length > 0) {
-      await executeMany(
-        `INSERT INTO TL_OFFICE_IP_ACTIVITY (
-           RECORD_DATE, EMAIL, DISPLAY_NAME, PUBLIC_IP, DURATION_SECONDS, EVENT_COUNT,
-           FIRST_ACTIVITY_AT, LAST_ACTIVITY_AT
-         ) VALUES (
-           :RECORD_DATE, :EMAIL, :DISPLAY_NAME, :PUBLIC_IP, :DURATION_SECONDS, :EVENT_COUNT,
-           :FIRST_ACTIVITY_AT, :LAST_ACTIVITY_AT
-         )`,
-        officeIpActivityBinds,
-      );
-    }
 
     const officeIpMatchesByDay = new Map<string, Set<string>>();
     const syntheticOfficeRows = new Map<string, {
@@ -735,9 +718,29 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
       };
     });
 
-    if (attendanceBinds.length > 0) {
-      await executeMany(
-        `MERGE INTO TL_ATTENDANCE t
+    await withTransaction(async (transaction) => {
+      await transaction.execute(
+        `DELETE FROM TL_OFFICE_IP_ACTIVITY
+         WHERE TRUNC(RECORD_DATE) BETWEEN TRUNC(:sd) AND TRUNC(:ed)`,
+        { sd: startDate, ed: now },
+      );
+
+      if (officeIpActivityBinds.length > 0) {
+        await transaction.executeMany(
+          `INSERT INTO TL_OFFICE_IP_ACTIVITY (
+             RECORD_DATE, EMAIL, DISPLAY_NAME, PUBLIC_IP, DURATION_SECONDS, EVENT_COUNT,
+             FIRST_ACTIVITY_AT, LAST_ACTIVITY_AT
+           ) VALUES (
+             :RECORD_DATE, :EMAIL, :DISPLAY_NAME, :PUBLIC_IP, :DURATION_SECONDS, :EVENT_COUNT,
+             :FIRST_ACTIVITY_AT, :LAST_ACTIVITY_AT
+           )`,
+          officeIpActivityBinds,
+        );
+      }
+
+      if (attendanceBinds.length > 0) {
+        await transaction.executeMany(
+          `MERGE INTO TL_ATTENDANCE t
          USING (SELECT
            :RECORD_DATE AS RECORD_DATE,
            :EMAIL AS EMAIL,
@@ -769,9 +772,10 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
            s.RECORD_DATE, s.EMAIL, s.DISPLAY_NAME, s.LOCATION, s.RAW_LOCATION, s.OFFICE_IP_OVERRIDE, s.OFFICE_IP_MATCHES,
            s.TOTAL_HOURS, s.IS_PTO, s.PTO_TYPE, s.PTO_HOURS
          )`,
-        attendanceBinds,
-      );
-    }
+          attendanceBinds,
+        );
+      }
+    });
 
     attendanceSynced = attendanceBinds.length;
   } catch (error) {
@@ -888,37 +892,44 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
   }
 
   try {
-    const identifiers = await fetchActivTrakIdentifiers();
-    await execute(`DELETE FROM TL_ACTIVTRAK_IDENTIFIERS`);
-    if (identifiers.length > 0) {
-      await executeMany(
-        `INSERT INTO TL_ACTIVTRAK_IDENTIFIERS (USER_ID, IDENTIFIER_EMAIL)
-         VALUES (:USER_ID, :IDENTIFIER_EMAIL)`,
-        identifiers.map((row) => ({
-          USER_ID: row.userId,
-          IDENTIFIER_EMAIL: row.identifierEmail,
-        })),
-      );
-    }
+    const [identifiers, userStats] = await Promise.all([
+      fetchActivTrakIdentifiers(),
+      fetchActivTrakUserStats(),
+    ]);
+    const identifierBinds = identifiers.map((row) => ({
+      USER_ID: row.userId,
+      IDENTIFIER_EMAIL: row.identifierEmail,
+    }));
+    const userStatBinds = userStats.map((row) => ({
+      USER_ID: row.userId,
+      USER_NAME: row.userName,
+      FIRST_SEEN: row.firstSeen,
+      LAST_SEEN: row.lastSeen,
+      ACTIVITY_ROW_COUNT: row.activityRowCount,
+    }));
 
-    const userStats = await fetchActivTrakUserStats();
-    await execute(`DELETE FROM TL_ACTIVTRAK_USER_STATS`);
-    if (userStats.length > 0) {
-      await executeMany(
-        `INSERT INTO TL_ACTIVTRAK_USER_STATS (
-           USER_ID, USER_NAME, FIRST_SEEN, LAST_SEEN, ACTIVITY_ROW_COUNT
-         ) VALUES (
-           :USER_ID, :USER_NAME, :FIRST_SEEN, :LAST_SEEN, :ACTIVITY_ROW_COUNT
-         )`,
-        userStats.map((row) => ({
-          USER_ID: row.userId,
-          USER_NAME: row.userName,
-          FIRST_SEEN: row.firstSeen,
-          LAST_SEEN: row.lastSeen,
-          ACTIVITY_ROW_COUNT: row.activityRowCount,
-        })),
-      );
-    }
+    await withTransaction(async (transaction) => {
+      await transaction.execute(`DELETE FROM TL_ACTIVTRAK_IDENTIFIERS`);
+      if (identifierBinds.length > 0) {
+        await transaction.executeMany(
+          `INSERT INTO TL_ACTIVTRAK_IDENTIFIERS (USER_ID, IDENTIFIER_EMAIL)
+           VALUES (:USER_ID, :IDENTIFIER_EMAIL)`,
+          identifierBinds,
+        );
+      }
+
+      await transaction.execute(`DELETE FROM TL_ACTIVTRAK_USER_STATS`);
+      if (userStatBinds.length > 0) {
+        await transaction.executeMany(
+          `INSERT INTO TL_ACTIVTRAK_USER_STATS (
+             USER_ID, USER_NAME, FIRST_SEEN, LAST_SEEN, ACTIVITY_ROW_COUNT
+           ) VALUES (
+             :USER_ID, :USER_NAME, :FIRST_SEEN, :LAST_SEEN, :ACTIVITY_ROW_COUNT
+           )`,
+          userStatBinds,
+        );
+      }
+    });
   } catch (error) {
     errors.push(`ActivTrak identity sync failed: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -1153,14 +1164,18 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
       .map((row) => row.TBS_EMPLOYEE_NO)
       .filter((employeeNo): employeeNo is number => typeof employeeNo === 'number');
 
-    await execute(
-      `DELETE FROM TL_TBS_TIME_ENTRIES
-       WHERE ENTRY_DATE BETWEEN :sd AND :ed`,
-      { sd: startDate, ed: now },
-    );
-
+    let tbsSourceRows: Array<{
+      EMPLOYEE_NO: number;
+      ENTRY_DATE: Date;
+      WORK_CODE: string | null;
+      WORK_DESCRIPTION: string | null;
+      TIME_HOURS: number | null;
+      ENTRY_TYPE: string | null;
+      REMARK: string | null;
+      DEFECT_CASE: string | null;
+    }> = [];
     if (employeeNos.length > 0) {
-      const tbsSourceRows = await query<{
+      tbsSourceRows = await query<{
         EMPLOYEE_NO: number;
         ENTRY_DATE: Date;
         WORK_CODE: string | null;
@@ -1180,29 +1195,39 @@ export async function runFullSync(daysBack: number = 7): Promise<SyncSummary> {
           ...Object.fromEntries(employeeNos.map((employeeNo, i) => [`tn${i}`, employeeNo])),
         },
       );
+    }
 
-      if (tbsSourceRows.length > 0) {
-        await executeMany(
+    const tbsTimeEntryBinds = tbsSourceRows.map((row) => ({
+      EMPLOYEE_NO: row.EMPLOYEE_NO,
+      ENTRY_DATE: row.ENTRY_DATE,
+      WORK_CODE: normalizeOracleText(row.WORK_CODE),
+      WORK_DESCRIPTION: normalizeOracleText(row.WORK_DESCRIPTION),
+      TIME_HOURS: row.TIME_HOURS || 0,
+      ENTRY_TYPE: normalizeOracleText(row.ENTRY_TYPE),
+      REMARK: normalizeOracleText(row.REMARK),
+      DEFECT_CASE: normalizeOracleText(row.DEFECT_CASE),
+    }));
+
+    await withTransaction(async (transaction) => {
+      await transaction.execute(
+        `DELETE FROM TL_TBS_TIME_ENTRIES
+         WHERE ENTRY_DATE BETWEEN :sd AND :ed`,
+        { sd: startDate, ed: now },
+      );
+
+      if (tbsTimeEntryBinds.length > 0) {
+        await transaction.executeMany(
           `INSERT INTO TL_TBS_TIME_ENTRIES (
              EMPLOYEE_NO, ENTRY_DATE, WORK_CODE, WORK_DESCRIPTION, TIME_HOURS, ENTRY_TYPE, REMARK, DEFECT_CASE
            ) VALUES (
              :EMPLOYEE_NO, :ENTRY_DATE, :WORK_CODE, :WORK_DESCRIPTION, :TIME_HOURS, :ENTRY_TYPE, :REMARK, :DEFECT_CASE
            )`,
-          tbsSourceRows.map((row) => ({
-            EMPLOYEE_NO: row.EMPLOYEE_NO,
-            ENTRY_DATE: row.ENTRY_DATE,
-            WORK_CODE: normalizeOracleText(row.WORK_CODE),
-            WORK_DESCRIPTION: normalizeOracleText(row.WORK_DESCRIPTION),
-            TIME_HOURS: row.TIME_HOURS || 0,
-            ENTRY_TYPE: normalizeOracleText(row.ENTRY_TYPE),
-            REMARK: normalizeOracleText(row.REMARK),
-            DEFECT_CASE: normalizeOracleText(row.DEFECT_CASE),
-          })),
+          tbsTimeEntryBinds,
         );
       }
+    });
 
-      tbsTimeEntriesSynced = tbsSourceRows.length;
-    }
+    tbsTimeEntriesSynced = tbsTimeEntryBinds.length;
   } catch (error) {
     errors.push(`TBS time entries sync failed: ${error instanceof Error ? error.message : String(error)}`);
   }

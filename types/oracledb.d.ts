@@ -18,8 +18,11 @@ declare module 'oracledb' {
     }
 
     interface Connection {
+      callTimeout: number;
       execute<T = unknown>(sql: string, binds?: Record<string, unknown> | unknown[], options?: Record<string, unknown>): Promise<Result<T>>;
       executeMany(sql: string, binds: unknown[], options?: ExecuteManyOptions): Promise<Result<unknown>>;
+      commit(): Promise<void>;
+      rollback(): Promise<void>;
       close(): Promise<void>;
     }
 

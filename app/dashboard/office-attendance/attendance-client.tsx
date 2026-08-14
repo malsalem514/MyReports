@@ -21,6 +21,7 @@ import { OFFICE_ATTENDANCE_VIEW_OPTIONS, type OfficeAttendanceViewKey } from '@/
 import { getOfficeAttendanceDefaultRange, toDateParam } from '@/lib/report-date-defaults';
 import {
   arraysEqual,
+  buildPathWithParams,
   parseEnumParam,
   parseListParam,
   parsePageParam,
@@ -790,26 +791,34 @@ export function AttendanceClient({
     router.replace(`/dashboard/office-attendance?${params.toString()}`, { scroll: false });
   };
 
+  const navigateWithSyncedParams = (mutate: (params: URLSearchParams) => void) => {
+    const params = new URLSearchParams(buildStateParams.toString());
+    mutate(params);
+    params.delete('page');
+    setPage(0);
+    router.replace(buildPathWithParams(pathname, params), { scroll: false });
+  };
+
   const changeLookback = (val: string) => {
     const weeksBack = Number(val);
     if (!LOOKBACK_OPTIONS.includes(weeksBack as (typeof LOOKBACK_OPTIONS)[number])) return;
-    const params = new URLSearchParams(searchParams.toString());
-    params.set('dateMode', 'quick');
-    params.set('lookbackWeeks', String(weeksBack));
-    params.delete('startDate');
-    params.delete('endDate');
-    router.push(`/dashboard/office-attendance?${params.toString()}`, { scroll: false });
+    navigateWithSyncedParams((params) => {
+      params.set('dateMode', 'quick');
+      params.set('lookbackWeeks', String(weeksBack));
+      params.delete('startDate');
+      params.delete('endDate');
+    });
   };
 
   const changeDates = (nextStart: string, nextEnd: string) => {
     const boundedEnd = nextEnd > maxCompletedDate ? maxCompletedDate : nextEnd;
     const boundedStart = nextStart > boundedEnd ? boundedEnd : nextStart;
-    const params = new URLSearchParams(searchParams.toString());
-    params.set('dateMode', 'custom');
-    params.delete('lookbackWeeks');
-    params.set('startDate', boundedStart);
-    params.set('endDate', boundedEnd);
-    router.push(`/dashboard/office-attendance?${params.toString()}`, { scroll: false });
+    navigateWithSyncedParams((params) => {
+      params.set('dateMode', 'custom');
+      params.delete('lookbackWeeks');
+      params.set('startDate', boundedStart);
+      params.set('endDate', boundedEnd);
+    });
   };
 
   const applyCustomDates = () => {
@@ -1664,7 +1673,7 @@ export function AttendanceClient({
             </div>
 
             {dateFilterMode === 'quick' ? (
-              <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,220px),auto,1fr] md:items-end">
+              <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,220px)_auto_1fr] md:items-end">
                 <div>
                   <label className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Quick Range</label>
                   <select
@@ -1687,7 +1696,7 @@ export function AttendanceClient({
                 </button>
               </div>
             ) : (
-              <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,180px),minmax(0,180px),auto,1fr] md:items-end">
+              <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,180px)_minmax(0,180px)_auto_1fr] md:items-end">
                 <label>
                   <span className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-gray-500">Start</span>
                   <input
@@ -3247,7 +3256,7 @@ function AttendanceDetailModal({
         </div>
 
         <div className="flex-1 overflow-y-auto px-6 py-5">
-          <div className="grid gap-6 xl:grid-cols-[1.25fr,0.75fr]">
+          <div className="grid gap-6 xl:grid-cols-[1.25fr_0.75fr]">
             <section className="space-y-4 xl:col-span-2">
               <div className="flex items-center justify-between">
                 <div>

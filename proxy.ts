@@ -3,7 +3,7 @@ import { isDevBypassEnabled } from '@/lib/dev-bypass';
 import { NextResponse } from 'next/server';
 
 export default auth((req) => {
-  if (isDevBypassEnabled('middleware')) {
+  if (isDevBypassEnabled('proxy')) {
     return NextResponse.next();
   }
 

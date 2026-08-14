@@ -26,8 +26,8 @@ merged to `main`. You do not need to manually load any `.tar` file.
 
 Production hardening added on March 11, 2026:
 
-- the standalone container now includes the startup runtime modules needed by `instrumentation.ts`
-- startup imports were corrected so Oracle schema init and the scheduler load correctly in production
+- Node-only startup uses the supported Next.js instrumentation path, so standalone tracing includes Oracle, BigQuery, and scheduler dependencies
+- the container no longer relies on manually copied or separately compiled startup modules
 - the current production container logs should show:
   - `Oracle schema initialized successfully`
   - `Scheduler initialized. Syncs once daily at 6 AM ET.`
@@ -82,13 +82,21 @@ ORACLE_CONNECT_STRING=srv-db-100/suppops
 BIGQUERY_PROJECT_ID=us-activtrak-ac-prod
 BIGQUERY_DATASET=672561
 GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/google-sa.json
+BIGQUERY_QUERY_TIMEOUT_MS=600000
 
 # ── BambooHR ────────────────────────────────────────────────────────────────
 BAMBOOHR_API_KEY=<bamboohr api key>
 BAMBOOHR_SUBDOMAIN=jestais
 
+# ── Reliability limits ──────────────────────────────────────────────────────
+EXTERNAL_HTTP_TIMEOUT_MS=30000
+ORACLE_CALL_TIMEOUT_MS=120000
+ORACLE_QUEUE_TIMEOUT_MS=30000
+DATA_FRESHNESS_MAX_BUSINESS_DAYS=2
+
 # ── Scheduler ───────────────────────────────────────────────────────────────
 ENABLE_SCHEDULER=true          # Syncs once daily at 6 AM Toronto time
+SYNC_DAYS_BACK=112             # Reloads every supported reporting lookback
 
 # ── DANGER — never set this in production ───────────────────────────────────
 # DEV_BYPASS_AUTH=true         # Disables ALL login checks — setting this is a no-op in production
@@ -105,6 +113,10 @@ export ORACLE_DB_HOST=srv-db-100
 export ORACLE_DB_IP=172.16.25.63          # IP address of Oracle server
 export GOOGLE_SA_JSON_PATH=/secure/path/to/google-sa.json  # REQUIRED — no default
 ```
+
+The Google file must contain `"type": "service_account"`. Do not use a credential
+created by `gcloud auth application-default login`; that produces an `authorized_user`
+refresh token and production intentionally rejects it.
 
 ---
 
@@ -138,23 +150,25 @@ curl http://localhost:3000/api/health?deep=1
 
 **Basic response** (always works if container started):
 ```json
-{"status":"ok","service":"myreports","timestamp":"2026-02-26T10:00:00.000Z"}
+{"status":"ok","service":"myreports","timestamp":"2026-02-26T10:00:00.000Z","checks":{"syncFreshness":true,"dataFreshness":true}}
 ```
 
 **Deep response when all integrations are healthy:**
 ```json
-{"status":"ok","checks":{"oracle":true,"bigQuery":true,"bambooHR":true}}
+{"status":"ok","checks":{"oracle":true,"oracleDataFlow":true,"syncFreshness":true,"dataFreshness":true}}
 ```
 
 **Deep response when something is failing:**
 ```json
-{"status":"degraded","checks":{"oracle":false,"bigQuery":true,"bambooHR":true},
+{"status":"degraded","checks":{"oracle":false,"oracleDataFlow":false,"syncFreshness":false,"dataFreshness":false},
  "details":{"oracle":{"ok":false,"error":"ORA-12541: no listener"}}}
 ```
 
 > **Note:** `/api/health?deep=1` requires a valid login session. To use it for monitoring,
 > log in via the browser first, then use browser devtools to copy the session cookie.
-> For automated monitoring, use the basic `/api/health` endpoint instead.
+> For automated monitoring, use the basic `/api/health` endpoint instead. It returns HTTP
+> `503` if the latest sync failed, the last successful sync is stale, or critical report
+> data exceeds the allowed business-day lag.
 
 ---
 
@@ -190,9 +204,7 @@ The container runs a built-in data sync scheduler:
 
 | Time (Toronto) | Job |
 |---|---|
-| 6:00 AM | Full 7-day sync (employees, attendance, time-off) |
-| 12:00 PM | 1-day refresh |
-| 3:00 PM | 1-day refresh |
+| 6:00 AM | Full sync using `SYNC_DAYS_BACK` (default: 112 days) |
 
 To confirm the scheduler started after deployment:
 ```bash
@@ -200,7 +212,9 @@ docker logs myreports | grep -i scheduler
 ```
 Expected: `Scheduler initialized. Syncs once daily at 6 AM ET.`
 
-If `ENABLE_SCHEDULER` is not set to `true`, no syncs happen and data must be loaded manually.
+Production scheduling is enabled by default for backward compatibility. Set
+`ENABLE_SCHEDULER=false` to disable it explicitly. Development scheduling is disabled unless
+`ENABLE_SCHEDULER=true`.
 
 ---
 
@@ -210,6 +224,8 @@ Once the container is running, all future code updates are fully automatic:
 
 ```
 Developer pushes to main
+       ↓
+GitHub Actions runs tests, native TypeScript checks, and a production build
        ↓
 GitHub Actions builds image (~3-5 min)
        ↓
@@ -257,6 +273,45 @@ That script starts Docker Desktop, waits for the Linux engine, and brings `myrep
 
 ---
 
+## BigQuery Credential Recovery and Backfill
+
+Use this procedure when logs contain `invalid_grant`, `Account has been deleted`, or the
+public health endpoint reports stale data:
+
+1. In Google Cloud IAM, confirm the dedicated MyReports service account is enabled. It needs
+   permission to run BigQuery jobs in the configured project and read the ActivTrak dataset.
+2. Create a new JSON key for that service account and store it in the approved secrets
+   location. Do not generate an OAuth user credential.
+3. Validate the new file without printing secret material:
+
+   ```bash
+   node -e 'const c=require(process.argv[1]); if(c.type!=="service_account"||!c.client_email) process.exit(1); console.log("valid service account:", c.client_email)' /secure/path/to/new-google-sa.json
+   ```
+
+4. Replace the host file referenced by `GOOGLE_SA_JSON_PATH`, restrict its permissions, and
+   recreate the app container so the read-only mount uses the new key:
+
+   ```bash
+   chmod 600 /secure/path/to/google-sa.json
+   docker compose -f docker-compose.production.yml up -d --force-recreate myreports
+   ```
+
+5. Confirm the scheduler accepts the credential, then trigger a 112-day catch-up sync. Set
+   `SYNC_DAYS_BACK=112` and `RUN_SYNC_ON_START=true` in `myreports.env`, recreate the app,
+   and follow the logs:
+
+   ```bash
+   docker compose -f docker-compose.production.yml up -d --force-recreate myreports
+   docker logs myreports --follow --tail=100
+   ```
+
+6. Once the log records a successful startup sync, immediately set `RUN_SYNC_ON_START=false`
+   and recreate the app again so future restarts do not repeat the catch-up. Verify
+   `curl http://localhost:3000/api/health` returns HTTP `200` with both freshness checks set
+   to `true`. Revoke the superseded key in Google Cloud after the replacement is verified.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -268,8 +323,8 @@ That script starts Docker Desktop, waits for the Linux engine, and brings `myrep
 | Container exits immediately | Missing or invalid env var | `docker logs myreports` to see the error |
 | Scheduler not syncing | `ENABLE_SCHEDULER` not `true` | Add to `myreports.env` and restart |
 | `oracle: false` in health check | Oracle host not reachable | Verify `ORACLE_DB_IP`; check `extra_hosts` in compose |
-| `bigQuery: false` in health check | Service account file missing or invalid | Verify `GOOGLE_SA_JSON_PATH` and file contents |
-| `bambooHR: false` in health check | Invalid or expired API key | Verify `BAMBOOHR_API_KEY` in `myreports.env` |
+| `dataFreshness: false` or `invalid_grant` in logs | BigQuery service account missing, disabled, or deleted | Rotate the service-account JSON using the procedure below, restart, and backfill |
+| `oracleDataFlow: false` in deep health check | Oracle reporting tables are empty or TBS mapping/data is unavailable | Review deep health metrics and the latest sync log |
 | Windows VM is up but site stays down after reboot | Docker Desktop engine not yet ready | Check `C:\myreports\logs\ensure-docker-and-app.log` and wait for `Bootstrap complete` |
 
 ---
@@ -278,6 +333,7 @@ That script starts Docker Desktop, waits for the Linux engine, and brings `myrep
 
 - `myreports.env` contains credentials — store it securely (`chmod 600 myreports.env`)
 - The Google service account JSON is mounted read-only (`:ro`) — do not change this
+- The Google credential must be a dedicated service account with the least BigQuery access required; never use an employee OAuth refresh token
 - The container runs as a non-root user (uid 1001)
 - `DEV_BYPASS_AUTH=true` is a development flag — it is automatically disabled in production even if set
 
@@ -293,6 +349,7 @@ That script starts Docker Desktop, waits for the Linux engine, and brings `myrep
 - [ ] Azure AD redirect URI added: `https://your-domain.com/api/auth/callback/microsoft-entra-id`
 - [ ] Oracle reachable from the server (`ping 172.16.25.63` or `ping srv-db-100`)
 - [ ] Google SA JSON file exists at path in `GOOGLE_SA_JSON_PATH`
+- [ ] Google credential JSON has `"type": "service_account"` and the account is enabled
 
 **Verification:**
 - [ ] `docker ps` shows both `myreports` and `watchtower` running

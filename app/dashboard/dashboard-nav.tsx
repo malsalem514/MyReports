@@ -156,7 +156,7 @@ export function DashboardNav({ navItems, children }: { navItems: DashboardNavIte
       ) : null}
 
       <div className="mx-auto max-w-[1600px] px-4 py-6 lg:px-6">
-        <div className="grid gap-6 lg:grid-cols-[260px,minmax(0,1fr)]">
+        <div className="grid gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
           <aside className="hidden lg:sticky lg:top-24 lg:block lg:h-[calc(100vh-7rem)] lg:self-start">
             <DashboardNavMenu
               navItems={navItems}

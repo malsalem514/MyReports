@@ -1,5 +1,6 @@
 import oracledb from 'oracledb';
 import { EMAIL_ALIAS_TO_CANONICAL } from './email';
+import { getIntegrationTimeouts } from './integration-config';
 
 // ============================================================================
 // Configuration
@@ -26,6 +27,7 @@ function getOracleConfig(): Record<string, unknown> {
     poolMin: 2,
     poolMax: 10,
     poolIncrement: 1,
+    queueTimeout: getIntegrationTimeouts().oracleQueueMs,
   };
 }
 
@@ -62,7 +64,9 @@ export async function getPool(): Promise<oracledb.Pool> {
 
 export async function getConnection(): Promise<oracledb.Connection> {
   const pool = await getPool();
-  return pool.getConnection();
+  const connection = await pool.getConnection();
+  connection.callTimeout = getIntegrationTimeouts().oracleCallMs;
+  return connection;
 }
 
 // ============================================================================
@@ -109,6 +113,73 @@ export async function executeMany(
       ...options,
     });
     return result;
+  } finally {
+    await conn.close();
+  }
+}
+
+export interface OracleTransaction {
+  query<T = Record<string, unknown>>(sql: string, params?: Record<string, unknown>): Promise<T[]>;
+  execute(sql: string, params?: Record<string, unknown>): Promise<oracledb.Result<unknown>>;
+  executeMany(
+    sql: string,
+    binds: Record<string, unknown>[],
+    options?: oracledb.ExecuteManyOptions,
+  ): Promise<oracledb.Result<unknown>>;
+}
+
+export interface TransactionControl {
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
+}
+
+export async function runOracleTransaction<T>(
+  connection: TransactionControl,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    const result = await operation();
+    await connection.commit();
+    return result;
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch (rollbackError) {
+      console.error('[Oracle] Transaction rollback failed:', rollbackError);
+    }
+    throw error;
+  }
+}
+
+export async function withTransaction<T>(
+  operation: (transaction: OracleTransaction) => Promise<T>,
+): Promise<T> {
+  const conn = await getConnection();
+  const transaction: OracleTransaction = {
+    async query<T = Record<string, unknown>>(sql: string, params: Record<string, unknown> = {}): Promise<T[]> {
+      const result = await conn.execute<T>(sql, params, {
+        outFormat: oracledb.OUT_FORMAT_OBJECT,
+        autoCommit: false,
+      });
+      return (result.rows || []) as T[];
+    },
+    execute(sql: string, params: Record<string, unknown> = {}) {
+      return conn.execute(sql, params, { autoCommit: false });
+    },
+    executeMany(
+      sql: string,
+      binds: Record<string, unknown>[],
+      options: oracledb.ExecuteManyOptions = {},
+    ) {
+      return conn.executeMany(sql, binds, {
+        ...options,
+        autoCommit: false,
+      });
+    },
+  };
+
+  try {
+    return await runOracleTransaction(conn, () => operation(transaction));
   } finally {
     await conn.close();
   }
@@ -1006,6 +1077,7 @@ export async function initializeSchema(): Promise<void> {
       'bamboo-not-in-activtrak',
       'activtrak-identities',
       'duo-activtrak-reconciliation',
+      'raw-data',
     ];
     const roleDefaults = [
       { roleName: 'root-admin', visibleTabs: allTabs },
@@ -1035,9 +1107,9 @@ export async function initializeSchema(): Promise<void> {
     `);
     await conn.execute(`
       UPDATE TL_TAB_ROLES
-         SET VISIBLE = 0
+       SET VISIBLE = 0
        WHERE ROLE_NAME NOT IN ('root-admin', 'hr-admin')
-         AND TAB_KEY IN ('bamboo-not-in-activtrak', 'activtrak-identities', 'duo-activtrak-reconciliation')
+         AND TAB_KEY IN ('bamboo-not-in-activtrak', 'activtrak-identities', 'duo-activtrak-reconciliation', 'raw-data')
     `);
 
     const roleList = `'root-admin', 'hr-admin', 'director', 'manager', 'employee'`;
