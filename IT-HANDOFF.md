@@ -26,8 +26,8 @@ merged to `main`. You do not need to manually load any `.tar` file.
 
 Production hardening added on March 11, 2026:
 
-- the standalone container now includes the startup runtime modules needed by `instrumentation.ts`
-- startup imports were corrected so Oracle schema init and the scheduler load correctly in production
+- Node-only startup uses the supported Next.js instrumentation path, so standalone tracing includes Oracle, BigQuery, and scheduler dependencies
+- the container no longer relies on manually copied or separately compiled startup modules
 - the current production container logs should show:
   - `Oracle schema initialized successfully`
   - `Scheduler initialized. Syncs once daily at 6 AM ET.`
